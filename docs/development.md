@@ -1,6 +1,6 @@
 # Notryx 개발 환경
 
-이 문서는 Ubuntu 24.04 x86_64에서 Linux와 Android ARM64 개발에 사용하는 도구와 확인 명령을 정리한다. 현재 `0.1.0`은 M0 시험 앱이며 domain, protocol, client-store와 Tauri 편집기로 구성된다. 서버와 동기화는 아직 구현하지 않았다.
+이 문서는 Ubuntu 24.04 x86_64에서 Linux와 Android ARM64 개발에 사용하는 도구와 확인 명령을 정리한다. 현재 `0.1.0`은 M0 시험 앱이며 domain, protocol, client-store와 Tauri 편집기로 구성된다. 서버 저장 코어의 조건부 본문 저장과 재시작 복구도 검사할 수 있다. 실행 가능한 HTTP 서버와 동기화는 아직 없다.
 
 ## 버전과 설치 위치
 
@@ -115,3 +115,18 @@ WebKitWebDriver를 별도 위치에 추출했다면 `--driver /path/to/WebKitWeb
 전체 검사는 TS build/lint/unit, Rust format/clippy/unit/integration, 생성 계약 drift, 순수 계층 의존성과 npm 보안 정보를 확인한다. 저장 시험은 독립 임시 DB를 만들고 실제 프로세스 강제 종료도 수행한다. WebDriver 역시 임시 client store를 사용하며 결과와 화면을 `.artifacts/m0-webview`에 남긴다. 성능은 검사 프로세스 종료 코드와 구분해 측정 전에 정한 기준에 따라 판정한다.
 
 `.github/workflows/check.yml`은 같은 Linux 검사를 CI에 연결한다. 원격 GitHub Actions 실행은 소스를 올린 뒤 별도로 확인해야 한다. 프로토콜 파일은 `cargo run -p notryx-protocol --bin generate-contracts`로 생성하고 직접 수정하지 않는다.
+
+
+## 서버 저장 코어 검사
+
+Linux에서 실제 임시 파일과 SQLite를 사용한다. 별도 서버나 운영 데이터는 필요하지 않다.
+
+```bash
+cargo test --locked -p notryx-server -p notryx-server-storage
+```
+
+`apps/server`는 내부 저장 라이브러리이며 HTTP listener, 인증 또는 배포 명령을 제공하지 않는다. 초기화는 비어 있는 두 디렉터리에서만 허용한다. 명시적으로 등록한 루트 바로 아래의 일반 파일을 대상으로 content revision, 요청 순번과 digest를 검사한다. 저장 전후 상태와 다른 파일이 발견되면 자료를 보존하고 쓰기를 막으며, 관리자 해결 기능은 아직 없다. 외부 변경 자동 수용, 폴더와 CRUD API, receipt ACK 및 GC도 후속 범위다.
+
+파일시스템 어댑터는 Linux `openat2`를 요구하며 지원하지 않는 환경에서는 시작을 거절한다. state 디렉터리는 `0700`으로 관리한다. 다른 프로세스의 동시 파일 변경을 완전히 제어할 수는 없다. 저장 코어의 파일 I/O는 동기 방식이므로 HTTP 서버를 붙일 때 전용 실행 경계에 배치해야 한다.
+
+테스트는 admission과 최종 commit의 SQL 실패, 파일 및 디렉터리 영속화 오류 주입, 별도 프로세스의 SIGKILL과 재시작을 포함한다. 자식 프로세스용 ignored 테스트는 부모 테스트가 직접 실행한다. 이 결과는 실제 전원 장애 시험이나 전체 서버의 수용 시험을 대신하지 않는다. 실패 주입 hook은 테스트용이며 운영 환경변수로 활성화하지 않는다.

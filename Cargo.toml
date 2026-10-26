@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/domain", "crates/protocol", "crates/client-store", "apps/client/src-tauri"]
-default-members = ["crates/domain", "crates/protocol", "crates/client-store"]
+members = ["crates/domain", "crates/protocol", "crates/client-store", "crates/server-storage", "apps/server", "apps/client/src-tauri"]
+default-members = ["crates/domain", "crates/protocol", "crates/client-store", "crates/server-storage", "apps/server"]
 
 [workspace.package]
 version = "0.1.0"

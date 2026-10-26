@@ -1,6 +1,6 @@
 # Notryx
 
-파일 기반 셀프호스팅 Markdown 작업 공간을 개발하고 있다. 현재 버전 `0.1.0`은 M0 위험 검증용이며, 합성 문서의 로컬 편집과 초안 저장만 제공한다. 서버 연결, 동기화와 운영 데이터 가져오기는 아직 없다.
+파일 기반 셀프호스팅 Markdown 작업 공간을 개발하고 있다. 현재 버전 `0.1.0`은 M0 위험 검증용이며, 합성 문서의 로컬 편집과 초안 저장만 제공한다. 서버 저장 코어에는 조건부 본문 저장과 재시작 복구를 구현했다. 서버 연결, 동기화와 운영 데이터 가져오기는 아직 없다.
 
 - 설치와 실행: [개발 안내](docs/development.md)
 - 실기기 시험: [M0 수동 검증](docs/m0-manual.md)
@@ -23,6 +23,7 @@ npm run tauri -- dev
 
 ```bash
 bash scripts/check.sh
+cargo test --locked -p notryx-server -p notryx-server-storage
 npm run tauri -- build --debug --no-bundle
 npm run tauri -- android build --debug --target aarch64 --apk --ci
 ```

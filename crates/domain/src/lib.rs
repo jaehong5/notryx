@@ -3,6 +3,8 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod mutation;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidValue;
 

@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
 uuid = "=1.29.0"
+unicode-normalization = "=0.1.26"
+caseless = "=0.2.2"
 
 [dev-dependencies]
 serde_json = "=1.0.154"

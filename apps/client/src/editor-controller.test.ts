@@ -205,3 +205,116 @@ test("composition prevents document switches and exit without forcing the editor
   views[0].composing = false;
   await controller.dispose();
 });
+
+test("close requests during a delayed document switch are fulfilled once after the switch", async () => {
+  const { controller, ports, views, states } = fixture();
+  await controller.open("a");
+  views[0].options.change("last input in a");
+  const response = deferred<ReturnType<typeof opened>>();
+  const started = deferred<void>();
+  vi.mocked(ports.openDocument).mockImplementationOnce(() => {
+    started.resolve();
+    return response.promise;
+  });
+  const switching = controller.open("b");
+  await started.promise;
+  const firstClose = controller.close();
+  const repeatedClose = controller.close();
+  expect(ports.exit).not.toHaveBeenCalled();
+  response.resolve(opened("b"));
+  await Promise.all([switching, firstClose, repeatedClose]);
+  expect(ports.saveDocument).toHaveBeenCalledExactlyOnceWith({ document_id: "a", edit_session_id: "session-a", generation: "1", bytes_base64: btoa("last input in a") });
+  expect(ports.closeDocument).toHaveBeenCalledExactlyOnceWith({ document_id: "a", edit_session_id: "session-a" });
+  expect(states.at(-1)?.selected).toBe("b");
+  expect(ports.exit).toHaveBeenCalledOnce();
+  expect(views[1].editable).toBe(false);
+  await controller.dispose();
+});
+
+test("a queued close keeps dirty input and its session when switching cannot save", async () => {
+  const { controller, ports, views, states } = fixture();
+  await controller.open("a");
+  views[0].options.change("unsaved input");
+  vi.mocked(ports.saveDocument).mockRejectedValue(new Error("disk unavailable"));
+  await Promise.all([controller.open("b"), controller.close()]);
+  expect(ports.exit).not.toHaveBeenCalled();
+  expect(ports.openDocument).toHaveBeenCalledTimes(1);
+  expect(ports.closeDocument).not.toHaveBeenCalled();
+  expect(states.at(-1)?.selected).toBe("a");
+  expect(states.at(-1)?.error).toContain("disk unavailable");
+  expect(views[0].editable).toBe(true);
+
+  views[0].options.change("input after failure");
+  vi.mocked(ports.saveDocument).mockImplementation(async (request) => ({ edit_session_id: request.edit_session_id, generation: request.generation }));
+  await controller.close();
+  expect(ports.saveDocument).toHaveBeenLastCalledWith({ document_id: "a", edit_session_id: "session-a", generation: "2", bytes_base64: btoa("input after failure") });
+  expect(ports.exit).toHaveBeenCalledOnce();
+  await controller.dispose();
+});
+
+test("a queued close still exits after the new document fails to open", async () => {
+  const { controller, ports, views } = fixture();
+  await controller.open("a");
+  views[0].options.change("saved before the failed switch");
+  const response = deferred<ReturnType<typeof opened>>();
+  const started = deferred<void>();
+  vi.mocked(ports.openDocument).mockImplementationOnce(() => {
+    started.resolve();
+    return response.promise;
+  });
+  const switching = controller.open("b");
+  await started.promise;
+  const closing = controller.close();
+  response.reject(new Error("cannot open b"));
+  await Promise.all([switching, closing]);
+  expect(ports.closeDocument).not.toHaveBeenCalled();
+  expect(ports.exit).toHaveBeenCalledOnce();
+  expect(views[0].editable).toBe(false);
+  await controller.dispose();
+});
+
+test("disposal cancels a queued close before a delayed open response arrives", async () => {
+  const { controller, ports, states } = fixture();
+  await controller.open("a");
+  const response = deferred<ReturnType<typeof opened>>();
+  const started = deferred<void>();
+  vi.mocked(ports.openDocument).mockImplementationOnce(() => {
+    started.resolve();
+    return response.promise;
+  });
+  const switching = controller.open("b");
+  await started.promise;
+  const closing = controller.close();
+  await controller.dispose();
+  const count = states.length;
+  response.resolve(opened("b"));
+  await Promise.all([switching, closing]);
+  expect(ports.exit).not.toHaveBeenCalled();
+  expect(ports.createEditor).toHaveBeenCalledTimes(1);
+  expect(states).toHaveLength(count);
+  expect(ports.closeDocument).toHaveBeenNthCalledWith(1, { document_id: "a", edit_session_id: "session-a" });
+  expect(ports.closeDocument).toHaveBeenNthCalledWith(2, { document_id: "b", edit_session_id: "session-b" });
+});
+
+test("repeated requests during a failed exit do not close a later document switch", async () => {
+  const { controller, ports, views } = fixture();
+  await controller.open("a");
+  const response = deferred<void>();
+  const started = deferred<void>();
+  vi.mocked(ports.exit).mockImplementationOnce(() => {
+    started.resolve();
+    return response.promise;
+  });
+  const closing = controller.close();
+  await started.promise;
+  const repeatedClose = controller.close();
+  response.reject(new Error("exit failed"));
+  await Promise.all([closing, repeatedClose]);
+  expect(views[0].editable).toBe(true);
+  await controller.open("b");
+  expect(ports.exit).toHaveBeenCalledTimes(1);
+  expect(views[1].editable).toBe(true);
+  await controller.close();
+  expect(ports.exit).toHaveBeenCalledTimes(2);
+  await controller.dispose();
+});

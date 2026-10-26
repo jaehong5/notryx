@@ -44,7 +44,8 @@ type ActiveDocument = {
 export class EditorController {
   private current?: ActiveDocument;
   private timer?: ReturnType<typeof setTimeout>;
-  private busy = false;
+  private busy?: "opening" | "closing";
+  private closeRequested = false;
   private disposed = false;
   private state = initialEditorState;
 
@@ -56,7 +57,7 @@ export class EditorController {
       this.publish({ error: "한글 조합을 마친 뒤 문서를 전환해 주세요." });
       return;
     }
-    this.busy = true;
+    this.busy = "opening";
     this.current?.view.setEditable(false);
     const previous = this.current;
     let response: M0OpenedDocument | undefined;
@@ -114,8 +115,12 @@ export class EditorController {
       }
       this.publish({ error });
     } finally {
-      this.busy = false;
+      this.busy = undefined;
       this.restoreEditing();
+      if (this.closeRequested) {
+        this.closeRequested = false;
+        await this.close();
+      }
     }
   }
 
@@ -136,12 +141,16 @@ export class EditorController {
   }
 
   async close(): Promise<void> {
-    if (this.disposed || this.busy) return;
+    if (this.disposed) return;
+    if (this.busy) {
+      if (this.busy === "opening") this.closeRequested = true;
+      return;
+    }
     if (this.current?.view.isComposing()) {
       this.publish({ error: "한글 조합을 마친 뒤 창을 닫아 주세요." });
       return;
     }
-    this.busy = true;
+    this.busy = "closing";
     this.current?.view.setEditable(false);
     let exiting = false;
     try {
@@ -155,7 +164,7 @@ export class EditorController {
       this.publish({ error: String(cause) });
     } finally {
       if (!exiting) {
-        this.busy = false;
+        this.busy = undefined;
         this.restoreEditing();
       }
     }
@@ -164,6 +173,7 @@ export class EditorController {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.closeRequested = false;
     this.clearTimer();
     const document = this.current;
     this.current = undefined;

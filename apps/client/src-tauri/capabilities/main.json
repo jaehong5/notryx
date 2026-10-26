@@ -1,0 +1,6 @@
+{
+  "identifier": "main",
+  "description": "Minimal bundled editor commands",
+  "windows": ["main"],
+  "permissions": ["allow-m0-open", "allow-m0-save", "allow-m0-close", "allow-m0-exit", "allow-m0-open-isolation", "core:event:allow-listen", "core:event:allow-unlisten"]
+}

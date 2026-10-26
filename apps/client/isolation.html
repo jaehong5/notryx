@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; connect-src ipc: http://ipc.localhost; style-src 'self'; form-action 'none'; base-uri 'none'" />
+    <title>Notryx 격리 시험</title>
+  </head>
+  <body><pre id="result">시험 중</pre>
+  <!-- An opaque sandbox cannot load bundled modules; keep this fixed probe under the app CSP. -->
+  <script>
+void (async () => {
+  let parentBlocked = window.parent === window;
+  if (window.parent !== window) {
+    try { void window.parent.document.body; } catch { parentBlocked = true; }
+  }
+  let ipcBlocked = false;
+  let ipcResult = "unexpected-success";
+  const bridgePresent = "__TAURI_INTERNALS__" in window;
+  if (bridgePresent) {
+    try {
+      await Promise.race([
+        window.__TAURI_INTERNALS__.invoke("m0_open", { request: { document_id: "unknown-fixture-probe" } }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("probe-timeout")), 2000)),
+      ]);
+    } catch (cause) {
+      ipcResult = String(cause);
+      ipcBlocked = /not allowed|denied|invalid_caller/i.test(ipcResult);
+    }
+  } else {
+    ipcResult = "bridge-unavailable";
+  }
+  let networkBlocked = false;
+  document.addEventListener("securitypolicyviolation", (event) => {
+    if (event.effectiveDirective === "connect-src" && event.blockedURI.startsWith("https://example.invalid")) networkBlocked = true;
+  });
+  try { await fetch("https://example.invalid/notryx-m0-probe"); } catch { /* DNS failure alone is not a CSP result. */ }
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const result = { parentBlocked, bridgePresent, ipcBlocked, ipcResult, networkBlocked };
+  document.getElementById("result").textContent = JSON.stringify(result);
+})();
+</script></body>
+</html>

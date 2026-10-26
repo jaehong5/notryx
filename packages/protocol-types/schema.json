@@ -1,0 +1,131 @@
+{
+  "$defs": {
+    "HeadHint": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "head_seq": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "workspace_epoch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_epoch",
+        "head_seq"
+      ],
+      "title": "HeadHint",
+      "type": "object"
+    },
+    "M0CloseRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "document_id": {
+          "type": "string"
+        },
+        "edit_session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "document_id",
+        "edit_session_id"
+      ],
+      "title": "M0CloseRequest",
+      "type": "object"
+    },
+    "M0OpenRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "document_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "document_id"
+      ],
+      "title": "M0OpenRequest",
+      "type": "object"
+    },
+    "M0OpenedDocument": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "bytes_base64": {
+          "type": "string"
+        },
+        "document_id": {
+          "type": "string"
+        },
+        "edit_session_id": {
+          "type": "string"
+        },
+        "generation": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "document_id",
+        "edit_session_id",
+        "generation",
+        "bytes_base64"
+      ],
+      "title": "M0OpenedDocument",
+      "type": "object"
+    },
+    "M0SaveRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "bytes_base64": {
+          "type": "string"
+        },
+        "document_id": {
+          "type": "string"
+        },
+        "edit_session_id": {
+          "type": "string"
+        },
+        "generation": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "document_id",
+        "edit_session_id",
+        "generation",
+        "bytes_base64"
+      ],
+      "title": "M0SaveRequest",
+      "type": "object"
+    },
+    "M0SavedCheckpoint": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "edit_session_id": {
+          "type": "string"
+        },
+        "generation": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "edit_session_id",
+        "generation"
+      ],
+      "title": "M0SavedCheckpoint",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "구조와 문자열 형식의 스키마다. Rust 역직렬화는 UUID version과 RFC variant 및 u64 범위를 추가로 검사한다. M0 generation의 SQLite 저장 가능 범위와 문서 크기, session 및 원문 검증은 native runtime과 store가 담당한다. 이 스키마 단독으로 모든 계약을 검증할 수 없다.",
+  "title": "Notryx M0 contract definitions"
+}

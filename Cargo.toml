@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["crates/domain", "crates/protocol", "crates/client-store", "apps/client/src-tauri"]
+default-members = ["crates/domain", "crates/protocol", "crates/client-store"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+publish = false
+
+[profile.dev]
+debug = 1
+
+[profile.test]
+debug = 1

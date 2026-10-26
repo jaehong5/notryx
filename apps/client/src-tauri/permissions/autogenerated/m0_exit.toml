@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-m0-exit"
+description = "Enables the m0_exit command without any pre-configured scope."
+commands.allow = ["m0_exit"]
+
+[[permission]]
+identifier = "deny-m0-exit"
+description = "Denies the m0_exit command without any pre-configured scope."
+commands.deny = ["m0_exit"]

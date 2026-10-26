@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-m0-close"
+description = "Enables the m0_close command without any pre-configured scope."
+commands.allow = ["m0_close"]
+
+[[permission]]
+identifier = "deny-m0-close"
+description = "Denies the m0_close command without any pre-configured scope."
+commands.deny = ["m0_close"]

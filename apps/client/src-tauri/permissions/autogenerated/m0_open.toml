@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-m0-open"
+description = "Enables the m0_open command without any pre-configured scope."
+commands.allow = ["m0_open"]
+
+[[permission]]
+identifier = "deny-m0-open"
+description = "Denies the m0_open command without any pre-configured scope."
+commands.deny = ["m0_open"]

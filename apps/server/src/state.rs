@@ -8,6 +8,9 @@ use sqlx::{
 use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
 use uuid::Uuid;
 
+pub(crate) mod auth;
+mod read;
+
 const APPLICATION_ID: i64 = 0x4e545253;
 
 pub(crate) fn db_error(_: impl std::fmt::Debug) -> Error {
@@ -88,6 +91,7 @@ impl State {
             .execute(&mut *tx)
             .await
             .map_err(db_error)?;
+        auth::initialize(&mut tx, workspace_id).await?;
         tx.commit().await.map_err(db_error)?;
         Ok(Self {
             connection,
@@ -111,6 +115,23 @@ impl State {
     }
 
     pub async fn open(path: &Path, expected_id: WorkspaceId) -> Result<Self, Error> {
+        Self::open_version(path, expected_id, false)
+            .await
+            .map(|(state, _)| state)
+    }
+
+    pub async fn open_for_migration(
+        path: &Path,
+        expected_id: WorkspaceId,
+    ) -> Result<(Self, i64), Error> {
+        Self::open_version(path, expected_id, true).await
+    }
+
+    async fn open_version(
+        path: &Path,
+        expected_id: WorkspaceId,
+        allow_legacy: bool,
+    ) -> Result<(Self, i64), Error> {
         let mut probe = SqliteConnection::connect_with(
             &SqliteConnectOptions::new().filename(path).read_only(true),
         )
@@ -128,7 +149,7 @@ impl State {
             .fetch_one(&mut probe)
             .await
             .map_err(db_error)?;
-        if app_id != APPLICATION_ID || version != 1 || check != "ok" {
+        if app_id != APPLICATION_ID || !matches!(version, 1 | 2) || check != "ok" {
             return Err(Error::InvalidFormat);
         }
         let row =
@@ -156,21 +177,40 @@ impl State {
             return Err(Error::InvalidFormat);
         }
         validate_layout(&mut probe, root_id).await?;
+        if version == 2 {
+            auth::validate(&mut probe, workspace_id).await?;
+        } else if !allow_legacy {
+            return Err(Error::MigrationRequired);
+        }
         probe.close().await.map_err(db_error)?;
-        Ok(Self {
-            connection: Self::connect(path).await?,
-            workspace_id,
-            epoch,
-            root_id,
-        })
+        Ok((
+            Self {
+                connection: Self::connect(path).await?,
+                workspace_id,
+                epoch,
+                root_id,
+            },
+            version,
+        ))
     }
 
-    pub async fn next_change_seq(&mut self) -> Result<ChangeSeq, Error> {
+    pub async fn migrate_auth(&mut self) -> Result<(), Error> {
+        let mut tx = self.connection.begin().await.map_err(db_error)?;
+        auth::initialize(&mut tx, self.workspace_id).await?;
+        auth::validate(&mut tx, self.workspace_id).await?;
+        tx.commit().await.map_err(db_error)
+    }
+
+    pub async fn head_seq(&mut self) -> Result<ChangeSeq, Error> {
         let head: String = sqlx::query_scalar("SELECT head_seq FROM workspaces WHERE singleton=1")
             .fetch_one(&mut self.connection)
             .await
             .map_err(db_error)?;
-        let head: u64 = parse(&head)?;
+        Ok(ChangeSeq::new(parse(&head)?))
+    }
+
+    pub async fn next_change_seq(&mut self) -> Result<ChangeSeq, Error> {
+        let head = self.head_seq().await?.get();
         Ok(ChangeSeq::new(
             head.checked_add(1).ok_or(Error::InvalidFormat)?,
         ))

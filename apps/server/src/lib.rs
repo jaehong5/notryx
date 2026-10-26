@@ -1,5 +1,11 @@
-//! Internal server storage core. No network or authentication adapter is exposed.
+//! Server workspace core and runtime adapters.
 
+pub mod admin;
+pub mod auth;
+pub mod config;
+pub mod http;
+mod read;
+pub mod runtime;
 mod state;
 
 use notryx_domain::{
@@ -13,6 +19,7 @@ use uuid::Uuid;
 pub enum Error {
     Storage,
     InvalidFormat,
+    MigrationRequired,
     InvalidRequest,
     DigestMismatch,
     WorkspaceMismatch,
@@ -135,6 +142,39 @@ pub(crate) enum Phase {
 }
 
 impl Workspace {
+    pub async fn migrate(notes: &Path, state_dir: &Path) -> Result<(), Error> {
+        let files = FileStore::open(notes, state_dir)?;
+        let (state, version) =
+            State::open_for_migration(&files.state_db_path(), files.workspace_id()).await?;
+        let mut workspace = Self {
+            state,
+            files,
+            ready: false,
+            #[cfg(test)]
+            hook: None,
+        };
+        workspace.validate_documents().await?;
+        let pending = workspace.state.pending().await?;
+        if pending.len() > 1 {
+            return Err(Error::InvalidFormat);
+        }
+        for intent in pending {
+            workspace.validate_intent_metadata(&intent).await?;
+            for document in [&intent.before, &intent.proposed] {
+                if workspace.files.read_object(&document.content_hash)?.len() as u64
+                    != document.size
+                {
+                    return Err(Error::InvalidFormat);
+                }
+            }
+        }
+        if version == 1 {
+            workspace.files.sync_state_dir()?;
+            workspace.state.migrate_auth().await?;
+        }
+        workspace.close().await
+    }
+
     pub async fn initialize(notes: &Path, state_dir: &Path) -> Result<Self, Error> {
         let workspace_id = Uuid::new_v4()
             .to_string()
@@ -161,22 +201,28 @@ impl Workspace {
     async fn load(notes: &Path, state_dir: &Path) -> Result<Self, Error> {
         let files = FileStore::open(notes, state_dir)?;
         files.validate_state_database()?;
-        let mut state = State::open(&files.state_db_path(), files.workspace_id()).await?;
-        for document in state.documents().await? {
-            validate_name(&document.name).map_err(|_| Error::InvalidFormat)?;
-            if document.parent_id != state.root_id
-                || files.read_object(&document.content_hash)?.len() as u64 != document.size
-            {
-                return Err(Error::InvalidFormat);
-            }
-        }
-        Ok(Self {
+        let state = State::open(&files.state_db_path(), files.workspace_id()).await?;
+        let mut workspace = Self {
             state,
             files,
             ready: false,
             #[cfg(test)]
             hook: None,
-        })
+        };
+        workspace.validate_documents().await?;
+        Ok(workspace)
+    }
+
+    async fn validate_documents(&mut self) -> Result<(), Error> {
+        for document in self.state.documents().await? {
+            validate_name(&document.name).map_err(|_| Error::InvalidFormat)?;
+            if document.parent_id != self.state.root_id
+                || self.files.read_object(&document.content_hash)?.len() as u64 != document.size
+            {
+                return Err(Error::InvalidFormat);
+            }
+        }
+        Ok(())
     }
 
     pub fn epoch(&self) -> WorkspaceEpoch {
@@ -191,8 +237,21 @@ impl Workspace {
 
     pub async fn read(&mut self, node_id: NodeId) -> Result<(Document, Vec<u8>), Error> {
         let document = self.state.document(node_id).await?.ok_or(Error::NotFound)?;
-        let bytes = self.files.read_object(&document.content_hash)?;
+        // A missing committed object is a storage failure, not a deleted node.
+        let bytes = self
+            .files
+            .read_object(&document.content_hash)
+            .map_err(|error| {
+                self.ready = false;
+                match error {
+                    StorageError::ChecksumMismatch | StorageError::InvalidHash => {
+                        Error::InvalidFormat
+                    }
+                    _ => Error::Storage,
+                }
+            })?;
         if bytes.len() as u64 != document.size {
+            self.ready = false;
             return Err(Error::InvalidFormat);
         }
         Ok((document, bytes))
@@ -331,6 +390,19 @@ impl Workspace {
         })
     }
 
+    async fn validate_intent_metadata(&mut self, intent: &Intent) -> Result<(), Error> {
+        if self.state.document(intent.before.node_id).await? != Some(intent.before.clone())
+            || intent.before.node_id != intent.proposed.node_id
+            || intent.before.parent_id != intent.proposed.parent_id
+            || intent.before.name != intent.proposed.name
+            || intent.before.meta_rev != intent.proposed.meta_rev
+            || self.state.next_change_seq().await? != intent.proposed.last_change_seq
+        {
+            return Err(Error::InvalidFormat);
+        }
+        Ok(())
+    }
+
     async fn recover(&mut self) -> Result<(), Error> {
         self.ready = false;
         let pending = self.state.pending().await?;
@@ -339,15 +411,7 @@ impl Workspace {
             return Err(Error::InvalidFormat);
         }
         for intent in pending {
-            if self.state.document(intent.before.node_id).await? != Some(intent.before.clone())
-                || intent.before.node_id != intent.proposed.node_id
-                || intent.before.parent_id != intent.proposed.parent_id
-                || intent.before.name != intent.proposed.name
-                || intent.before.meta_rev != intent.proposed.meta_rev
-                || self.state.next_change_seq().await? != intent.proposed.last_change_seq
-            {
-                return Err(Error::InvalidFormat);
-            }
+            self.validate_intent_metadata(&intent).await?;
             for document in [&intent.before, &intent.proposed] {
                 let bytes = self.files.read_object(&document.content_hash)?;
                 if bytes.len() as u64 != document.size {

@@ -7,6 +7,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use ts_rs::TS;
 
+pub mod admin;
+pub mod http;
+pub use admin::{AdminRequest, AdminResponse, AdminResult};
+pub use http::{
+    ApiError, NodeKind, NodeMetadata, PairRequest, PairResponse, ServerInfo, WorkspaceRole,
+};
+
 pub const CONTRACT: &str = "mdw-sync/1.2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

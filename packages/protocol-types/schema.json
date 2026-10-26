@@ -1,5 +1,372 @@
 {
   "$defs": {
+    "AdminRequest": {
+      "$defs": {
+        "WorkspaceRole": {
+          "enum": [
+            "reader",
+            "editor",
+            "owner"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "const": "status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "const": "create_principal",
+              "type": "string"
+            },
+            "role": {
+              "$ref": "#/$defs/WorkspaceRole"
+            }
+          },
+          "required": [
+            "command",
+            "role"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "const": "set_role",
+              "type": "string"
+            },
+            "principal_id": {
+              "type": "string"
+            },
+            "role": {
+              "$ref": "#/$defs/WorkspaceRole"
+            }
+          },
+          "required": [
+            "command",
+            "principal_id",
+            "role"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "const": "transfer_owner",
+              "type": "string"
+            },
+            "previous_role": {
+              "$ref": "#/$defs/WorkspaceRole"
+            },
+            "principal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "principal_id",
+            "previous_role"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "const": "issue_pairing",
+              "type": "string"
+            },
+            "principal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "principal_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "const": "revoke_device",
+              "type": "string"
+            },
+            "device_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "device_id"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "AdminRequest"
+    },
+    "AdminResponse": {
+      "$defs": {
+        "AdminResult": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "status",
+                  "type": "string"
+                },
+                "owner_principal_id": {
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "workspace_id",
+                "workspace_epoch",
+                "owner_principal_id"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "principal",
+                  "type": "string"
+                },
+                "principal_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "principal_id"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "expires_at": {
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "pairing",
+                  "type": "string"
+                },
+                "pairing_secret": {
+                  "type": "string"
+                },
+                "principal_id": {
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "workspace_id",
+                "principal_id",
+                "pairing_secret",
+                "expires_at"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "done",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "result": {
+              "$ref": "#/$defs/AdminResult"
+            },
+            "status": {
+              "const": "ok",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "status": {
+              "const": "error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "code"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "AdminResponse"
+    },
+    "AdminResult": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "status",
+              "type": "string"
+            },
+            "owner_principal_id": {
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "workspace_id",
+            "workspace_epoch",
+            "owner_principal_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "principal",
+              "type": "string"
+            },
+            "principal_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "principal_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expires_at": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "kind": {
+              "const": "pairing",
+              "type": "string"
+            },
+            "pairing_secret": {
+              "type": "string"
+            },
+            "principal_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "workspace_id",
+            "principal_id",
+            "pairing_secret",
+            "expires_at"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "done",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "AdminResult"
+    },
+    "ApiError": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "request_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "request_id"
+      ],
+      "title": "ApiError",
+      "type": "object"
+    },
     "HeadHint": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -127,9 +494,209 @@
       ],
       "title": "M0SavedCheckpoint",
       "type": "object"
+    },
+    "NodeKind": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "file",
+        "folder"
+      ],
+      "title": "NodeKind",
+      "type": "string"
+    },
+    "NodeMetadata": {
+      "$defs": {
+        "NodeKind": {
+          "enum": [
+            "file",
+            "folder"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/NodeKind"
+        },
+        "meta_etag": {
+          "type": "string"
+        },
+        "meta_rev": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "parent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "node_id",
+        "parent_id",
+        "name",
+        "kind",
+        "deleted",
+        "meta_rev",
+        "meta_etag"
+      ],
+      "title": "NodeMetadata",
+      "type": "object"
+    },
+    "PairRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "pairing_secret": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol",
+        "workspace_id",
+        "pairing_secret"
+      ],
+      "title": "PairRequest",
+      "type": "object"
+    },
+    "PairResponse": {
+      "$defs": {
+        "WorkspaceRole": {
+          "enum": [
+            "reader",
+            "editor",
+            "owner"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "absolute_expires_at": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "device_id": {
+          "type": "string"
+        },
+        "device_stream_id": {
+          "type": "string"
+        },
+        "device_token": {
+          "type": "string"
+        },
+        "idle_expires_at": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "principal_id": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/WorkspaceRole"
+        },
+        "workspace_epoch": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol",
+        "workspace_id",
+        "workspace_epoch",
+        "principal_id",
+        "device_id",
+        "device_stream_id",
+        "device_token",
+        "role",
+        "idle_expires_at",
+        "absolute_expires_at"
+      ],
+      "title": "PairResponse",
+      "type": "object"
+    },
+    "ServerInfo": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "head_seq": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "journal_floor_seq": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "max_document_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "root_id": {
+          "type": "string"
+        },
+        "workspace_epoch": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol",
+        "workspace_id",
+        "workspace_epoch",
+        "root_id",
+        "head_seq",
+        "journal_floor_seq",
+        "ready",
+        "max_document_bytes"
+      ],
+      "title": "ServerInfo",
+      "type": "object"
+    },
+    "WorkspaceRole": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "reader",
+        "editor",
+        "owner"
+      ],
+      "title": "WorkspaceRole",
+      "type": "string"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "구조와 문자열 형식의 스키마다. Rust 역직렬화는 UUID version과 RFC variant 및 u64 범위를 추가로 검사한다. M0 generation의 SQLite 저장 가능 범위와 문서 크기, session 및 원문 검증은 native runtime과 store가 담당한다. 이 스키마 단독으로 모든 계약을 검증할 수 없다.",
-  "title": "Notryx M0 contract definitions"
+  "description": "구조와 문자열 형식의 스키마다. Rust 역직렬화는 UUID version과 RFC variant 및 seq, 만료 시각, generation의 u64 범위를 추가로 검사한다. protocol 일치와 만료 여부, 권한은 application에서 검사한다. M0 generation의 SQLite 저장 가능 범위와 문서 크기, session 및 원문 검증은 native runtime과 store가 담당한다. 이 스키마 단독으로 모든 계약을 검증할 수 없다.",
+  "title": "Notryx protocol contract definitions"
 }

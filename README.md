@@ -17,6 +17,8 @@ npm ci
 npm run tauri -- dev
 ```
 
+새 문서는 LF를 사용한다. 기존 문서를 수정하지 않으면 bytes를 유지하며, 유효 UTF-8 문서를 실제 편집하면 전체 줄바꿈을 LF로 저장한다. CRLF, 혼합 줄바꿈과 단독 CR 문서는 편집 전에 저장 정책을 안내한다. BOM과 알 수 없는 문법을 유지하고 비UTF-8 및 크기 초과 문서는 읽기 전용으로 연다.
+
 시험 앱은 OS 앱 데이터 디렉터리의 `org.notryx.m0`에 `drafts.sqlite3`를 만든다. 기존 서버나 SilverBullet에는 연결하지 않는다. 별도 시험 저장소를 지정하려면 native 프로세스 환경변수 `NOTRYX_M0_DATA_DIR`를 사용한다. 초안은 평문 SQLite에 저장된다.
 
 ## 검사

@@ -1,6 +1,6 @@
 use notryx_domain::{ContentRevision, MetaRevision};
 use notryx_protocol::{
-    ContentPrecondition, HeadHint, M0SaveRequest, MetadataPrecondition, StrongEtag,
+    ContentPrecondition, HeadHint, M0OpenRequest, M0SaveRequest, MetadataPrecondition, StrongEtag,
     verify_content_digest,
 };
 
@@ -127,6 +127,18 @@ fn head_hint_requires_valid_epoch_decimal_sequence_and_declared_fields() {
     assert!(serde_json::from_str::<HeadHint>(&valid.replace("41d4", "71d4")).is_err());
     assert!(
         serde_json::from_str::<HeadHint>(&valid.replace('}', ",\"body\":\"unexpected\"}")).is_err()
+    );
+}
+
+#[test]
+fn m0_open_requires_renderer_owner_and_declared_fields() {
+    let valid = r#"{"document_id":"sample","renderer_session_id":"renderer"}"#;
+    let request: M0OpenRequest = serde_json::from_str(valid).unwrap();
+    assert_eq!(request.renderer_session_id, "renderer");
+    assert!(serde_json::from_str::<M0OpenRequest>(r#"{"document_id":"sample"}"#).is_err());
+    assert!(
+        serde_json::from_str::<M0OpenRequest>(&valid.replace('}', ",\"path\":\"forbidden\"}"))
+            .is_err()
     );
 }
 

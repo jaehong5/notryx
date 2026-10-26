@@ -410,3 +410,64 @@ async fn checkpoint_retry_is_idempotent_and_cannot_rewind_or_replace_a_generatio
     assert_eq!(draft.base_bytes, b"base");
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn renderer_reload_reclaims_sessions_preserves_drafts_and_rejects_old_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = ClientStore::open(directory.path().join("drafts.db"))
+        .await
+        .unwrap();
+    let first = store
+        .open_document("document-a", b"base\r\n", "base-rev")
+        .await
+        .unwrap();
+    let second = store
+        .open_document("document-b", b"other base", "other-rev")
+        .await
+        .unwrap();
+    store
+        .save_checkpoint("document-a", &first.edit_session_id, 1, b"saved draft\n")
+        .await
+        .unwrap();
+    store.reset_edit_sessions();
+    let reopened = store
+        .open_document("document-a", b"new remote", "new-rev")
+        .await
+        .unwrap();
+    assert_eq!(reopened.generation, 1);
+    assert_eq!(reopened.bytes, b"saved draft\n");
+    assert_ne!(reopened.edit_session_id, first.edit_session_id);
+    let base = store.read_checkpoint("document-a").await.unwrap().unwrap();
+    assert_eq!(base.base_bytes, b"base\r\n");
+    assert_eq!(base.base_revision, "base-rev");
+    assert_eq!(
+        store
+            .save_checkpoint("document-a", &first.edit_session_id, 2, b"late stale")
+            .await,
+        Err(StoreError::StaleSession)
+    );
+    assert_eq!(
+        store.close_document("document-a", &first.edit_session_id),
+        Err(StoreError::StaleSession)
+    );
+    assert_eq!(
+        store
+            .save_checkpoint("document-b", &second.edit_session_id, 1, b"late other")
+            .await,
+        Err(StoreError::StaleSession)
+    );
+    store
+        .save_checkpoint("document-a", &reopened.edit_session_id, 2, b"new draft\n")
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .read_checkpoint("document-a")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        b"new draft\n"
+    );
+    store.close().await.unwrap();
+}

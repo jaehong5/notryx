@@ -2,7 +2,7 @@
 // M0-prefixed types are spike IPC contracts, not the product HTTP API.
 
 export type HeadHint = { workspace_epoch: string, head_seq: string, };
-export type M0OpenRequest = { document_id: string, };
+export type M0OpenRequest = { document_id: string, renderer_session_id: string, };
 export type M0CloseRequest = { document_id: string, edit_session_id: string, };
 export type M0OpenedDocument = { document_id: string, edit_session_id: string, generation: string, bytes_base64: string, };
 export type M0SaveRequest = { document_id: string, edit_session_id: string, generation: string, bytes_base64: string, };

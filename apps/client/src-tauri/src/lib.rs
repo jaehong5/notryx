@@ -7,8 +7,14 @@ use tauri::{Emitter, Manager, Webview};
 #[cfg(not(target_os = "android"))]
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
-struct Runtime(Mutex<ClientStore>);
+struct Runtime(Mutex<RuntimeState>);
+
+struct RuntimeState {
+    store: ClientStore,
+    renderer_session_id: String,
+}
 
 fn check_caller(webview: &Webview) -> Result<(), String> {
     let url = webview.url().map_err(|_| "invalid_caller")?;
@@ -45,6 +51,15 @@ fn fixture(id: &str) -> Result<Vec<u8>, String> {
 }
 
 #[tauri::command]
+async fn m0_renderer_session(
+    webview: Webview,
+    runtime: tauri::State<'_, Runtime>,
+) -> Result<String, String> {
+    check_caller(&webview)?;
+    Ok(runtime.0.lock().await.renderer_session_id.clone())
+}
+
+#[tauri::command]
 async fn m0_open(
     webview: Webview,
     runtime: tauri::State<'_, Runtime>,
@@ -52,10 +67,12 @@ async fn m0_open(
 ) -> Result<M0OpenedDocument, String> {
     check_caller(&webview)?;
     let base = fixture(&request.document_id)?;
+    let mut runtime = runtime.0.lock().await;
+    if request.renderer_session_id != runtime.renderer_session_id {
+        return Err("stale_renderer_session".into());
+    }
     let opened = runtime
-        .0
-        .lock()
-        .await
+        .store
         .open_document(&request.document_id, &base, "m0-fixture-v1")
         .await
         .map_err(|e| e.to_string())?;
@@ -74,7 +91,7 @@ async fn m0_save(
     request: M0SaveRequest,
 ) -> Result<M0SavedCheckpoint, String> {
     check_caller(&webview)?;
-    if matches!(request.document_id.as_str(), "mixed" | "non-utf8") {
+    if request.document_id == "non-utf8" {
         return Err("read_only_source".into());
     }
     if request.bytes_base64.len() > MAX_DOCUMENT_BYTES.div_ceil(3) * 4 {
@@ -83,6 +100,7 @@ async fn m0_save(
     let bytes = STANDARD
         .decode(&request.bytes_base64)
         .map_err(|_| "invalid_bytes")?;
+    validate_edited_source(&bytes)?;
     let generation = request
         .generation
         .parse::<u64>()
@@ -91,6 +109,7 @@ async fn m0_save(
         .0
         .lock()
         .await
+        .store
         .save_checkpoint(
             &request.document_id,
             &request.edit_session_id,
@@ -116,6 +135,7 @@ async fn m0_close(
         .0
         .lock()
         .await
+        .store
         .close_document(&request.document_id, &request.edit_session_id)
         .map_err(|e| e.to_string())
 }
@@ -165,8 +185,22 @@ pub fn run() {
             let store = tauri::async_runtime::block_on(ClientStore::open(
                 directory.join("drafts.sqlite3"),
             ))?;
-            app.manage(Runtime(Mutex::new(store)));
+            app.manage(Runtime(Mutex::new(RuntimeState {
+                store,
+                renderer_session_id: Uuid::new_v4().to_string(),
+            })));
             Ok(())
+        })
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
+                && let Some(runtime) = webview.try_state::<Runtime>()
+            {
+                // Invalidate before the new page can invoke IPC, including queued opens from the old page.
+                let mut runtime = tauri::async_runtime::block_on(runtime.0.lock());
+                runtime.store.reset_edit_sessions();
+                runtime.renderer_session_id = Uuid::new_v4().to_string();
+            }
         })
         .on_window_event(|window, event| {
             if window.label() == "main"
@@ -177,6 +211,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            m0_renderer_session,
             m0_open,
             m0_save,
             m0_close,
@@ -185,4 +220,28 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("client runtime failed");
+}
+
+fn validate_edited_source(bytes: &[u8]) -> Result<(), String> {
+    std::str::from_utf8(bytes).map_err(|_| "invalid_utf8")?;
+    if bytes.contains(&b'\r') {
+        return Err("non_lf_source".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_edited_source;
+
+    #[test]
+    fn edited_source_requires_utf8_and_lf_at_the_native_boundary() {
+        assert!(validate_edited_source("\u{feff}# 한글 😀\n<!-- keep -->".as_bytes()).is_ok());
+        assert_eq!(
+            validate_edited_source(b"a\r\nb"),
+            Err("non_lf_source".into())
+        );
+        assert_eq!(validate_edited_source(b"a\rb"), Err("non_lf_source".into()));
+        assert_eq!(validate_edited_source(&[0xff]), Err("invalid_utf8".into()));
+    }
 }

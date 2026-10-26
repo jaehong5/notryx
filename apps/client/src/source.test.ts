@@ -30,20 +30,20 @@ describe("AT-01 to AT-05 source preservation", () => {
     });
   }
 
-  test("edits retain BOM, CRLF, unknown syntax and final newline", () => {
+  test("edits use LF and retain BOM, unknown syntax and final newline", () => {
     const source = openSource(encode("\uFEFF---\r\nx: 1\r\n---\r\n한글😀e\u0301\r\n<!-- keep -->"));
     const state = EditorState.create({ doc: source.text });
     const position = state.doc.toString().indexOf("😀") + 2;
     const changed = state.update({ changes: { from: position, insert: "추가" } }).state;
-    expect(saveSource(source, changed.doc.toString())).toEqual(encode("\uFEFF---\r\nx: 1\r\n---\r\n한글😀추가e\u0301\r\n<!-- keep -->"));
+    expect(saveSource(source, changed.doc.toString())).toEqual(encode("\uFEFF---\nx: 1\n---\n한글😀추가e\u0301\n<!-- keep -->"));
   });
 
-  test("mixed newlines stay readable and cannot be silently normalized", () => {
+  test("mixed newlines preserve unmodified bytes and use LF after editing", () => {
     const bytes = encode("a\r\nb\nc\r\n");
     const source = openSource(bytes);
-    expect(source.readonly).toBe(true);
+    expect(source.readonly).toBe(false);
     expect(saveSource(source, source.text)).toEqual(bytes);
-    expect(() => saveSource(source, source.text + "x")).toThrow();
+    expect(saveSource(source, source.text + "x")).toEqual(encode("a\nb\nc\nx"));
   });
 
   test("invalid UTF-8 is read only and preserves original bytes", () => {
@@ -54,9 +54,19 @@ describe("AT-01 to AT-05 source preservation", () => {
     expect(() => saveSource(source, "replacement")).toThrow();
   });
 
-  test("lone carriage returns cannot be normalized by CodeMirror", () => {
+  test("lone carriage returns preserve unmodified bytes and use LF after editing", () => {
     const source = openSource(encode("a\rb"));
-    expect(source.readonly).toBe(true);
+    expect(source.readonly).toBe(false);
+    expect(saveSource(source, source.text)).toEqual(encode("a\rb"));
+    expect(saveSource(source, source.text + "\nc")).toEqual(encode("a\nb\nc"));
+  });
+
+  test("resuming a one-line checkpoint uses the same LF policy as the original session", () => {
+    const original = openSource(encode("a\r\nb\r\n"));
+    const checkpoint = saveSource(original, "ab");
+    const resumed = openSource(checkpoint);
+    expect(saveSource(original, "ab\nc")).toEqual(encode("ab\nc"));
+    expect(saveSource(resumed, "ab\nc")).toEqual(encode("ab\nc"));
   });
 
   test("lone surrogate edits are rejected before UTF-8 replacement", () => {

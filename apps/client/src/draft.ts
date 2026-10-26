@@ -30,7 +30,7 @@ export class Draft {
   private async drain() {
     while (this.dirty) {
       const generation = this.generation;
-      const reply = await this.save(generation.toString(), saveSource(this.source, this.text));
+      const reply = await this.save(generation.toString(), saveSource(this.source, this.text, true));
       if (reply.edit_session_id !== this.session || reply.generation !== generation.toString()) {
         throw new Error("저장 응답이 현재 편집 요청과 일치하지 않습니다.");
       }

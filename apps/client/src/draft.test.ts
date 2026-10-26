@@ -55,3 +55,18 @@ test("unchanged and read-only documents never submit a checkpoint", async () => 
   await draft.flush();
   expect(count).toBe(0);
 });
+
+
+test("edited then undone CRLF text still writes an LF checkpoint", async () => {
+  const bytes: Uint8Array[] = [];
+  const draft = new Draft(openSource(new TextEncoder().encode("a\r\nb")), "session", "0", async (generation, content) => {
+    bytes.push(content);
+    return {edit_session_id: "session", generation};
+  });
+  draft.change("edited\nb");
+  await draft.flush();
+  draft.change("a\nb");
+  await draft.flush();
+  expect(new TextDecoder().decode(bytes[0])).toBe("edited\nb");
+  expect(new TextDecoder().decode(bytes[1])).toBe("a\nb");
+});

@@ -61,6 +61,19 @@ def main():
         endpoint = "async" if asynchronous else "sync"
         return request("POST", f"/session/{session}/execute/{endpoint}", {"script": script, "args": list(values)})
 
+    def native_result(command, arguments=None):
+        return js("""
+          const [command,args,done]=arguments;
+          window.__TAURI_INTERNALS__.invoke(command,args)
+            .then(value=>done({ok:true,value}))
+            .catch(error=>done({ok:false,failure:String(error)}));
+        """, command, arguments or {}, asynchronous=True)
+
+    def native(command, arguments=None):
+        result = native_result(command, arguments)
+        assert result["ok"], result
+        return result.get("value")
+
     def click(selector):
         js("document.querySelector(arguments[0]).click()", selector)
 
@@ -92,12 +105,12 @@ def main():
 
         for document_id in ("unicode", "mixed", "non-utf8"):
             open_document(document_id)
-            if document_id != "unicode":
-                assert js("return document.querySelector('.cm-content').getAttribute('contenteditable')") == "false"
+            expected_editable = "false" if document_id == "non-utf8" else "true"
+            assert js("return document.querySelector('.cm-content').getAttribute('contenteditable')") == expected_editable
             click("#save")
             time.sleep(0.3)
             assert checkpoint(document_id) is None
-        evidence["tests"].append("unchanged fixtures do not create rewritten checkpoints; unsupported sources read-only")
+        evidence["tests"].append("unchanged fixtures do not create rewritten checkpoints; CRLF and mixed UTF-8 are editable; non-UTF-8 remains read-only")
 
         open_document("unicode")
         text = "한글e\u0301 시험"
@@ -105,15 +118,23 @@ def main():
         element_id = element["element-6066-11e4-a52e-4f735466cecf"]
         request("POST", f"/session/{session}/element/{element_id}/value", {"text": text})
         js("document.querySelector('.cm-content').focus(); document.execCommand('insertText',false,'EMOJI😀PASTE')")
-        wait(lambda: checkpoint("unicode") is not None)
+        wait(lambda: (saved := checkpoint("unicode")) is not None and text.encode() in saved[1] and "EMOJI😀PASTE".encode() in saved[1])
         saved = checkpoint("unicode")[1]
         assert saved.startswith(b"\xef\xbb\xbf")
         assert text.encode() in saved
         assert "EMOJI😀PASTE".encode() in saved
-        assert b"\r\n" in saved and b"\n" not in saved.replace(b"\r\n", b"")
+        assert b"\n" in saved and b"\r" not in saved
+        assert b"custom: preserve\n---\n" in saved
+        assert "```unknown\n[[합성 문서]]\n```".encode() in saved
         assert b"<!-- keep -->" in saved
-        evidence["tests"].append("actual editor input retains BOM, CRLF, Korean, emoji, combining marks and unknown syntax")
+        evidence["tests"].append("actual editor input saves LF and retains BOM, Korean, emoji, combining marks and unknown syntax")
         evidence["input_scope"] = "WebKit send_keys dropped non-BMP emoji; Korean/combining keys and emoji insertText were tested separately. Physical IME remains untested."
+
+        open_document("mixed")
+        js("const view=document.querySelector('.cm-content').cmTile.root.view; view.dispatch({changes:{from:view.state.doc.length,insert:'혼합 입력😀'}})")
+        wait(lambda: checkpoint("mixed") is not None)
+        assert checkpoint("mixed")[1] == "# 혼합 줄바꿈\n원본\n보존\n혼합 입력😀".encode()
+        evidence["tests"].append("editing a mixed-newline UTF-8 document saves LF without changing the existing text")
 
         open_document("welcome")
         with ThreadPoolExecutor(max_workers=1) as executor:
@@ -137,6 +158,52 @@ def main():
             assert continuous.result() == 40
         wait(lambda: checkpoint("welcome")[0] == 40)
         evidence["tests"].append("continuous 50ms edits commit while typing; final generation 40 becomes durable")
+
+        durable_before_reload = checkpoint("welcome")
+        previous_owner = native("m0_renderer_session")
+        previous_session = native("m0_open", {"request": {"document_id": "100k-b", "renderer_session_id": previous_owner}})
+        assert checkpoint("100k-b") is None
+        request("POST", f"/session/{session}/refresh", {})
+        wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === 'welcome' && !!document.querySelector('.cm-content[contenteditable=true]')"))
+        assert not js("return document.querySelector('[role=alert]')?.textContent")
+        current_owner = native("m0_renderer_session")
+        assert current_owner != previous_owner
+        restored_text = js("return document.querySelector('.cm-content').cmTile.root.view.state.doc.toString()")
+        assert restored_text.encode() == durable_before_reload[1]
+        assert checkpoint("welcome") == durable_before_reload
+
+        stale_requests = [
+            ("m0_open", {"document_id": "100k-b", "renderer_session_id": previous_owner}, "stale_renderer_session"),
+            ("m0_save", {"document_id": "100k-b", "edit_session_id": previous_session["edit_session_id"], "generation": "1", "bytes_base64": previous_session["bytes_base64"]}, "StaleSession"),
+            ("m0_close", {"document_id": "100k-b", "edit_session_id": previous_session["edit_session_id"]}, "StaleSession"),
+        ]
+        evidence["renderer_session_rejections"] = []
+        for command, payload, expected in stale_requests:
+            result = native_result(command, {"request": payload})
+            assert result == {"ok": False, "failure": expected}, result
+            evidence["renderer_session_rejections"].append({"command": command, "error": result["failure"]})
+        assert checkpoint("100k-b") is None
+
+        resumed_text = "재로드 후 편집\n"
+        js("const view=document.querySelector('.cm-content').cmTile.root.view; view.dispatch({changes:{from:view.state.doc.length,insert:arguments[0]}})", resumed_text)
+        wait(lambda: checkpoint("welcome")[0] == 41)
+        assert checkpoint("welcome")[1] == durable_before_reload[1] + resumed_text.encode()
+        evidence["tests"].append("reload restores generation 40 bytes, changes the renderer owner, rejects old open/save/close requests and resumes editing at generation 41")
+
+        validation_session = native("m0_open", {"request": {"document_id": "100k-b", "renderer_session_id": current_owner}})
+        evidence["source_rejections"] = []
+        for content, expected in ((b"invalid\r\nsource\n", "non_lf_source"), (b"\xff", "invalid_utf8")):
+            result = native_result("m0_save", {"request": {
+                "document_id": "100k-b",
+                "edit_session_id": validation_session["edit_session_id"],
+                "generation": "1",
+                "bytes_base64": base64.b64encode(content).decode(),
+            }})
+            assert result == {"ok": False, "failure": expected}, result
+            evidence["source_rejections"].append({"command": "m0_save", "error": result["failure"]})
+        assert checkpoint("100k-b") is None
+        native("m0_close", {"request": {"document_id": "100k-b", "edit_session_id": validation_session["edit_session_id"]}})
+        evidence["tests"].append("native save rejects CR-containing UTF-8 and invalid UTF-8 without creating a checkpoint")
 
         if args.measure:
             measurements = []
@@ -192,17 +259,18 @@ def main():
             evidence["ui_measurement_scope"] = "CodeMirror transactions to two animation frames in real WebKitGTK/Xvfb; not physical keyboard or GPU display latency"
 
         failures = js("""
+          const owner = arguments[0];
           const done = arguments[arguments.length - 1];
           Promise.all([
             ['plugin:fs|read_text_file', {path:'/notryx-probe-must-not-exist'}],
             ['plugin:shell|execute', {program:'notryx-probe-must-not-exist'}],
             ['plugin:sql|load', {db:'sqlite:probe.db'}],
-            ['m0_open', {request:{document_id:'welcome', extra:true}}]
+            ['m0_open', {request:{document_id:'welcome', renderer_session_id:owner, extra:true}}]
           ].map(async ([command,args]) => {
             try { await window.__TAURI_INTERNALS__.invoke(command,args); return {command,denied:false}; }
             catch(error) { return {command,denied:true,error:String(error)}; }
           })).then(done);
-        """, asynchronous=True)
+        """, current_owner, asynchronous=True)
         for result in failures:
             assert result["denied"], result
             if result["command"] == "m0_open":

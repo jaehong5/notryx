@@ -309,6 +309,11 @@ impl ClientStore {
         })
     }
 
+    /// Invalidate in-memory owners when the renderer is replaced; durable drafts remain untouched.
+    pub fn reset_edit_sessions(&mut self) {
+        self.sessions.clear();
+    }
+
     /// Call only after the editor's final pending generation has committed.
     pub fn close_document(
         &mut self,

@@ -138,6 +138,7 @@ pub struct HeadHint {
 #[serde(deny_unknown_fields)]
 pub struct M0OpenRequest {
     pub document_id: String,
+    pub renderer_session_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]

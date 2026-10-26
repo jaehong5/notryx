@@ -17,8 +17,19 @@ function generation(value: unknown): string {
   return text;
 }
 
+let rendererSession: Promise<string> | undefined;
+
+function getRendererSession(): Promise<string> {
+  rendererSession ??= invoke("m0_renderer_session").then(string).catch((cause) => {
+    rendererSession = undefined;
+    throw cause;
+  });
+  return rendererSession;
+}
+
 export async function openDocument(document_id: string): Promise<M0OpenedDocument> {
-  const value = object(await invoke("m0_open", { request: { document_id } }));
+  const renderer_session_id = await getRendererSession();
+  const value = object(await invoke("m0_open", { request: { document_id, renderer_session_id } }));
   const reply = {
     document_id: string(value.document_id), edit_session_id: string(value.edit_session_id),
     generation: generation(value.generation), bytes_base64: string(value.bytes_base64),

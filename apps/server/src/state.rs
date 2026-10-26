@@ -492,6 +492,12 @@ fn document_post_state(document: &Document) -> Result<String, Error> {
 }
 
 async fn validate_layout(connection: &mut SqliteConnection, root_id: NodeId) -> Result<(), Error> {
+    let head = validate_journal(connection).await?;
+    validate_nodes(connection, root_id, head).await?;
+    validate_streams(connection).await
+}
+
+async fn validate_journal(connection: &mut SqliteConnection) -> Result<u64, Error> {
     let head: String = sqlx::query_scalar("SELECT head_seq FROM workspaces WHERE singleton=1")
         .fetch_one(&mut *connection)
         .await
@@ -513,6 +519,14 @@ async fn validate_layout(connection: &mut SqliteConnection, root_id: NodeId) -> 
     {
         return Err(Error::InvalidFormat);
     }
+    Ok(head)
+}
+
+async fn validate_nodes(
+    connection: &mut SqliteConnection,
+    root_id: NodeId,
+    head: u64,
+) -> Result<(), Error> {
     let nodes = sqlx::query("SELECT * FROM nodes")
         .fetch_all(&mut *connection)
         .await
@@ -601,6 +615,10 @@ async fn validate_layout(connection: &mut SqliteConnection, root_id: NodeId) -> 
     if roots != 1 || expected_children != Some(children) {
         return Err(Error::InvalidFormat);
     }
+    Ok(())
+}
+
+async fn validate_streams(connection: &mut SqliteConnection) -> Result<(), Error> {
     let streams = sqlx::query("SELECT stream_id,last_seq FROM operation_streams")
         .fetch_all(&mut *connection)
         .await

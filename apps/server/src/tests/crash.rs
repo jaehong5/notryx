@@ -3,7 +3,9 @@ use notryx_server_storage::StorageStage;
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::process::ExitStatusExt,
-    process::{Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
+    sync::mpsc,
+    time::Duration,
 };
 
 #[test]
@@ -62,20 +64,60 @@ fn kill_at(directory: &Path, target: Phase, recovery: bool) {
     } else {
         command.env_remove("NOTRYX_TEST_RECOVER");
     }
-    let mut child = command.spawn().unwrap();
-    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let child = command.spawn().unwrap();
+    let (reached, status) = wait_for_cut_and_kill(child, Duration::from_secs(20));
+    assert!(
+        reached.is_ok(),
+        "child did not reach {target:?}: {reached:?}, {status}"
+    );
+    assert_eq!(status.signal(), Some(9));
+}
+
+fn wait_for_cut_and_kill(
+    mut child: Child,
+    timeout: Duration,
+) -> (Result<(), mpsc::RecvTimeoutError>, ExitStatus) {
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if line.trim() == "NOTRYX_CUT" {
+                let _ = sender.send(());
+                return;
+            }
+        }
+    });
+    let reached = receiver.recv_timeout(timeout);
+    let _ = child.kill();
+    let status = child.wait().unwrap();
+    reader.join().unwrap();
+    (reached, status)
+}
+
+#[test]
+#[ignore = "invoked only by the timeout parent test"]
+fn silent_crash_worker() {
     loop {
-        let mut line = String::new();
-        if output.read_line(&mut line).unwrap() == 0 {
-            let status = child.wait().unwrap();
-            panic!("child exited before {target:?}: {status}");
-        }
-        if line.trim() == "NOTRYX_CUT" {
-            break;
-        }
+        std::thread::park();
     }
-    child.kill().unwrap();
-    assert_eq!(child.wait().unwrap().signal(), Some(9));
+}
+
+#[test]
+fn missing_cut_times_out_and_reaps_child() {
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tests::crash::silent_crash_worker",
+            "--ignored",
+            "--nocapture",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let (reached, status) = wait_for_cut_and_kill(child, Duration::from_millis(100));
+    assert_eq!(reached, Err(mpsc::RecvTimeoutError::Timeout));
+    assert_eq!(status.signal(), Some(9));
 }
 
 #[tokio::test]

@@ -116,7 +116,7 @@ WebKitWebDriver를 별도 위치에 추출했다면 `--driver /path/to/WebKitWeb
 
 전체 검사는 TS build/lint/unit, Rust format/clippy/unit/integration, 생성 계약 drift, 순수 계층 의존성과 npm 보안 정보를 확인한다. 저장 시험은 독립 임시 DB를 만들고 실제 프로세스 강제 종료도 수행한다. WebDriver 역시 임시 client store를 사용하며 결과와 화면을 `.artifacts/m0-webview`에 남긴다. 성능은 검사 프로세스 종료 코드와 구분해 측정 전에 정한 기준에 따라 판정한다.
 
-`.github/workflows/check.yml`은 같은 Linux 검사를 CI에 연결한다. 원격 GitHub Actions 실행은 소스를 올린 뒤 별도로 확인해야 한다. 프로토콜 파일은 `cargo run -p notryx-protocol --bin generate-contracts`로 생성하고 직접 수정하지 않는다.
+`.github/workflows/check.yml`은 Linux 검사와 Tauri WebDriver 시험, 서버 Docker 이미지 빌드와 격리 실행 시험을 CI에 연결한다. 생성된 WebDriver 실패 자료와 Docker 시험 결과는 각각 7일간 보관한다. CI는 이미지를 게시하거나 서버에 배포하지 않는다. 원격 GitHub Actions 실행은 소스를 올린 뒤 별도로 확인해야 한다. 프로토콜 파일은 `cargo run -p notryx-protocol --bin generate-contracts`로 생성하고 직접 수정하지 않는다.
 
 
 ## 개발 서버 실행과 조회

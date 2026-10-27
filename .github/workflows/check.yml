@@ -10,8 +10,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -19,4 +21,31 @@ jobs:
       - run: npm ci
       - run: bash scripts/check.sh
       - run: npm run tauri -- build --debug --no-bundle
-      - run: xvfb-run -a python3 scripts/m0-webdriver.py
+      - run: xvfb-run -a python3 scripts/m0-webdriver.py --output ci-artifacts/webdriver
+      - name: Upload WebDriver failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: webdriver-failure
+          path: ci-artifacts/webdriver/
+          if-no-files-found: ignore
+          retention-days: 7
+  docker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Build server image
+        run: docker build -f deploy/Dockerfile --target runtime -t notryx:ci .
+      - name: Test server image
+        run: python3 scripts/test-docker.py --image notryx:ci --output ci-artifacts/docker-results.json
+      - name: Upload Docker test results
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: docker-test-results
+          path: ci-artifacts/docker-results.json
+          if-no-files-found: ignore
+          retention-days: 7

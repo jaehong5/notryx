@@ -1,3 +1,5 @@
+export const MAX_EDIT_BYTES = 5 * 1024 * 1024;
+
 export type Source = {
   original: Uint8Array;
   text: string;
@@ -18,7 +20,7 @@ export function openSource(bytes: Uint8Array): Source {
     decoded = new TextDecoder().decode(bytes);
     reason = "UTF-8이 아닌 문서는 원본을 보존한 채 읽기 전용으로 엽니다.";
   }
-  if (bytes.length > 5 * 1024 * 1024) reason ??= "편집 가능한 최대 크기는 5 MiB입니다.";
+  if (bytes.length > MAX_EDIT_BYTES) reason ??= "편집 가능한 최대 크기는 5 MiB입니다.";
   return {
     original,
     text: decoded.replace(/\r\n?/g, "\n"),
@@ -31,7 +33,7 @@ export function openSource(bytes: Uint8Array): Source {
 
 export function saveSource(source: Source, text: string, edited = false): Uint8Array {
   const bytes = recoverySource(source, text, edited);
-  if ((edited || text !== source.text) && bytes.length > 5 * 1024 * 1024) throw new Error("편집 가능한 최대 크기는 5 MiB입니다.");
+  if ((edited || text !== source.text) && bytes.length > MAX_EDIT_BYTES) throw new Error("편집 가능한 최대 크기는 5 MiB입니다.");
   return bytes;
 }
 

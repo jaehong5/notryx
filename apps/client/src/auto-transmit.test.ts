@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from "vitest";
-import { AutoTransmit, type AutoTransmitPorts, type TransmitScope } from "./auto-transmit";
+import { AutoTransmit, QueueStorageError, type AutoTransmitPorts, type TransmitScope } from "./auto-transmit";
 
 const a: TransmitScope = { binding: "binding-a", documentId: "a", editSessionId: "edit-a" };
 const b: TransmitScope = { binding: "binding-b", documentId: "b", editSessionId: "edit-b" };
@@ -14,7 +14,10 @@ function setup() {
     authRequired: vi.fn(),
     failed: vi.fn(),
   };
-  return { ports, scheduler: new AutoTransmit(ports) };
+  const scheduler = new AutoTransmit(ports);
+  scheduler.openSession(a);
+  scheduler.openSession(b);
+  return { ports, scheduler };
 }
 
 afterEach(() => vi.useRealTimers());
@@ -258,6 +261,7 @@ test("composition that starts during queue prevents closing the native session",
 
 test("closing after a queue failure never sends an earlier composition result", async () => {
   const { ports, scheduler } = setup();
+  const internal = scheduler as unknown as { documents: Map<string, unknown> };
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
   await scheduler.flushDocument(a);
   scheduler.composition(a, true);
@@ -265,12 +269,16 @@ test("closing after a queue failure never sends an earlier composition result", 
   vi.mocked(ports.queue).mockRejectedValueOnce(new Error("OutboxBlocked"));
   await expect(scheduler.deactivate(a, async () => {})).rejects.toThrow("OutboxBlocked");
   await scheduler.deactivatePreservingDraft(a, async () => {});
+  expect(internal.documents.size).toBe(2);
+  expect(() => scheduler.edit(a, "3")).toThrow("stale_session");
   scheduler.resume();
   await vi.advanceTimersByTimeAsync(1000);
   expect(ports.transmit).toHaveBeenCalledTimes(1);
   const reopened = { ...a, editSessionId: "new-session" };
+  scheduler.openSession(reopened);
   scheduler.edit(reopened, "2"); scheduler.durable(reopened, "2");
   await scheduler.flushDocument(reopened);
+  expect(internal.documents.size).toBe(2);
   await vi.advanceTimersByTimeAsync(0);
   expect(ports.transmit).toHaveBeenCalledTimes(2);
   await scheduler.dispose();
@@ -434,6 +442,122 @@ test("timer-triggered queue failure does not retry in a tight loop", async () =>
   await scheduler.dispose();
 });
 
+test("a transient queue storage failure retries the durable generation without another edit", async () => {
+  const { ports, scheduler } = setup();
+  vi.mocked(ports.queue).mockRejectedValueOnce("Storage");
+  scheduler.activateBinding(a.binding);
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await vi.advanceTimersByTimeAsync(750);
+  expect(ports.queue).toHaveBeenCalledTimes(1);
+  expect(ports.failed).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.queue).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.queue).toHaveBeenCalledTimes(2);
+  expect(ports.queue).toHaveBeenLastCalledWith(a, "1");
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await scheduler.dispose();
+});
+
+test("a transient queue storage failure pauses for composition and resumes afterwards", async () => {
+  const { ports, scheduler } = setup();
+  vi.mocked(ports.queue).mockRejectedValueOnce("Storage");
+  scheduler.activateBinding(a.binding);
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await vi.advanceTimersByTimeAsync(750);
+  scheduler.composition(a, true);
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(ports.queue).toHaveBeenCalledOnce();
+  scheduler.composition(a, false);
+  await vi.advanceTimersByTimeAsync(750);
+  expect(ports.queue).toHaveBeenCalledTimes(2);
+  await scheduler.dispose();
+});
+
+test("repeated queue storage failures use bounded backoff rather than a tight loop", async () => {
+  const { ports, scheduler } = setup();
+  vi.mocked(ports.queue).mockRejectedValueOnce("Storage").mockRejectedValueOnce("Storage");
+  scheduler.activateBinding(a.binding);
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await vi.advanceTimersByTimeAsync(750);
+  expect(ports.queue).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(ports.queue).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(1999);
+  expect(ports.queue).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.queue).toHaveBeenCalledTimes(3);
+  await scheduler.dispose();
+});
+
+test("closing after a transient queue failure cancels its scheduled retry", async () => {
+  const { ports, scheduler } = setup();
+  vi.mocked(ports.queue).mockRejectedValueOnce("Storage");
+  scheduler.activateBinding(a.binding);
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await vi.advanceTimersByTimeAsync(750);
+  await scheduler.deactivatePreservingDraft(a, async () => {});
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(ports.queue).toHaveBeenCalledOnce();
+  await scheduler.dispose();
+});
+
+test("queue reconciliation errors do not retry automatically", async () => {
+  const { ports, scheduler } = setup();
+  vi.mocked(ports.queue).mockRejectedValueOnce("ReconciliationRequired");
+  scheduler.activateBinding(a.binding);
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(ports.queue).toHaveBeenCalledOnce();
+  expect(ports.failed).toHaveBeenCalledOnce();
+  await scheduler.dispose();
+});
+
+test("explicit sync retries a failed durable queue without waiting for its timer", async () => {
+  const { ports, scheduler } = setup();
+  vi.mocked(ports.queue).mockRejectedValueOnce("Storage");
+  scheduler.activateBinding(a.binding);
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await vi.advanceTimersByTimeAsync(750);
+  expect(ports.queue).toHaveBeenCalledOnce();
+  await scheduler.syncNow(a);
+  expect(ports.queue).toHaveBeenCalledTimes(2);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await scheduler.dispose();
+});
+
+test("explicit sync expedites a network retry without clearing an authentication stop", async () => {
+  const { ports, scheduler } = setup();
+  scheduler.activateBinding(a.binding);
+  vi.mocked(ports.transmit)
+    .mockResolvedValueOnce({ status: "pending" })
+    .mockResolvedValueOnce({ status: "auth_required" })
+    .mockResolvedValueOnce({ status: "idle" });
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await scheduler.flushDocument(a);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await scheduler.syncNow(a);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.transmit).toHaveBeenCalledTimes(2);
+  expect(ports.authRequired).toHaveBeenCalledExactlyOnceWith("auth_required");
+  await scheduler.syncNow(a);
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(ports.transmit).toHaveBeenCalledTimes(2);
+  await scheduler.dispose();
+});
+
+test("explicit sync rejects an owner whose binding changes while flushing", async () => {
+  const { ports, scheduler } = setup();
+  scheduler.activateBinding(a.binding);
+  const syncing = scheduler.syncNow(a);
+  scheduler.activateBinding(b.binding);
+  await expect(syncing).rejects.toThrow("stale_registration");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await scheduler.dispose();
+});
+
 test("a late acknowledgement never marks newer edits or another document synced", async () => {
   const { ports, scheduler } = setup();
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
@@ -483,6 +607,196 @@ test("an ack_pending result stays conservative until durable outcome is confirme
   expect(ports.acknowledged).toHaveBeenLastCalledWith(a, "1", false);
   scheduler.acknowledge(a, receipt, true);
   expect(ports.acknowledged).toHaveBeenLastCalledWith(a, "1", true);
+  await scheduler.dispose();
+});
+
+test("successful queue reports its scope after Storage failure and subsequent success", async () => {
+  const { ports, scheduler } = setup();
+  const recovered = vi.fn();
+  const failed = vi.fn();
+  Object.assign(ports, { queueRecovered: recovered, queueStorageFailed: failed });
+  vi.mocked(ports.queue).mockRejectedValueOnce("Storage");
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await vi.advanceTimersByTimeAsync(750);
+  expect(failed).toHaveBeenCalledExactlyOnceWith(a);
+  expect(vi.mocked(ports.failed).mock.calls[0][0]).toBeInstanceOf(QueueStorageError);
+  expect(recovered).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(recovered).toHaveBeenCalledExactlyOnceWith(a);
+  scheduler.edit(a, "2"); scheduler.durable(a, "2");
+  await scheduler.flushDocument(a);
+  expect(recovered).toHaveBeenCalledTimes(2);
+  await scheduler.dispose();
+});
+
+test("reopening a failed draft reports queue success for its new session", async () => {
+  const { ports, scheduler } = setup();
+  const recovered = vi.fn();
+  Object.assign(ports, { queueRecovered: recovered });
+  vi.mocked(ports.queue).mockRejectedValueOnce("Storage");
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await vi.advanceTimersByTimeAsync(750);
+  await scheduler.deactivatePreservingDraft(a, async () => {});
+  const reopened = { ...a, editSessionId: "reopened" };
+  scheduler.openSession(reopened);
+  await scheduler.restore(reopened, "1");
+  expect(recovered).toHaveBeenCalledExactlyOnceWith(reopened);
+  await scheduler.dispose();
+});
+
+test("idle after ack_pending retires only the identified receipt without assuming commit", async () => {
+  const { ports, scheduler } = setup();
+  const retired = vi.fn();
+  Object.assign(ports, { receiptConfirmed: retired });
+  vi.mocked(ports.transmit).mockResolvedValueOnce({ status: "ack_pending", operationId: "op-a-1" });
+  scheduler.activateBinding(a.binding);
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await scheduler.flushDocument(a);
+  await vi.advanceTimersByTimeAsync(0);
+  const internal = scheduler as unknown as { operations: Map<string, unknown> };
+  expect(internal.operations.size).toBe(1);
+  expect(retired).not.toHaveBeenCalled();
+  scheduler.edit(a, "2"); scheduler.durable(a, "2");
+  await scheduler.flushDocument(a);
+  expect(internal.operations.size).toBe(2);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(retired).toHaveBeenCalledExactlyOnceWith("op-a-1");
+  expect(internal.operations.size).toBe(1);
+  expect(ports.acknowledged).not.toHaveBeenCalled();
+  scheduler.acknowledge(a, { operationId: "op-a-2", documentId: "a", generation: "2" }, true);
+  expect(ports.acknowledged).toHaveBeenCalledExactlyOnceWith(a, "2", true);
+  await scheduler.dispose();
+});
+
+test("unidentified ack_pending and authentication failure do not retire an operation", async () => {
+  const { ports, scheduler } = setup();
+  const retired = vi.fn();
+  Object.assign(ports, { receiptConfirmed: retired });
+  vi.mocked(ports.transmit)
+    .mockResolvedValueOnce({ status: "ack_pending" })
+    .mockResolvedValueOnce({ status: "auth_required" });
+  scheduler.activateBinding(a.binding);
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await scheduler.flushDocument(a);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(retired).not.toHaveBeenCalled();
+  expect(ports.authRequired).toHaveBeenCalledExactlyOnceWith("auth_required");
+  scheduler.acknowledge(a, { operationId: "op-a-1", documentId: "a", generation: "1" }, true);
+  expect(ports.acknowledged).toHaveBeenCalledExactlyOnceWith(a, "1", true);
+  await scheduler.dispose();
+});
+
+test.each(["auth_required", "gateway_auth_required"] as const)("%s with an operation retires only after authenticated idle", async (status) => {
+  const { ports, scheduler } = setup();
+  const retired = vi.fn();
+  Object.assign(ports, { receiptConfirmed: retired });
+  vi.mocked(ports.transmit).mockResolvedValueOnce({ status, operationId: "op-a-1" });
+  scheduler.activateBinding(a.binding);
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await scheduler.flushDocument(a);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.authRequired).toHaveBeenCalledExactlyOnceWith(status);
+  expect(retired).not.toHaveBeenCalled();
+  scheduler.resume();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(retired).toHaveBeenCalledExactlyOnceWith("op-a-1");
+  expect(ports.acknowledged).not.toHaveBeenCalled();
+  await scheduler.dispose();
+});
+
+test("authentication failure before receipt never retires an operation while retry remains pending", async () => {
+  const { ports, scheduler } = setup();
+  const retired = vi.fn();
+  Object.assign(ports, { receiptConfirmed: retired });
+  vi.mocked(ports.transmit)
+    .mockResolvedValueOnce({ status: "auth_required", operationId: "op-a-1" })
+    .mockResolvedValueOnce({ status: "pending" });
+  scheduler.activateBinding(a.binding);
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await scheduler.flushDocument(a);
+  await vi.advanceTimersByTimeAsync(0);
+  scheduler.resume();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(retired).not.toHaveBeenCalled();
+  scheduler.acknowledge(a, { operationId: "op-a-1", documentId: "a", generation: "1" }, true);
+  expect(ports.acknowledged).toHaveBeenCalledExactlyOnceWith(a, "1", true);
+  await scheduler.dispose();
+});
+
+test("switching binding releases closed state and old operation tracking", async () => {
+  const { scheduler } = setup();
+  const internal = scheduler as unknown as { documents: Map<string, unknown>; operations: Map<string, unknown> };
+  scheduler.activateBinding(a.binding);
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await scheduler.flushDocument(a);
+  scheduler.composition(a, true);
+  scheduler.edit(a, "2"); scheduler.durable(a, "2"); scheduler.composition(a, false);
+  await scheduler.deactivatePreservingDraft(a, async () => {});
+  expect(internal.documents.size).toBe(2);
+  expect(internal.operations.size).toBe(1);
+  scheduler.activateBinding(b.binding);
+  expect(internal.documents.size).toBe(1);
+  expect(internal.operations.size).toBe(0);
+  await scheduler.dispose();
+});
+
+test("explicit sync preserves the queue Storage error type and its cause", async () => {
+  const { ports, scheduler } = setup();
+  const failed = vi.fn();
+  Object.assign(ports, { queueStorageFailed: failed });
+  vi.mocked(ports.queue).mockRejectedValueOnce("Storage");
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  const error = await scheduler.syncNow(a).catch((cause: unknown) => cause);
+  expect(error).toBeInstanceOf(QueueStorageError);
+  expect((error as Error).cause).toBe("Storage");
+  expect(failed).toHaveBeenCalledExactlyOnceWith(a);
+  expect(ports.failed).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1000);
+  await scheduler.dispose();
+});
+
+test("closed sessions are reclaimed without accepting old edits or dropping a late ack", async () => {
+  const { ports, scheduler } = setup();
+  const internal = scheduler as unknown as { documents: Map<string, unknown>; operations: Map<string, unknown> };
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await scheduler.deactivate(a);
+  expect(internal.documents.size).toBe(1);
+  expect(internal.operations.size).toBe(1);
+  expect(() => scheduler.edit(a, "2")).toThrow("stale_session");
+  const receipt = { operationId: "op-a-1", documentId: "a", generation: "1" };
+  scheduler.acknowledge(a, receipt, false);
+  expect(internal.operations.size).toBe(1);
+  scheduler.acknowledge(a, receipt, true);
+  expect(ports.acknowledged).toHaveBeenLastCalledWith(a, "1", false);
+  expect(internal.operations.size).toBe(0);
+  await scheduler.dispose();
+});
+
+test("repeated document sessions release confirmed operations and reject old edits", async () => {
+  const { ports, scheduler } = setup();
+  const internal = scheduler as unknown as { documents: Map<string, unknown>; operations: Map<string, unknown> };
+  for (let i = 0; i < 20; i++) {
+    const scope = { ...a, editSessionId: `repeat-${i}` };
+    scheduler.openSession(scope);
+    scheduler.edit(scope, "1"); scheduler.durable(scope, "1");
+    await scheduler.deactivate(scope);
+    expect(() => scheduler.edit(scope, "2")).toThrow("stale_session");
+    scheduler.acknowledge(scope, { operationId: "op-a-1", documentId: "a", generation: "1" }, true);
+  }
+  expect(internal.documents.size).toBe(2);
+  expect(internal.operations.size).toBe(0);
+  expect(ports.acknowledged).toHaveBeenCalledTimes(20);
+  await scheduler.dispose();
+});
+
+test("terminal non-commit results release only their resolved operation", async () => {
+  const { ports, scheduler } = setup();
+  const internal = scheduler as unknown as { operations: Map<string, unknown> };
+  vi.mocked(ports.transmit).mockResolvedValueOnce({ status: "conflict", operationId: "op-a-1" });
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await scheduler.flushDocument(a);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(internal.operations.size).toBe(0);
   await scheduler.dispose();
 });
 

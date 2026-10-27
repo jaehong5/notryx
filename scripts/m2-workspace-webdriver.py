@@ -473,8 +473,9 @@ def main():
                 **authorization, "Content-Type": "application/octet-stream", "Content-Digest": f"sha-256=:{png_digest}:",
             })
             create(operation_id(), folder_id, "pixel.png", "file", 2, png_upload["upload_id"])
-            original = ("\ufeff# Synthetic\r\n\r\nOriginal source.\r\n\r\n"
-                        "![local](pixel.png)\r\n"
+            original = ("\ufeff# Synthetic\r\n\r\nOriginal source.\r\n\r\n" +
+                        "![local](pixel.png)\r\n" * 17 +
+                        "[same](#synthetic) [other](Target.md#destination)\r\n" +
                         f"![remote](http://127.0.0.1:{remote_probe.server_port}/image)\r\n").encode()
             digest = base64.b64encode(hashlib.sha256(original).digest()).decode()
             upload = server_request("POST", "/v1/uploads", data=original, expected=201, headers={
@@ -490,9 +491,16 @@ def main():
                 **authorization, "Content-Type": "application/octet-stream", "Content-Digest": f"sha-256=:{readonly_digest}:",
             })
             create(readonly_id, folder_id, "Readonly.md", "file", 4, readonly_upload["upload_id"])
+            target_id = operation_id()
+            target_source = b"# Target\n\n## Destination\n"
+            target_digest = base64.b64encode(hashlib.sha256(target_source).digest()).decode()
+            target_upload = server_request("POST", "/v1/uploads", data=target_source, expected=201, headers={
+                **authorization, "Content-Type": "application/octet-stream", "Content-Digest": f"sha-256=:{target_digest}:",
+            })
+            create(target_id, folder_id, "Target.md", "file", 5, target_upload["upload_id"])
             performance_nodes = {}
             if args.measure:
-                sequence = 4
+                sequence = 5
                 for size in (100 * 1024, 5 * 1024 * 1024):
                     line = ("# Synthetic measurement\n" + "x" * 39 + "\n").encode()
                     content = (line * (size // len(line) + 1))[:size]
@@ -623,6 +631,18 @@ def main():
             require(checkpoint() is None, "unmodified document unexpectedly created a draft")
             opened_text = js("return document.querySelector('.cm-content').cmTile.root.view.state.doc.toString()")
             require(opened_text == original.decode("utf-8-sig").replace("\r\n", "\n"), "editor did not open the expected source")
+            if not args.measure and not args.recovery_dialogs:
+                oversized = js("""
+                    const view=document.querySelector('.cm-content').cmTile.root.view;
+                    const before=view.state.doc.toString();
+                    view.dispatch({changes:{from:view.state.doc.length,insert:'x'.repeat(64*1024*1024+1)},userEvent:'input.paste'});
+                    return {unchanged:view.state.doc.toString()===before, beforeLength:before.length, afterLength:view.state.doc.length};
+                """)
+                require(oversized["unchanged"] and oversized["beforeLength"] == oversized["afterLength"], "oversized paste changed the editor source")
+                wait(lambda: js("return [...document.querySelectorAll('[role=alert]')].some(e=>e.textContent.includes('입력은 적용되지 않았습니다') && e.textContent.includes('5 MiB'))"))
+                time.sleep(0.35)
+                require(checkpoint() is None and operation_count() == 0, "oversized paste created a checkpoint or operation")
+                require((notes / "Test Folder" / "Example.md").read_bytes() == original, "oversized paste changed the server source")
             if args.recovery_dialogs:
                 export_dir = root / "exports"
                 export_dir.mkdir(mode=0o700)
@@ -694,6 +714,23 @@ print(json.dumps({'sha256':hashlib.sha256(data).hexdigest(), 'length':len(data),
                 wait(lambda: js("return [...document.querySelectorAll('[role=status]')].some(e=>e.textContent.includes('이미 있는 파일은 변경하지 않았습니다'))"), seconds=30)
                 require(set(export_dir.iterdir()) == {target, existing}, "recovery export left unexpected files")
             js("document.querySelector('#preview-toggle').click()")
+            wait(lambda: js("""
+                const images=[...document.querySelectorAll('.markdown-preview img[alt=local]')];
+                return images.length === 17 && images.every(image => image.src.startsWith('blob:') && image.complete && image.naturalWidth === 1);
+            """), seconds=45)
+            js("""
+                window.__notryxScrolls=[];
+                window.__notryxOriginalScroll=Element.prototype.scrollIntoView;
+                Element.prototype.scrollIntoView=function(){window.__notryxScrolls.push(this.getAttribute('data-notryx-heading'))};
+            """)
+            js("const button=[...document.querySelectorAll('.markdown-preview button')].find(item=>item.textContent==='same'); if (!button) throw new Error('same_anchor_missing'); button.click()")
+            wait(lambda: js("return window.__notryxScrolls.includes('synthetic')"))
+            js("const button=[...document.querySelectorAll('.markdown-preview button')].find(item=>item.textContent==='other'); if (!button) throw new Error('cross_anchor_missing'); button.click()")
+            wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0]", target_id))
+            wait(lambda: js("return window.__notryxScrolls.includes('destination')"))
+            js("Element.prototype.scrollIntoView=window.__notryxOriginalScroll; delete window.__notryxOriginalScroll; delete window.__notryxScrolls")
+            js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", document_id)
+            wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", document_id))
             wait(lambda: js("const image=document.querySelector('.markdown-preview img[alt=local]'); return !!image && image.src.startsWith('blob:') && image.complete && image.naturalWidth === 1"))
             time.sleep(0.5)
             require(not remote_requests and not js("return !!document.querySelector('.markdown-preview img[alt=remote]')"), "preview requested a remote image")
@@ -704,7 +741,6 @@ print(json.dumps({'sha256':hashlib.sha256(data).hexdigest(), 'length':len(data),
                 window.addEventListener('pagehide',()=>sessionStorage.setItem('notryx-m2-reload-probe',JSON.stringify({elapsed:performance.now()-started})),{once:true});
                 const view=document.querySelector('.cm-content').cmTile.root.view;
                 view.dispatch({changes:{from:view.state.doc.length,insert:arguments[0]}});
-                document.querySelector('#save').click();
             """, before_reload)
             saved = wait(lambda: (row if (row := checkpoint()) and before_reload.encode() in row[1] else None))
             require(saved[1] == original.replace(b"\r\n", b"\n") + before_reload.encode(), "edited checkpoint did not preserve source")

@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, drawSelection } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
@@ -9,9 +9,13 @@ import { listen } from "@tauri-apps/api/event";
 import { EditorController, initialEditorState } from "./editor-controller";
 import { openDocument, saveDocument, closeDocument, pairWorkspace, workspaceInventory, openWorkspaceDocument, saveWorkspaceDocument, closeWorkspaceDocument, localDrafts, openLocalDraft, adoptPendingPair, discardPendingPair, pendingPairStatus, queueWorkspaceDocument, sendNextWorkspaceOperation, previewWorkspaceImage, workspaceDocumentOutbox, openWorkspaceExternal, recoverWorkspaceSource } from "./ipc";
 import { MarkdownPreview } from "./preview";
+import { PreviewImageQueue } from "./preview-image-queue";
 import { WorkspaceListLoader, workspacePath, draftKey, draftSelectionId } from "./workspace-list";
 import { resolveWorkspaceReference } from "./workspace-reference";
-import { AutoTransmit, type TransmitScope } from "./auto-transmit";
+import { AutoTransmit, QueueStorageError, type TransmitScope } from "./auto-transmit";
+import { clearQueueError, putQueueError, QueueAlerts, type QueueError } from "./queue-errors";
+import { receiptWaitResult, staleTransmissionResult } from "./send-result";
+import { documentSizeGuard } from "./document-size-guard";
 import { StartupGate } from "./migration-recovery";
 import type { NodeState, WorkspaceDraft, WorkspaceRegistration } from "../../../packages/protocol-types";
 import "./style.css";
@@ -35,26 +39,33 @@ function App() {
   const sessionModes = useRef(new Map<string, { mode: "fixture" | "workspace"; documentId: string; uiId: string; scope?: TransmitScope; binding?: WorkspaceRegistration }>());
   const syncRevision = useRef(0);
   const selectedRef = useRef("");
-  const imageTail = useRef<Promise<void>>(Promise.resolve());
-  const imagePending = useRef(0);
+  const imageQueue = useRef(new PreviewImageQueue());
   const draftsRef = useRef<WorkspaceDraft[]>([]);
   const connecting = useRef(false);
   const registrationVersion = useRef(0);
   const [state, setState] = useState(initialEditorState);
   const [preview, setPreview] = useState(false);
   const [previewSource, setPreviewSource] = useState("");
+  const [previewAnchor, setPreviewAnchor] = useState<{ documentId: string; fragment: string } | null>(null);
   const [probeError, setProbeError] = useState("");
   const [isolation, setIsolation] = useState(false);
   const [mode, setMode] = useState<"fixture" | "workspace">("fixture");
   const [nodes, setNodes] = useState<NodeState[]>([]);
+  const [workspacePageStart, setWorkspacePageStart] = useState<string | null>(null);
+  const [workspaceNextPage, setWorkspaceNextPage] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<WorkspaceDraft[]>([]);
   const [connectionError, setConnectionError] = useState("");
+  const [queueErrors, setQueueErrors] = useState<QueueError[]>([]);
   const [pendingPair, setPendingPair] = useState(false);
   const [busy, setBusy] = useState(true);
   const [syncStatus, setSyncStatus] = useState("");
   const [recoveryMessage, setRecoveryMessage] = useState("");
   const [recovering, setRecovering] = useState(false);
   const recoveringRef = useRef(false);
+
+  function reportQueueError(scope: TransmitScope, message: string): void {
+    setQueueErrors((errors) => putQueueError(errors, scope, message));
+  }
 
   async function recoverSource(action: "copy" | "export") {
     if (recoveringRef.current) return;
@@ -85,11 +96,13 @@ function App() {
     }
   }
 
-  async function refreshWorkspace(): Promise<void> {
-    const result = await listLoader.current.load(workspaceInventory);
+  async function refreshWorkspace(startAfter: string | null = null): Promise<void> {
+    const result = await listLoader.current.load(workspaceInventory, startAfter);
     if (!listLoader.current.isCurrent(result.revision)) throw new Error("stale_workspace_list");
     nodesRef.current = result.nodes;
     setNodes(result.nodes);
+    setWorkspacePageStart(startAfter);
+    setWorkspaceNextPage(result.nextAfterId);
   }
 
   async function refreshDrafts(): Promise<void> {
@@ -140,6 +153,8 @@ function App() {
       modeRef.current = "workspace";
       nodesRef.current = [];
       setNodes([]);
+      setWorkspacePageStart(null);
+      setWorkspaceNextPage(null);
       setMode("workspace");
       await refreshDrafts();
       await refreshWorkspace();
@@ -157,6 +172,7 @@ function App() {
     if (connecting.current) return;
     connecting.current = true;
     registrationVersion.current++;
+    listLoader.current.invalidate();
     setBusy(true);
     setConnectionError("");
     try {
@@ -167,6 +183,10 @@ function App() {
         await adoptPendingPair();
         setPendingPair(false);
         modeRef.current = "workspace";
+        nodesRef.current = [];
+        setNodes([]);
+        setWorkspacePageStart(null);
+        setWorkspaceNextPage(null);
         setMode("workspace");
         await refreshDrafts();
         await refreshWorkspace();
@@ -183,11 +203,12 @@ function App() {
 
   useEffect(() => {
     const operations = new Map<string, { scope: TransmitScope; documentId: string; generation: string }>();
+    let operationsBinding: string | undefined;
     const scheduler = new AutoTransmit({
       queue: async (scope, generation) => {
         const queued = await queueWorkspaceDocument(scope.documentId, scope.editSessionId, generation);
         if (queued.committed) setTimeout(() => scheduler.kick(), 0);
-        operations.set(queued.operation_id, { scope, documentId: queued.document_id, generation: queued.generation });
+        if (!queued.committed && operationsBinding === scope.binding) operations.set(queued.operation_id, { scope, documentId: queued.document_id, generation: queued.generation });
         if (controller.current?.isCurrentSession(scope.editSessionId)) { syncRevision.current++; setSyncStatus("동기화 대기"); }
         return { operationId: queued.operation_id, documentId: queued.document_id, generation: queued.generation, committed: queued.committed };
       },
@@ -202,21 +223,24 @@ function App() {
           }
           throw cause;
         }
-        if (version !== registrationVersion.current) return { status: "idle" as const };
         const binding = JSON.stringify(result.binding);
-        const current = [...sessionModes.current.values()].find((session) => session.scope?.binding === binding);
-        if (!current && [...sessionModes.current.values()].some((session) => session.scope)) return { status: "idle" as const };
+        const activeBindings = [...sessionModes.current.values()].flatMap((session) => session.scope ? [session.scope.binding] : []);
+        const stale = staleTransmissionResult(version, registrationVersion.current, binding, activeBindings);
+        if (stale) return stale;
         const operation = result.operation_id ? operations.get(result.operation_id) : undefined;
-        if (operation && operation.scope.binding === binding && result.document_id === operation.documentId && result.generation === operation.generation) {
+        const matchingOperation = operation && operation.scope.binding === binding && result.document_id === operation.documentId && result.generation === operation.generation;
+        if (matchingOperation) {
           if (result.status === "committed") scheduler.acknowledge(operation.scope, { operationId: result.operation_id!, documentId: operation.documentId, generation: operation.generation }, true);
           if (controller.current?.isCurrentSession(operation.scope.editSessionId)) {
             if (result.status === "conflict") setSyncStatus("충돌 있음");
             else if (result.status === "failed" || result.status === "needs_review") setSyncStatus("서버 결과 대조 필요");
             else if (result.status === "ack_pending" || result.status === "pending") setSyncStatus("서버 결과 확인 중");
           }
+          if (result.status === "committed" || result.status === "conflict" || result.status === "failed" || result.status === "abandoned") operations.delete(result.operation_id!);
         }
         if (result.status !== "pending") void refreshSyncStatus().catch((cause) => setConnectionError(String(cause)));
-        if (result.status === "idle" || result.status === "pending" || result.status === "needs_review" || result.status === "ack_pending" || result.status === "auth_required" || result.status === "gateway_auth_required") return { status: result.status };
+        if (result.status === "ack_pending" || result.status === "auth_required" || result.status === "gateway_auth_required") return receiptWaitResult(result.status, result, binding, operation);
+        if (result.status === "idle" || result.status === "pending" || result.status === "needs_review") return { status: result.status };
         if (!result.operation_id) throw new Error("잘못된 서버 저장 응답입니다.");
         return { status: result.status, operationId: result.operation_id };
       },
@@ -226,10 +250,17 @@ function App() {
           void refreshSyncStatus().catch((cause) => setConnectionError(String(cause)));
         }
       },
+      receiptConfirmed: (operationId) => { operations.delete(operationId); },
       authRequired: (reason) => {
         setConnectionError(reason === "auth_required" ? "기기 인증이 만료되었거나 취소됐습니다. 다시 등록해 주세요. 기기 초안은 보존됩니다." : "gateway 인증을 확인해 주세요. 기기 초안은 보존됩니다.");
       },
-      failed: (cause) => setConnectionError(String(cause)),
+      failed: (cause) => { if (!(cause instanceof QueueStorageError)) setConnectionError(String(cause)); },
+      queueStorageFailed: (scope) => {
+        if (controller.current?.isCurrentSession(scope.editSessionId)) reportQueueError(scope, "기기 초안은 저장됐지만 전송을 준비하지 못했습니다. 자동으로 다시 시도합니다.");
+      },
+      queueRecovered: (scope) => {
+        setQueueErrors((errors) => clearQueueError(errors, scope));
+      },
     });
     const instance = new EditorController({
       openDocument: async (id) => {
@@ -268,7 +299,8 @@ function App() {
           catch (cause) {
             if (/checkpoint_pending|composition_in_progress/.test(String(cause))) throw cause;
             queued = false;
-            setConnectionError(`기기 초안은 저장됐지만 전송을 준비하지 못했습니다: ${String(cause)}`);
+            if (cause instanceof QueueStorageError) reportQueueError(session.scope, "기기 초안은 저장됐지만 전송을 준비하지 못했습니다. 초안을 다시 열어 전송해 주세요.");
+            else setConnectionError(`기기 초안은 저장됐지만 전송을 준비하지 못했습니다: ${String(cause)}`);
           }
           if (queued) await scheduler.deactivate(session.scope, close);
           else await scheduler.deactivatePreservingDraft(session.scope, close);
@@ -280,7 +312,7 @@ function App() {
           try { await scheduler.flushDocument(session.scope); }
           catch (cause) {
             if (/checkpoint_pending|composition_in_progress/.test(String(cause))) throw cause;
-            setConnectionError(`기기 초안은 저장됐지만 전송을 준비하지 못했습니다: ${String(cause)}`);
+            if (!(cause instanceof QueueStorageError)) setConnectionError(`기기 초안은 저장됐지만 전송을 준비하지 못했습니다: ${String(cause)}`);
           }
         }
         await invoke<void>("m0_exit");
@@ -289,6 +321,7 @@ function App() {
         setState(next);
         if (selectedRef.current !== next.selected) {
           selectedRef.current = next.selected;
+          setPreviewAnchor(null);
           setRecoveryMessage("");
           syncRevision.current++;
           if (next.selected) void refreshSyncStatus().catch((cause) => setConnectionError(String(cause)));
@@ -320,11 +353,24 @@ function App() {
       opened: (_id, sessionId, generation, localDraft) => {
         const scope = sessionModes.current.get(sessionId)?.scope;
         if (scope) {
+          if (operationsBinding !== scope.binding) {
+            operations.clear();
+            operationsBinding = scope.binding;
+          }
           scheduler.activateBinding(scope.binding);
-          if (localDraft) void scheduler.restore(scope, generation).catch((cause) => setConnectionError(String(cause)));
+          scheduler.openSession(scope);
+          if (localDraft) void scheduler.restore(scope, generation).catch((cause) => { if (!(cause instanceof QueueStorageError)) setConnectionError(String(cause)); });
         }
       },
-      createEditor: ({ source, change, composition, save }) => {
+      manualSync: async (id, sessionId) => {
+        const session = sessionModes.current.get(sessionId);
+        if (!session || session.uiId !== id) throw new Error("편집 세션을 다시 열어 주세요.");
+        if (session.scope) {
+          try { await scheduler.syncNow(session.scope); }
+          catch (cause) { if (!(cause instanceof QueueStorageError)) throw cause; }
+        }
+      },
+      createEditor: ({ source, change, inputRejected, composition, save }) => {
         const editing = new Compartment();
         let compositionTimer: ReturnType<typeof setTimeout> | undefined;
         let compositionPending = false;
@@ -335,6 +381,7 @@ function App() {
               lineNumbers(), history(), drawSelection(),
               keymap.of([{ key: "Mod-s", run: () => { save(); return true; } }, ...defaultKeymap, ...historyKeymap]),
               editing.of([EditorState.readOnly.of(source.readonly), EditorView.editable.of(!source.readonly)]),
+              ...(source.readonly ? [] : [documentSizeGuard(source.bom, inputRejected)]),
               EditorView.contentAttributes.of({ "aria-label": "Markdown 원문" }),
               EditorView.domEventHandlers({
                 compositionstart: () => { clearTimeout(compositionTimer); compositionPending = true; composition(true); return false; },
@@ -397,20 +444,17 @@ function App() {
     };
   }, []);
 
-  const loadPreviewImage = useCallback((target: string): Promise<Uint8Array> => {
+  const loadPreviewImage = useCallback((target: string, signal: AbortSignal): Promise<Uint8Array> => {
     if (mode !== "workspace") return Promise.reject(new Error("작업 공간에 연결되어 있지 않습니다."));
     const found = [...sessionModes.current.entries()].find(([, session]) => session.uiId === state.selected && session.mode === "workspace");
     const resolved = found && resolveWorkspaceReference(nodesRef.current, found[1].documentId, target);
-    if (!found || !resolved || imagePending.current >= 16) return Promise.reject(new Error("이미지를 불러올 수 없습니다."));
+    if (!found || !resolved) return Promise.reject(new Error("이미지를 불러올 수 없습니다."));
     const [sessionId, session] = found;
-    imagePending.current++;
-    const load = imageTail.current.then(() => {
+    return imageQueue.current.load(() => {
       if (sessionModes.current.get(sessionId) !== session) throw new Error("편집 세션이 변경되었습니다.");
       return previewWorkspaceImage(session.documentId, sessionId, resolved.node);
-    });
-    imageTail.current = load.then(() => {}, () => {});
-    return load.finally(() => { imagePending.current--; });
-  }, [mode, state.selected]);
+    }, signal);
+  }, [mode, state.selected, nodes]);
 
   useEffect(() => {
     let disposed = false;
@@ -429,7 +473,8 @@ function App() {
     return () => { disposed = true; clearTimeout(timer); };
   }, []);
 
-  const nodeIndex = new Map(nodes.map((node) => [node.node_id, node]));
+  const nodeIndex = useMemo(() => new Map(nodes.map((node) => [node.node_id, node])), [nodes]);
+  const workspaceButtons = useMemo(() => nodes.filter((node) => node.kind === "file" && !node.deleted).map((node) => <button key={node.node_id} disabled={busy} data-document={node.node_id} aria-current={state.selected === node.node_id ? "page" : undefined} onClick={() => void controller.current?.open(node.node_id)}>{workspacePath(node, nodeIndex)}</button>), [nodes, nodeIndex, busy, state.selected]);
   const hasWorkspaceDocument = [...sessionModes.current.values()].some((session) => session.mode === "workspace" && session.uiId === state.selected);
 
   return <main>
@@ -445,8 +490,11 @@ function App() {
         {pendingPair && <div><button disabled={busy} onClick={() => void resumePair(false)}>대기 중인 등록 이어가기</button><button disabled={busy} onClick={() => void resumePair(true)}>대기 중인 등록 버리기</button></div>}
         <p>{mode === "fixture" ? "합성 문서" : "작업 공간 문서"}</p>
         {mode === "fixture" ? documents.map(([id, label]) => <button key={id} disabled={busy} data-document={id} aria-current={state.selected === id ? "page" : undefined} onClick={() => void controller.current?.open(id)}>{label}</button>)
-          : nodes.filter((node) => node.kind === "file" && !node.deleted).map((node) => <button key={node.node_id} disabled={busy} data-document={node.node_id} aria-current={state.selected === node.node_id ? "page" : undefined} onClick={() => void controller.current?.open(node.node_id)}>{workspacePath(node, nodeIndex)}</button>)}
+          : workspaceButtons}
         {mode === "workspace" && <button disabled={busy} onClick={() => { setConnectionError(""); void refreshWorkspace().catch((cause) => { if (!String(cause).includes("stale_workspace_list")) setConnectionError(String(cause)); }); }}>목록 새로고침</button>}
+        {mode === "workspace" && (workspacePageStart !== null || workspaceNextPage !== null) && <p>목록을 나누어 표시합니다. 다른 구간에 있는 폴더나 첨부는 경로와 링크가 표시되지 않을 수 있습니다.</p>}
+        {mode === "workspace" && workspacePageStart !== null && <button disabled={busy} onClick={() => { setConnectionError(""); void refreshWorkspace().catch((cause) => { if (!String(cause).includes("stale_workspace_list")) setConnectionError(String(cause)); }); }}>처음 목록</button>}
+        {mode === "workspace" && workspaceNextPage !== null && <button disabled={busy} onClick={() => { setConnectionError(""); void refreshWorkspace(workspaceNextPage).catch((cause) => { if (!String(cause).includes("stale_workspace_list")) setConnectionError(String(cause)); }); }}>다음 목록</button>}
         <p>기기에 보존된 초안</p>
         {drafts.map((draft) => <button key={draftKey(draft)} disabled={busy} data-draft-document={draft.document_id} aria-current={state.selected === draftSelectionId(draft, mode) ? "page" : undefined} onClick={() => void controller.current?.open(draftSelectionId(draft, mode))}>{draft.binding.workspace_id.slice(0, 8)} / {draft.document_id}</button>)}
         <button disabled={busy} onClick={() => void refreshDrafts().catch((cause) => setConnectionError(String(cause)))}>초안 목록 새로고침</button>
@@ -459,24 +507,29 @@ function App() {
           previewEnabled.current = !previewEnabled.current;
           setPreview(previewEnabled.current);
           if (previewEnabled.current) setPreviewSource(source.current);
-        }}>미리보기</button><button id="save" onClick={() => void controller.current?.flush().catch(() => {})}>지금 저장</button>{hasWorkspaceDocument && <><button id="copy-source" disabled={recovering} onClick={() => void recoverSource("copy")}>원문 복사</button><button id="export-source" disabled={recovering} onClick={() => void recoverSource("export")}>파일 내보내기</button></>}</div></div>
+        }}>미리보기</button><button id="save" onClick={() => void controller.current?.save().catch(() => {})}>지금 저장</button>{hasWorkspaceDocument && <><button id="copy-source" disabled={recovering} onClick={() => void recoverSource("copy")}>원문 복사</button><button id="export-source" disabled={recovering} onClick={() => void recoverSource("export")}>파일 내보내기</button></>}</div></div>
         {state.notice && <p className="notice">{state.notice}</p>}
         {recoveryMessage && <p role="status">{recoveryMessage}</p>}
-        {(state.error || probeError || connectionError) && <p role="alert">{state.error || probeError || connectionError}</p>}
+        <QueueAlerts error={state.error || probeError || connectionError} queueErrors={queueErrors} />
         <div className="document-content">
           <div id="editor" ref={parent} />
           {preview && <section className="preview-pane" aria-label="Markdown 미리보기">{new TextEncoder().encode(previewSource).length > 1024 * 1024
             ? <p>큰 문서는 미리보기를 표시하지 않습니다.</p>
-            : <MarkdownPreview source={previewSource} loadImage={mode === "workspace" ? loadPreviewImage : undefined} onOpenLink={mode === "workspace" ? (link) => {
+            : <MarkdownPreview source={previewSource} fragment={previewAnchor?.documentId === state.selected ? previewAnchor : null} loadImage={mode === "workspace" ? loadPreviewImage : undefined} onOpenLink={mode === "workspace" ? (link) => {
               if (link.kind === "external") {
                 const found = [...sessionModes.current.entries()].find(([, session]) => session.uiId === state.selected && session.mode === "workspace");
                 if (!found) setConnectionError("문서를 다시 열어 주세요.");
                 else void openWorkspaceExternal(found[1].documentId, found[0], link.target).catch((cause) => setConnectionError(String(cause)));
                 return;
               }
+              if (link.kind !== "document") return;
               const resolved = resolveWorkspaceReference(nodesRef.current, state.selected, link.target);
-              if (!resolved) setConnectionError("연결된 문서를 찾지 못했습니다. 목록을 새로고침해 주세요.");
-              else void controller.current?.open(resolved.node.node_id);
+              if (!resolved) setConnectionError("연결된 문서를 찾지 못했습니다. 목록을 새로고침하거나 다른 구간을 확인해 주세요.");
+              else void controller.current?.open(resolved.node.node_id).then(() => {
+                if (resolved.fragment && selectedRef.current === resolved.node.node_id) {
+                  setPreviewAnchor({ documentId: resolved.node.node_id, fragment: resolved.fragment });
+                }
+              });
             } : undefined} />}</section>}
         </div>
         {isolation && <iframe id="sandbox-probe" title="격리 시험" sandbox="allow-scripts" src="isolation.html" />}

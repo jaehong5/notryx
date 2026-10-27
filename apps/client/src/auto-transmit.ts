@@ -13,9 +13,16 @@ export type QueuedOperation = {
 
 export type TransmitResult =
   | { status: "committed" | "conflict" | "failed" | "abandoned"; operationId: string }
-  | { status: "idle" | "pending" | "offline" | "needs_review" | "ack_pending" | "auth_required" | "gateway_auth_required" };
+  | { status: "ack_pending" | "auth_required" | "gateway_auth_required"; operationId?: string }
+  | { status: "idle" | "pending" | "offline" | "needs_review" };
 
 export type AuthRequiredReason = "auth_required" | "gateway_auth_required";
+
+export class QueueStorageError extends Error {
+  constructor(cause: unknown) {
+    super("Storage", { cause });
+  }
+}
 
 export type AutoTransmitPorts = {
   queue(scope: TransmitScope, generation: string): Promise<QueuedOperation>;
@@ -23,6 +30,9 @@ export type AutoTransmitPorts = {
   acknowledged(scope: TransmitScope, generation: string, current: boolean): void;
   authRequired(reason: AuthRequiredReason): void;
   failed(error: unknown): void;
+  queueStorageFailed?(scope: TransmitScope): void;
+  queueRecovered?(scope: TransmitScope): void;
+  receiptConfirmed?(operationId: string): void;
 };
 
 type DocumentState = {
@@ -40,6 +50,8 @@ type DocumentState = {
   timer?: ReturnType<typeof setTimeout>;
   pending?: Promise<void>;
   pendingTarget?: bigint;
+  queueRetryAt?: number;
+  queueRetryDelay: number;
 };
 
 function number(value: string): bigint {
@@ -58,9 +70,13 @@ function staleCheckpoint(error: unknown): boolean {
   return error === "stale_checkpoint" || (error instanceof Error && error.message === "stale_checkpoint");
 }
 
+function retryableQueueError(error: unknown): boolean {
+  return error === "Storage" || (error instanceof Error && error.message === "Storage");
+}
+
 export class AutoTransmit {
   private documents = new Map<string, DocumentState>();
-  private operations = new Map<string, { key: string; generation: string; documentId: string }>();
+  private operations = new Map<string, { key: string; binding: string; generation: string; documentId: string; awaitingIdle: boolean }>();
   private queueTail: Promise<void> = Promise.resolve();
   private transmitting = false;
   private transmitPending = false;
@@ -72,6 +88,14 @@ export class AutoTransmit {
 
   constructor(private ports: AutoTransmitPorts) {}
 
+  openSession(scope: TransmitScope): void {
+    if (this.stopped) throw new Error("scheduler_stopped");
+    if (this.activeBinding !== undefined && scope.binding !== this.activeBinding) throw new Error("stale_registration");
+    const identity = key(scope);
+    if (this.documents.has(identity)) throw new Error("session_already_initialized");
+    this.documents.set(identity, { scope: { ...scope }, latest: 0n, durable: 0n, queued: 0n, composing: false, awaitingComposition: false, active: true, closing: false, restored: false, queueRetryDelay: 1000 });
+  }
+
   activateBinding(binding: string): void {
     if (this.stopped) throw new Error("scheduler_stopped");
     if (!binding) throw new Error("invalid_scope");
@@ -79,6 +103,12 @@ export class AutoTransmit {
     const previous = this.activeBinding;
     this.activeBinding = binding;
     if (previous !== undefined) {
+      for (const [identity, state] of this.documents) {
+        if (!state.active && state.scope.binding === previous) this.documents.delete(identity);
+      }
+      for (const [id, operation] of this.operations) {
+        if (operation.binding === previous) this.operations.delete(id);
+      }
       clearTimeout(this.retryTimer);
       this.retryTimer = undefined;
       this.retryDelay = 1000;
@@ -142,6 +172,7 @@ export class AutoTransmit {
     const generation = number(receipt.generation);
     const current = durableConfirmed && !this.stopped && !!state && state.active && !state.closing && !state.composing && state.latest === generation && state.durable === generation && state.queued >= generation;
     this.ports.acknowledged({ ...scope }, receipt.generation, current);
+    if (durableConfirmed) this.operations.delete(receipt.operationId);
   }
 
   async flushDocument(scope: TransmitScope): Promise<void> {
@@ -200,6 +231,25 @@ export class AutoTransmit {
     this.startTransmission();
   }
 
+  async syncNow(scope: TransmitScope): Promise<void> {
+    if (this.stopped) throw new Error("scheduler_stopped");
+    if (this.activeBinding !== undefined && scope.binding !== this.activeBinding) throw new Error("stale_registration");
+    const state = this.documents.get(key(scope));
+    const previousQueued = state?.queued;
+    await this.flushDocument(scope);
+    if (this.activeBinding !== undefined && scope.binding !== this.activeBinding) throw new Error("stale_registration");
+    if (state && !state.active) throw new Error("stale_session");
+    if (this.requiresReview || this.stopped) return;
+    clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    this.retryDelay = 1000;
+    if (!this.transmitting && !this.transmitPending && state && previousQueued !== undefined && state.queued > previousQueued) return;
+    if (!this.transmitting) {
+      this.transmitPending = true;
+      this.startTransmission();
+    }
+  }
+
   async dispose(): Promise<void> {
     if (this.stopped) return;
     for (const state of this.documents.values()) if (state.active) await this.flushDocument(state.scope);
@@ -212,12 +262,8 @@ export class AutoTransmit {
     if (this.stopped) throw new Error("scheduler_stopped");
     if (this.activeBinding !== undefined && scope.binding !== this.activeBinding) throw new Error("stale_registration");
     const identity = key(scope);
-    let state = this.documents.get(identity);
-    if (!state) {
-      state = { scope: { ...scope }, latest: 0n, durable: 0n, queued: 0n, composing: false, awaitingComposition: false, active: true, closing: false, restored: false };
-      this.documents.set(identity, state);
-    }
-    if (!state.active) throw new Error("stale_session");
+    const state = this.documents.get(identity);
+    if (!state || !state.active) throw new Error("stale_session");
     if (state.closing) throw new Error("session_closing");
     return state;
   }
@@ -233,6 +279,7 @@ export class AutoTransmit {
       await close?.();
       state.active = false;
       if (state.queued === 0n) state.awaitingComposition = false;
+      if (!state.awaitingComposition) this.documents.delete(key(state.scope));
       this.startTransmission();
     } finally {
       state.closing = false;
@@ -242,10 +289,11 @@ export class AutoTransmit {
   private schedule(state: DocumentState): void {
     clearTimeout(state.timer);
     state.timer = undefined;
-    if (!state.active || state.composing || state.durable <= state.queued || state.firstPendingAt === undefined || state.lastEditAt === undefined) return;
-    const deadline = Math.min(state.lastEditAt + 750, state.firstPendingAt + 5000);
+    if (!state.active || state.composing || (this.activeBinding !== undefined && state.scope.binding !== this.activeBinding) || state.durable <= state.queued || state.firstPendingAt === undefined || state.lastEditAt === undefined) return;
+    const deadline = Math.max(Math.min(state.lastEditAt + 750, state.firstPendingAt + 5000), state.queueRetryAt ?? 0);
     state.timer = setTimeout(() => {
       state.timer = undefined;
+      if (this.activeBinding !== undefined && state.scope.binding !== this.activeBinding) return;
       void this.enqueue(state).catch((error) => { if (!staleCheckpoint(error)) this.ports.failed(error); });
     }, Math.max(0, deadline - Date.now()));
   }
@@ -256,6 +304,7 @@ export class AutoTransmit {
     if (target <= state.queued) return Promise.resolve();
     let success = false;
     let stale = false;
+    let retryable = false;
     const task = this.queueTail.then(async () => {
       const operation = await this.ports.queue({ ...state.scope }, target.toString());
       if (this.activeBinding !== undefined && state.scope.binding !== this.activeBinding) throw new Error("stale_registration");
@@ -264,12 +313,19 @@ export class AutoTransmit {
         (operation.committed !== undefined && typeof operation.committed !== "boolean")) {
         throw new Error("invalid_queued_operation");
       }
-      this.operations.set(operation.operationId, { key: key(state.scope), documentId: operation.documentId, generation: operation.generation });
+      const existing = this.operations.get(operation.operationId);
+      this.operations.set(operation.operationId, { key: key(state.scope), binding: state.scope.binding, documentId: operation.documentId, generation: operation.generation, awaitingIdle: existing?.binding === state.scope.binding && existing.awaitingIdle });
       state.queued = actual;
+      state.queueRetryAt = undefined;
+      state.queueRetryDelay = 1000;
+      this.ports.queueRecovered?.({ ...state.scope });
       if (state.latest === actual) state.firstPendingAt = undefined;
       for (const old of this.documents.values()) {
         if (!old.active && old.awaitingComposition && old.scope.binding === state.scope.binding &&
-          old.scope.documentId === state.scope.documentId && actual >= old.durable) old.awaitingComposition = false;
+          old.scope.documentId === state.scope.documentId && actual >= old.durable) {
+          old.awaitingComposition = false;
+          this.documents.delete(key(old.scope));
+        }
       }
       success = true;
       if (operation.committed) this.acknowledge(state.scope, operation, true);
@@ -279,6 +335,11 @@ export class AutoTransmit {
       }
     }).catch((error: unknown) => {
       stale = staleCheckpoint(error);
+      retryable = retryableQueueError(error);
+      if (retryable) {
+        this.ports.queueStorageFailed?.({ ...state.scope });
+        throw new QueueStorageError(error);
+      }
       throw error;
     });
     this.queueTail = task.catch(() => {});
@@ -286,7 +347,11 @@ export class AutoTransmit {
     state.pending = task.finally(() => {
       state.pending = undefined;
       state.pendingTarget = undefined;
-      if ((success || (stale && state.durable > target)) && state.durable > state.queued) this.schedule(state);
+      if (retryable) {
+        state.queueRetryAt = Date.now() + state.queueRetryDelay;
+        state.queueRetryDelay = Math.min(state.queueRetryDelay * 2, 30_000);
+      }
+      if ((success || retryable || (stale && state.durable > target)) && state.durable > state.queued) this.schedule(state);
     });
     return state.pending;
   }
@@ -312,6 +377,7 @@ export class AutoTransmit {
       if (state.active && state.composing) return true;
       if (state.awaitingComposition && state.latest === state.durable && state.durable === state.queued) {
         state.awaitingComposition = false;
+        if (!state.active) this.documents.delete(key(state.scope));
       }
       return state.awaitingComposition;
     });
@@ -337,6 +403,12 @@ export class AutoTransmit {
       if (binding !== this.activeBinding) { this.transmitPending = true; return; }
       if (result.status === "idle") {
         this.retryDelay = 1000;
+        for (const [id, operation] of this.operations) {
+          if (operation.binding === binding && operation.awaitingIdle) {
+            this.operations.delete(id);
+            this.ports.receiptConfirmed?.(id);
+          }
+        }
         return;
       }
       if (result.status === "needs_review") {
@@ -345,12 +417,20 @@ export class AutoTransmit {
         return;
       }
       if (result.status === "auth_required" || result.status === "gateway_auth_required") {
+        if (result.operationId) {
+          const operation = this.operations.get(result.operationId);
+          if (operation && operation.binding === binding) operation.awaitingIdle = true;
+        }
         this.requiresReview = true;
         this.transmitPending = false;
         this.ports.authRequired(result.status);
         return;
       }
       if (result.status === "pending" || result.status === "offline" || result.status === "ack_pending") {
+        if (result.status === "ack_pending" && result.operationId) {
+          const operation = this.operations.get(result.operationId);
+          if (operation && operation.binding === binding) operation.awaitingIdle = true;
+        }
         this.retry();
         return;
       }
@@ -361,6 +441,7 @@ export class AutoTransmit {
         return;
       }
       seen.add(result.operationId);
+      if (result.status !== "committed") this.operations.delete(result.operationId);
       this.retryDelay = 1000;
     }
   }

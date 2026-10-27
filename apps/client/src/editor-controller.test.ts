@@ -35,6 +35,54 @@ function fixture() {
 
 afterEach(() => { vi.useRealTimers(); });
 
+test("manual save flushes the current edit before prompting server transmission", async () => {
+  const { controller, ports, views } = fixture();
+  const manualSync = vi.fn(async () => {});
+  Object.assign(ports, { manualSync });
+  await controller.open("a");
+  views[0].options.change("latest");
+  views[0].options.save();
+  await vi.waitFor(() => expect(manualSync).toHaveBeenCalledExactlyOnceWith("a", "session-a"));
+  expect(ports.saveDocument).toHaveBeenCalledExactlyOnceWith({ document_id: "a", edit_session_id: "session-a", generation: "1", bytes_base64: btoa("latest") });
+  await controller.dispose();
+});
+
+test("manual save does not transmit an uncommitted checkpoint", async () => {
+  const { controller, ports, views, states } = fixture();
+  ports.manualSync = vi.fn(async () => {});
+  vi.mocked(ports.saveDocument).mockRejectedValueOnce(new Error("disk unavailable"));
+  await controller.open("a");
+  views[0].options.change("unsaved");
+  await expect(controller.save()).rejects.toThrow("disk unavailable");
+  expect(ports.manualSync).not.toHaveBeenCalled();
+  expect(states.at(-1)?.status).toBe("저장 오류, 입력 유지 중");
+  expect(new TextDecoder().decode(controller.recoverySnapshot().bytes)).toBe("unsaved");
+  await controller.dispose();
+});
+
+test("manual save waits for composition to finish", async () => {
+  const { controller, ports, views, states } = fixture();
+  ports.manualSync = vi.fn(async () => {});
+  await controller.open("a");
+  views[0].options.change("조합 중");
+  views[0].composing = true;
+  await controller.save();
+  expect(ports.saveDocument).not.toHaveBeenCalled();
+  expect(ports.manualSync).not.toHaveBeenCalled();
+  expect(states.at(-1)?.error).toContain("조합을 마친 뒤");
+  views[0].composing = false;
+  await controller.dispose();
+});
+
+test("a rejected edit is reported without replacing the current draft", async () => {
+  const { controller, views, states } = fixture();
+  await controller.open("a");
+  views[0].options.inputRejected();
+  expect(states.at(-1)?.error).toContain("입력은 적용되지 않았습니다");
+  expect(new TextDecoder().decode(controller.recoverySnapshot().bytes)).toBe("base");
+  await controller.dispose();
+});
+
 test("recovery snapshot keeps failed input in its current session and waits for composition", async () => {
   const { controller, ports, views } = fixture();
   vi.mocked(ports.saveDocument).mockRejectedValueOnce(new Error("disk"));

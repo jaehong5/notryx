@@ -63,6 +63,28 @@ fn ack_error_status(error: notryx_client_runtime::Error) -> WorkspaceSendStatus 
     }
 }
 
+fn send_error_status(error: notryx_client_runtime::Error) -> WorkspaceSendStatus {
+    match error {
+        notryx_client_runtime::Error::Network | notryx_client_runtime::Error::Unavailable => {
+            WorkspaceSendStatus::Pending
+        }
+        other => ack_error_status(other),
+    }
+}
+
+async fn request_failure(
+    state: &Arc<Mutex<RuntimeState>>,
+    session: &Arc<Session>,
+    snapshot: &SendSnapshot,
+    binding: &RegistrationBinding,
+    item: &OutboxOperation,
+    error: notryx_client_runtime::Error,
+) -> Result<WorkspaceSendResult, String> {
+    let state = state.lock().await;
+    valid_session(&state, session, snapshot)?;
+    Ok(outcome(binding, send_error_status(error), Some(item)))
+}
+
 async fn acknowledge_and_record(
     state: &Arc<Mutex<RuntimeState>>,
     session: &Arc<Session>,
@@ -72,7 +94,11 @@ async fn acknowledge_and_record(
 ) -> Result<Option<WorkspaceSendStatus>, String> {
     let ack = match session.acknowledge(through).await {
         Ok(ack) => ack,
-        Err(error) => return Ok(Some(ack_error_status(error))),
+        Err(error) => {
+            let state = state.lock().await;
+            valid_session(&state, session, snapshot)?;
+            return Ok(Some(ack_error_status(error)));
+        }
     };
     let mut state = state.lock().await;
     valid_session(&state, session, snapshot)?;
@@ -284,23 +310,38 @@ async fn send_inner(
         return Ok(outcome(&binding, WorkspaceSendStatus::Idle, None));
     };
     let receipt = if item.status == OutboxStatus::Abandoning {
-        session
-            .abandon(&abandon(session, &item)?)
-            .await
-            .map_err(|error| format!("{error:?}"))?
+        match session.abandon(&abandon(session, &item)?).await {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                return request_failure(state, session, snapshot, &binding, &item, error).await;
+            }
+        }
     } else if item.status == OutboxStatus::Sent {
         let request = mutation(session, &item)?;
-        match session
-            .operation(&request)
-            .await
-            .map_err(|error| format!("{error:?}"))?
-        {
+        let lookup = match session.operation(&request).await {
+            Ok(lookup) => lookup,
+            Err(error) => {
+                return request_failure(state, session, snapshot, &binding, &item, error).await;
+            }
+        };
+        match lookup {
             OperationLookup::Receipt(receipt) => *receipt,
-            OperationLookup::Missing => session
-                .put_content(&request)
-                .await
-                .map_err(|error| format!("{error:?}"))?,
+            OperationLookup::Missing => {
+                {
+                    let state = state.lock().await;
+                    valid_session(&state, session, snapshot)?;
+                }
+                match session.put_content(&request).await {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        return request_failure(state, session, snapshot, &binding, &item, error)
+                            .await;
+                    }
+                }
+            }
             OperationLookup::Retired => {
+                let state = state.lock().await;
+                valid_session(&state, session, snapshot)?;
                 return Ok(outcome(
                     &binding,
                     WorkspaceSendStatus::NeedsReview,
@@ -367,6 +408,215 @@ mod tests {
             ack_error_status(notryx_client_runtime::Error::Binding),
             WorkspaceSendStatus::NeedsReview
         );
+    }
+
+    #[test]
+    fn send_failures_report_authentication_protocol_and_network_separately() {
+        use notryx_client_runtime::Error;
+        assert_eq!(
+            send_error_status(Error::Unauthorized),
+            WorkspaceSendStatus::AuthRequired
+        );
+        assert_eq!(
+            send_error_status(Error::GatewayAuthRequired),
+            WorkspaceSendStatus::GatewayAuthRequired
+        );
+        assert_eq!(
+            send_error_status(Error::Network),
+            WorkspaceSendStatus::Pending
+        );
+        assert_eq!(
+            send_error_status(Error::Unavailable),
+            WorkspaceSendStatus::Pending
+        );
+        assert_eq!(
+            send_error_status(Error::EpochMismatch),
+            WorkspaceSendStatus::NeedsReview
+        );
+        assert_eq!(
+            send_error_status(Error::Contract),
+            WorkspaceSendStatus::NeedsReview
+        );
+        assert_eq!(
+            send_error_status(Error::IdempotencyMismatch),
+            WorkspaceSendStatus::NeedsReview
+        );
+        assert_eq!(
+            send_error_status(Error::OperationGap),
+            WorkspaceSendStatus::NeedsReview
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_device_before_first_send_reports_auth_and_preserves_the_outbox() {
+        let directory = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let notes = directory.path().join("notes");
+        let server_state = directory.path().join("server-state");
+        std::fs::create_dir(&notes).unwrap();
+        std::fs::create_dir(&server_state).unwrap();
+        let mut workspace = Workspace::initialize(&notes, &server_state).await.unwrap();
+        std::fs::write(notes.join("Example.md"), b"base\n").unwrap();
+        let document = workspace.adopt_root_document("Example.md").await.unwrap();
+        workspace.close().await.unwrap();
+        let config = Config {
+            server: ServerConfig {
+                listen: "127.0.0.1:0".parse().unwrap(),
+                admin_socket: directory.path().join("admin.sock"),
+            },
+            workspace: WorkspaceConfig {
+                notes_root: notes.clone(),
+                state_root: server_state,
+                uploads: Default::default(),
+            },
+        };
+        let server = RunningServer::start(config.clone()).await.unwrap();
+        let AdminResponse::Ok {
+            result:
+                AdminResult::Status {
+                    workspace_id,
+                    owner_principal_id,
+                    ..
+                },
+        } = admin::request(&config.server.admin_socket, &AdminRequest::Status {})
+            .await
+            .unwrap()
+        else {
+            panic!("admin status")
+        };
+        let AdminResponse::Ok {
+            result: AdminResult::Pairing { pairing_secret, .. },
+        } = admin::request(
+            &config.server.admin_socket,
+            &AdminRequest::IssuePairing {
+                principal_id: owner_principal_id,
+            },
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("pairing grant")
+        };
+        let session = Arc::new(
+            Session::pair(
+                &format!("http://{}", server.local_addr()),
+                workspace_id,
+                &pairing_secret,
+            )
+            .await
+            .unwrap(),
+        );
+        let binding = registration_binding(session.binding());
+        let node = session
+            .inventory(None)
+            .await
+            .unwrap()
+            .nodes
+            .into_iter()
+            .find(|node| node.node_id == document.node_id)
+            .unwrap();
+        let mut store = ClientStore::open(directory.path().join("client.sqlite3"))
+            .await
+            .unwrap();
+        store.activate_registration(&binding).await.unwrap();
+        let id = node.node_id.to_string();
+        let edit = store
+            .open_registered_document(&binding, &id, b"base\n", node.content_rev.unwrap().as_str())
+            .await
+            .unwrap();
+        store
+            .save_registered_checkpoint(&binding, &id, &edit.edit_session_id, 1, b"unsent\n")
+            .await
+            .unwrap();
+        let mut state = RuntimeState::new(store, "owner".into());
+        state.session = Some(session);
+        state
+            .gate
+            .open_session(edit.edit_session_id.clone())
+            .unwrap();
+        state.product_sessions.insert(
+            edit.edit_session_id.clone(),
+            ProductSession {
+                document_id: id.clone(),
+                binding: binding.clone(),
+                kind: ProductSessionKind::Active,
+            },
+        );
+        let request = WorkspaceQueueRequest {
+            renderer_session_id: "owner".into(),
+            document_id: id.clone(),
+            edit_session_id: edit.edit_session_id.clone(),
+            expected_generation: "1".into(),
+        };
+        let mut injection = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new().filename(directory.path().join("client.sqlite3")),
+        )
+        .await
+        .unwrap();
+        sqlx::query("CREATE TRIGGER fail_queue BEFORE INSERT ON client_outbox BEGIN SELECT RAISE(ABORT, 'injected failure'); END").execute(&mut injection).await.unwrap();
+        assert_eq!(state.queue_document(&request).await.unwrap_err(), "Storage");
+        let stored = state
+            .store
+            .read_registered_checkpoint(&binding, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.bytes, b"unsent\n");
+        assert_eq!(stored.base_bytes, b"base\n");
+        assert_eq!(state.store.receipt_ack_through(&binding).await.unwrap(), 0);
+        let outbox_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM client_outbox")
+            .fetch_one(&mut injection)
+            .await
+            .unwrap();
+        assert_eq!(outbox_count, 0);
+        sqlx::query("DROP TRIGGER fail_queue")
+            .execute(&mut injection)
+            .await
+            .unwrap();
+        injection.close().await.unwrap();
+        let queued = state.queue_document(&request).await.unwrap();
+        assert_eq!(queued.generation, "1");
+        assert!(matches!(
+            admin::request(
+                &config.server.admin_socket,
+                &AdminRequest::RevokeDevice {
+                    device_id: binding.device_id.clone()
+                }
+            )
+            .await
+            .unwrap(),
+            AdminResponse::Ok { .. }
+        ));
+        let state = Arc::new(Mutex::new(state));
+        let result = send_one(state.clone(), "owner").await.unwrap();
+        assert_eq!(result.status, WorkspaceSendStatus::AuthRequired);
+        assert_eq!(
+            result.operation_id.as_deref(),
+            Some(queued.operation_id.as_str())
+        );
+        let mut locked = state.lock().await;
+        assert_eq!(locked.store.receipt_ack_through(&binding).await.unwrap(), 0);
+        let stored = locked
+            .store
+            .read_registered_checkpoint(&binding, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.bytes, b"unsent\n");
+        assert_eq!(stored.base_bytes, b"base\n");
+        let operation = locked
+            .store
+            .read_outbox_operation(&binding, &queued.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(operation.status, OutboxStatus::Sent);
+        assert_eq!(operation.bytes, b"unsent\n");
+        drop(locked);
+        assert_eq!(std::fs::read(notes.join("Example.md")).unwrap(), b"base\n");
+        server.shutdown().await.unwrap();
     }
 
     #[tokio::test]

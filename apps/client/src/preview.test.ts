@@ -13,7 +13,7 @@ describe("AT-31 basic Markdown preview", () => {
   test("renders Markdown and GFM without changing the source", () => {
     const source = "# 제목\n\n| 이름 | 값 |\n| --- | --- |\n| 가 | 1 |\n\n- [x] 완료\n\n```custom\n<!-- source -->\n```";
     const html = render(source);
-    expect(html).toContain("<h1>제목</h1>");
+    expect(html).toContain('data-notryx-heading="제목">제목</h1>');
     expect(html).toContain("<table>");
     expect(html).toContain("disabled=\"\"");
     expect(html).toContain("&lt;!-- source --&gt;");
@@ -55,7 +55,7 @@ describe("AT-31 basic Markdown preview", () => {
     await act(async () => root.render(createElement(MarkdownPreview, {
       source: "![로컬](./image.png) ![외부](https://example.invalid/track)", loadImage,
     })));
-    expect(loadImage).toHaveBeenCalledExactlyOnceWith("./image.png");
+    expect(loadImage).toHaveBeenCalledExactlyOnceWith("./image.png", expect.any(AbortSignal));
     expect(container.querySelector("img")?.getAttribute("src")).toBe("blob:local-preview");
     expect(container.querySelectorAll("img")).toHaveLength(1);
     await act(async () => root.unmount());
@@ -72,6 +72,51 @@ describe("AT-31 basic Markdown preview", () => {
     await act(async () => root.unmount());
     await act(async () => complete(new Uint8Array([1])));
     expect(create).not.toHaveBeenCalled();
+  });
+
+  test("keeps an in-flight image request across parent rerenders", async () => {
+    let complete!: (bytes: Uint8Array) => void;
+    const pending = new Promise<Uint8Array>((resolve) => { complete = resolve; });
+    const loadImage = vi.fn<(target: string, signal: AbortSignal) => Promise<Uint8Array>>(() => pending);
+    const create = vi.fn(() => "blob:retained");
+    const revoke = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: create });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revoke });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const source = "![로컬](image.png)";
+    await act(async () => root.render(createElement(MarkdownPreview, { source, loadImage, onOpenLink: () => {} })));
+    const signal = loadImage.mock.calls[0][1];
+    await act(async () => root.render(createElement(MarkdownPreview, { source, loadImage, onOpenLink: () => {} })));
+    expect(signal.aborted).toBe(false);
+    expect(loadImage).toHaveBeenCalledTimes(1);
+    await act(async () => complete(new Uint8Array([1])));
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("blob:retained");
+    await act(async () => root.unmount());
+    expect(signal.aborted).toBe(true);
+    expect(revoke).toHaveBeenCalledExactlyOnceWith("blob:retained");
+  });
+
+  test("keeps an image inside a link loading across parent rerenders", async () => {
+    let complete!: (bytes: Uint8Array) => void;
+    const pending = new Promise<Uint8Array>((resolve) => { complete = resolve; });
+    const loadImage = vi.fn<(target: string, signal: AbortSignal) => Promise<Uint8Array>>(() => pending);
+    const onOpenLink = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: () => "blob:linked" });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: () => {} });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const source = "[![로컬](image.png)](target.md)";
+    await act(async () => root.render(createElement(MarkdownPreview, { source, loadImage, onOpenLink: vi.fn() })));
+    const signal = loadImage.mock.calls[0][1];
+    await act(async () => root.render(createElement(MarkdownPreview, { source, loadImage, onOpenLink })));
+    expect(signal.aborted).toBe(false);
+    expect(loadImage).toHaveBeenCalledTimes(1);
+    await act(async () => complete(new Uint8Array([1])));
+    expect(container.querySelector("button img")?.getAttribute("src")).toBe("blob:linked");
+    await act(async () => container.querySelector("button")?.click());
+    expect(onOpenLink).toHaveBeenCalledExactlyOnceWith({ kind: "document", target: "target.md" });
+    await act(async () => root.unmount());
   });
 
   test("activates a safe link only when explicitly clicked", async () => {
@@ -98,8 +143,40 @@ describe("AT-31 basic Markdown preview", () => {
     expect(classifyPreviewLink("https://example.invalid/path")).toEqual({ kind: "external", target: "https://example.invalid/path" });
     expect(classifyPreviewLink("guide/readme.md#part")).toEqual({ kind: "document", target: "guide/readme.md#part" });
     expect(classifyPreviewLink("../guide/my%20notes.md")).toEqual({ kind: "document", target: "../guide/my%20notes.md" });
-    for (const unsafe of ["javascript:alert(1)", "data:text/html,x", "file:///etc/passwd", "//example.invalid/x", "https://user:pass@example.invalid/", "foo/%2fbar", "foo\\bar", "http://example.invalid/%0aheader", "#fragment"]) {
+    expect(classifyPreviewLink("#%EC%A0%9C%EB%AA%A9")).toEqual({ kind: "anchor", target: "제목" });
+    for (const unsafe of ["javascript:alert(1)", "data:text/html,x", "file:///etc/passwd", "//example.invalid/x", "https://user:pass@example.invalid/", "foo/%2fbar", "foo\\bar", "http://example.invalid/%0aheader", "#bad%00anchor", "%23fragment"]) {
       expect(classifyPreviewLink(unsafe), unsafe).toBeNull();
     }
+  });
+
+  test("assigns stable unique heading anchors and follows a same-document link", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(MarkdownPreview, {
+      source: "## 한글 **제목**\n\n## 한글 제목\n\n[이동](#%ED%95%9C%EA%B8%80-%EC%A0%9C%EB%AA%A9-1)",
+    })));
+    const headings = container.querySelectorAll("h2");
+    expect(headings[0].getAttribute("data-notryx-heading")).toBe("한글-제목");
+    expect(headings[1].getAttribute("data-notryx-heading")).toBe("한글-제목-1");
+    const scroll = vi.fn();
+    Object.defineProperty(headings[1], "scrollIntoView", { configurable: true, value: scroll });
+    await act(async () => container.querySelector("button")?.click());
+    expect(scroll).toHaveBeenCalledOnce();
+    await act(async () => root.unmount());
+  });
+
+  test("a fragment supplied after a document switch scrolls to its heading", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const scroll = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: scroll });
+    await act(async () => root.render(createElement(MarkdownPreview, { source: "# 시작" })));
+    await act(async () => root.render(createElement(MarkdownPreview, { source: "# 다음 문서", fragment: { fragment: "다음-문서" } })));
+    expect(container.querySelector("h1")?.getAttribute("data-notryx-heading")).toBe("다음-문서");
+    expect(scroll).toHaveBeenCalledOnce();
+    await act(async () => root.render(createElement(MarkdownPreview, { source: "# 다음 문서", fragment: { fragment: "다음-문서" } })));
+    expect(scroll).toHaveBeenCalledTimes(2);
+    await act(async () => root.unmount());
+    Reflect.deleteProperty(Element.prototype, "scrollIntoView");
   });
 });

@@ -27,6 +27,91 @@ struct Rig {
     initial: Document,
     stream: Uuid,
 }
+
+#[tokio::test]
+async fn unsupported_source_permissions_are_rejected_before_admission() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let mut rig = Rig::new().await;
+    let path = rig.dir.path().join("notes/Document.md");
+    let original = fs::read(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o4640)).unwrap();
+    let request = rig.command(b"proposed\n");
+    let objects = rig.dir.path().join("state/objects/sha256");
+    let names = || {
+        fs::read_dir(&objects)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let original_objects = names();
+    for attempt in [request.clone(), rig.command(b"another proposed edit\n")] {
+        assert_eq!(rig.workspace.save(attempt).await, Err(Error::Storage));
+    }
+    assert!(rig.workspace.ready());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o4640);
+    assert_eq!(names(), original_objects);
+    let last: String =
+        sqlx::query_scalar("SELECT last_seq FROM operation_streams WHERE stream_id=?")
+            .bind(rig.stream.to_string())
+            .fetch_one(&mut rig.workspace.state.connection)
+            .await
+            .unwrap();
+    assert_eq!(last, "0");
+    for query in [
+        "SELECT COUNT(*) FROM operation_receipts",
+        "SELECT COUNT(*) FROM write_intents",
+    ] {
+        let count: i64 = sqlx::query_scalar(query)
+            .fetch_one(&mut rig.workspace.state.connection)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+    assert!(matches!(
+        rig.workspace.save(request).await.unwrap().outcome,
+        Outcome::Saved(_)
+    ));
+}
+
+#[tokio::test]
+async fn metadata_change_after_admission_recovers_without_replacing_source() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let mut rig = Rig::new().await;
+    let path = rig.dir.path().join("notes/Document.md");
+    let original = fs::read(&path).unwrap();
+    let changed_path = path.clone();
+    rig.workspace.hook = Some(Box::new(move |phase| {
+        if phase == Phase::AfterAdmission {
+            fs::set_permissions(&changed_path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        Ok(())
+    }));
+    let request = rig.command(b"proposed\n");
+    assert_eq!(
+        rig.workspace.save(request.clone()).await,
+        Err(Error::ExternalChange)
+    );
+    assert!(!rig.workspace.ready());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    rig.workspace.close().await.unwrap();
+
+    let mut reopened =
+        Workspace::open(&rig.dir.path().join("notes"), &rig.dir.path().join("state"))
+            .await
+            .unwrap();
+    assert!(reopened.ready());
+    assert_eq!(
+        reopened.save(request).await.unwrap().outcome,
+        Outcome::NotApplied
+    );
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o600);
+}
+
 impl Rig {
     async fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();

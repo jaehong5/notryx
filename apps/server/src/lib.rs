@@ -579,6 +579,8 @@ impl Workspace {
                 )
                 .await;
         }
+        self.files
+            .preflight_replace_metadata(&path, &observed.stamp)?;
         self.put_object(&observed.bytes)?;
         self.put_object(&request.bytes)?;
         let mut proposed = before.clone();

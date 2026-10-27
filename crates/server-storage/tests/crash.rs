@@ -93,6 +93,51 @@ fn process_kill_at_file_and_directory_boundaries_preserves_recoverable_bytes() {
 }
 
 #[test]
+fn process_kill_after_temporary_link_recovers_only_unchanged_metadata() {
+    use rustix::fs::{self, XattrFlags};
+
+    for change_attributes in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let notes = directory.path().join("notes");
+        let state = directory.path().join("state");
+        std::fs::create_dir(&notes).unwrap();
+        std::fs::create_dir(&state).unwrap();
+        let store = FileStore::init(
+            &notes,
+            &state,
+            "550e8400-e29b-41d4-a716-446655440000".parse().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(state.join("state.db"), b"state adapter fixture").unwrap();
+        std::fs::write(notes.join("document.md"), b"before").unwrap();
+        drop(store);
+        kill_at(&notes, &state, "replace", StorageStage::AfterTemporaryLink);
+        let temporary = std::fs::read_dir(&notes)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".mdw-tmp-")
+            })
+            .unwrap();
+        if change_attributes {
+            let file = std::fs::File::open(&temporary).unwrap();
+            fs::fsetxattr(&file, "user.synthetic", b"external", XattrFlags::empty()).unwrap();
+        }
+        let reopened = FileStore::open(&notes, &state).unwrap();
+        reopened.cleanup_temporary_files().unwrap();
+        assert_eq!(temporary.exists(), change_attributes);
+        assert_eq!(std::fs::read(notes.join("document.md")).unwrap(), b"before");
+        assert_eq!(
+            std::fs::read_dir(state.join("temporary")).unwrap().count(),
+            usize::from(change_attributes)
+        );
+    }
+}
+
+#[test]
 fn process_kill_during_object_publication_never_exposes_partial_objects() {
     for stage in [
         StorageStage::AfterObjectFileSync,

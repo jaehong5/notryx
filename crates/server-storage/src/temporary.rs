@@ -107,6 +107,22 @@ struct TemporaryRecord {
     parent_inode: u64,
     name: String,
     stamp: OwnedStamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    metadata: Option<String>,
+}
+
+impl TemporaryRecord {
+    fn owns_unchanged(&self, file: &File, observed: &FileStamp) -> bool {
+        let Some(expected) = &self.metadata else {
+            return false;
+        };
+        let Ok(metadata) = file.metadata() else {
+            return false;
+        };
+        self.stamp.matches(&metadata, observed)
+            && super::file_metadata::fingerprint(file).as_ref() == Ok(expected)
+            && hash_observed(file).as_ref() == Ok(observed)
+    }
 }
 
 pub(super) struct TrackedTemporary<'a> {
@@ -262,7 +278,12 @@ impl FileStore {
     ) -> Result<TrackedTemporary<'a>, StorageError> {
         validate_hash(hash)?;
         parent.revalidate(self)?;
+        let before = metadata_stamp(&file.file.metadata().map_err(io)?, String::new());
         let stamp = anonymous_stamp(&file.file, hash)?;
+        let metadata = super::file_metadata::fingerprint(&file.file)?;
+        if metadata_stamp(&file.file.metadata().map_err(io)?, String::new()) != before {
+            return Err(StorageError::Changed);
+        }
         file.file.sync_all().map_err(io)?;
         hook(StorageStage::AfterAnonymousFileSync)?;
         let directory = self.temporary_directory(true)?;
@@ -271,13 +292,14 @@ impl FileStore {
         let record_name = format!("{id}.json");
         let (parent_device, parent_inode) = identity(&parent.directory)?;
         let record = TemporaryRecord {
-            version: 1,
+            version: 2,
             workspace_id: self.workspace_id,
             parent_path: parent.path.clone(),
             parent_device,
             parent_inode,
             name: name.clone(),
             stamp,
+            metadata: Some(metadata),
         };
         let bytes = serde_json::to_vec(&record).map_err(|_| StorageError::InvalidMarker)?;
         if bytes.len() > RECORD_LIMIT {
@@ -331,7 +353,7 @@ impl FileStore {
         }
         let record: TemporaryRecord =
             serde_json::from_slice(&bytes).map_err(|_| StorageError::InvalidMarker)?;
-        if record.version != 1
+        if !matches!((record.version, &record.metadata), (1, None) | (2, Some(_)))
             || record.workspace_id != self.workspace_id
             || record.name != format!(".mdw-tmp-{id}")
             || record.parent_path.len() > 1024
@@ -346,6 +368,9 @@ impl FileStore {
             }
         }
         validate_hash(&record.stamp.hash).map_err(|_| StorageError::InvalidMarker)?;
+        if let Some(metadata) = &record.metadata {
+            validate_hash(metadata).map_err(|_| StorageError::InvalidMarker)?;
+        }
         let stamp = hash_observed(&file)?;
         if stamp.hash != content_hash(&bytes) {
             return Err(StorageError::Changed);
@@ -404,10 +429,7 @@ impl FileStore {
                     Err(error) if preservation_error(error) => return Ok(false),
                     Err(error) => return Err(error),
                 };
-                if !record
-                    .stamp
-                    .matches(&file.metadata().map_err(io)?, &observed)
-                {
+                if !record.owns_unchanged(&file, &observed) {
                     return Ok(false);
                 }
                 match self.record_parent(record) {
@@ -417,13 +439,13 @@ impl FileStore {
                 }
                 let current = match open_regular(&parent, &record.name).and_then(|file| {
                     let stamp = hash_observed(&file)?;
-                    Ok((file.metadata().map_err(io)?, stamp))
+                    Ok((file, stamp))
                 }) {
                     Ok(current) => current,
                     Err(error) if preservation_error(error) => return Ok(false),
                     Err(error) => return Err(error),
                 };
-                if !record.stamp.matches(&current.0, &current.1) {
+                if !record.owns_unchanged(&current.0, &current.1) {
                     return Ok(false);
                 }
                 fs::unlinkat(&parent, record.name.as_str(), AtFlags::empty()).map_err(errno)?;
@@ -547,6 +569,97 @@ mod tests {
         std::fs::read_dir(directory.join("state/temporary"))
             .unwrap()
             .count()
+    }
+
+    fn reopen(directory: &std::path::Path, store: FileStore) -> FileStore {
+        drop(store);
+        std::fs::File::create(directory.join("state/state.db")).unwrap();
+        FileStore::open(directory.join("notes"), directory.join("state")).unwrap()
+    }
+
+    #[test]
+    fn cleanup_after_restart_preserves_metadata_only_changes() {
+        use rustix::fs::{Gid, XattrFlags};
+        use std::os::unix::fs::MetadataExt;
+
+        for modification in ["user_xattr", "access_acl", "group"] {
+            let (directory, store) = fixture();
+            let name = orphan(&store);
+            let path = directory.path().join("notes/Folder").join(name);
+            let file = std::fs::File::open(&path).unwrap();
+            match modification {
+                "user_xattr" => {
+                    fs::fsetxattr(&file, "user.synthetic", b"changed", XattrFlags::empty()).unwrap()
+                }
+                "access_acl" => {
+                    let mut acl = 2u32.to_le_bytes().to_vec();
+                    for (tag, permission, id) in [
+                        (1u16, 6u16, u32::MAX),
+                        (2, 4, 65_534),
+                        (4, 0, u32::MAX),
+                        (16, 0, u32::MAX),
+                        (32, 0, u32::MAX),
+                    ] {
+                        acl.extend_from_slice(&tag.to_le_bytes());
+                        acl.extend_from_slice(&permission.to_le_bytes());
+                        acl.extend_from_slice(&id.to_le_bytes());
+                    }
+                    fs::fsetxattr(&file, "system.posix_acl_access", &acl, XattrFlags::empty())
+                        .unwrap();
+                }
+                "group" => {
+                    let current = file.metadata().unwrap().gid();
+                    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+                    let alternate = status
+                        .lines()
+                        .find_map(|line| line.strip_prefix("Groups:"))
+                        .unwrap()
+                        .split_whitespace()
+                        .filter_map(|value| value.parse::<u32>().ok())
+                        .find(|value| *value != current);
+                    let Some(alternate) = alternate else { continue };
+                    fs::fchown(&file, None, Some(Gid::from_raw(alternate))).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let store = reopen(directory.path(), store);
+            store.cleanup_temporary_files().unwrap();
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                b"owned bytes",
+                "{modification}"
+            );
+            assert_eq!(records(directory.path()), 1, "{modification}");
+        }
+    }
+
+    #[test]
+    fn legacy_records_preserve_existing_files_but_clean_absent_files() {
+        for present in [true, false] {
+            let (directory, store) = fixture();
+            let name = orphan(&store);
+            let path = directory.path().join("notes/Folder").join(&name);
+            let second = directory.path().join("notes/Folder").join(orphan(&store));
+            let record_path = directory
+                .path()
+                .join("state/temporary")
+                .join(format!("{}.json", name.strip_prefix(".mdw-tmp-").unwrap()));
+            let mut record: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+            record["version"] = 1.into();
+            record.as_object_mut().unwrap().remove("metadata");
+            std::fs::set_permissions(&record_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+            std::fs::set_permissions(&record_path, std::fs::Permissions::from_mode(0o400)).unwrap();
+            if !present {
+                std::fs::remove_file(&path).unwrap();
+            }
+            let store = reopen(directory.path(), store);
+            store.cleanup_temporary_files().unwrap();
+            assert_eq!(path.exists(), present);
+            assert!(!second.exists());
+            assert_eq!(records(directory.path()), usize::from(present));
+        }
     }
 
     #[test]

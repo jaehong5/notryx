@@ -16,6 +16,7 @@ pub const MAX_DOCUMENT_BYTES: usize = 5 * 1024 * 1024;
 
 pub const MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
 
+mod file_metadata;
 mod tree;
 pub use tree::{FolderStamp, ObservedEntry};
 mod move_entry;
@@ -523,6 +524,25 @@ impl FileStore {
         self.replace_inner(name, expected, object_hash, &mut |_| Ok(()))
     }
 
+    pub fn preflight_replace_metadata(
+        &self,
+        name: &str,
+        expected: &FileStamp,
+    ) -> Result<(), StorageError> {
+        let parent = self.note_parent(name)?;
+        let target = open_regular(&parent.directory, &parent.name)?;
+        if &hash_observed(&target)? != expected {
+            return Err(StorageError::Changed);
+        }
+        let temporary = AnonymousFile::new(&parent.directory)?;
+        file_metadata::preserve(&target, &temporary.file)?;
+        parent.revalidate(self)?;
+        if &self.observe_stamp(name)? != expected {
+            return Err(StorageError::Changed);
+        }
+        Ok(())
+    }
+
     pub fn sync_observed(&self, name: &str, expected: &FileStamp) -> Result<(), StorageError> {
         self.sync_observed_inner(name, expected, &mut |_| Ok(()))
     }
@@ -613,8 +633,7 @@ impl FileStore {
         if copy_observed(&object, &mut temporary.file)?.hash != object_hash {
             return Err(StorageError::ChecksumMismatch);
         }
-        let permissions = target.metadata().map_err(io)?.mode() & 0o777;
-        fs::fchmod(&temporary.file, Mode::from_raw_mode(permissions)).map_err(errno)?;
+        file_metadata::preserve(&target, &temporary.file)?;
         hook(StorageStage::BeforeTemporaryFileSync)?;
         let mut temporary = self.track_temporary(&parent, temporary, object_hash, hook)?;
         let durable = metadata_stamp(

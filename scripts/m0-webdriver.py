@@ -80,7 +80,12 @@ def main():
         js("document.querySelector(arguments[0]).click()", selector)
 
     def open_document(document_id):
-        click(f'[data-document="{document_id}"]')
+        wait(lambda: js("""
+            const button = document.querySelector('[data-document="' + arguments[0] + '"]');
+            if (!button || button.disabled) return false;
+            button.click();
+            return true;
+        """, document_id))
         wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0]", document_id))
         assert not js("return document.querySelector('[role=alert]')?.textContent")
 

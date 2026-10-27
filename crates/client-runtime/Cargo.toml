@@ -1,0 +1,26 @@
+[package]
+name = "notryx-client-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+notryx-domain = { path = "../domain" }
+notryx-protocol = { path = "../protocol" }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "json"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+sha2 = "=0.11.1"
+base64 = "=0.23.1"
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+uuid = { version = "=1.29.0", features = ["v4"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+open = "=5.4.5"
+
+[dev-dependencies]
+notryx-server = { path = "../../apps/server" }
+tempfile = "=3.27.0"
+tokio = { version = "=1.54.1", features = ["macros", "rt", "net", "io-util", "time"] }
+uuid = { version = "=1.29.0", features = ["v7"] }

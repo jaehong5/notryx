@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import base64
+import http.server
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import socket
 import sqlite3
 import subprocess
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 import time
 import urllib.error
@@ -278,6 +280,43 @@ def main():
             else:
                 assert re.search(r"not allowed|^plugin (fs|shell|sql) not found$", result["error"], re.IGNORECASE), result
         evidence["native_rejections"] = failures
+
+        requests = []
+
+        class PreviewProbe(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                requests.append(self.path)
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, format, *args):
+                pass
+
+        probe_server = http.server.HTTPServer(("127.0.0.1", 0), PreviewProbe)
+        probe_thread = threading.Thread(target=probe_server.serve_forever, daemon=True)
+        probe_thread.start()
+        try:
+            open_document("welcome")
+            probe_url = f"http://127.0.0.1:{probe_server.server_port}/preview-probe"
+            malicious = "\n\n".join([
+                "# 미리보기 보안 시험",
+                "<script>window.previewExecuted = true</script>",
+                "<svg onload='window.previewExecuted = true'></svg>",
+                f"![외부 이미지]({probe_url})",
+                "[위험 링크](javascript:alert(1))",
+            ])
+            js("const v=document.querySelector('.cm-content').cmTile.root.view; v.dispatch({changes:{from:0,to:v.state.doc.length,insert:arguments[0]}})", malicious)
+            click("#preview-toggle")
+            wait(lambda: js("return document.querySelector('.markdown-preview h1')?.textContent === '미리보기 보안 시험'"))
+            assert js("return !window.previewExecuted && !document.querySelector('.markdown-preview script, .markdown-preview svg, .markdown-preview img, .markdown-preview a')")
+            time.sleep(0.5)
+            assert not requests, requests
+            click("#preview-toggle")
+        finally:
+            probe_server.shutdown()
+            probe_thread.join(timeout=5)
+            probe_server.server_close()
+        evidence["tests"].append("basic preview blocks raw HTML, SVG, unsafe links and external image requests in the Linux WebView")
 
         click("#isolation-open")
         handles = wait(lambda: (handles if len(handles := request("GET", f"/session/{session}/window/handles")) == 2 else None))

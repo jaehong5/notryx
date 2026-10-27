@@ -30,12 +30,16 @@ export function openSource(bytes: Uint8Array): Source {
 }
 
 export function saveSource(source: Source, text: string, edited = false): Uint8Array {
+  const bytes = recoverySource(source, text, edited);
+  if ((edited || text !== source.text) && bytes.length > 5 * 1024 * 1024) throw new Error("편집 가능한 최대 크기는 5 MiB입니다.");
+  return bytes;
+}
+
+export function recoverySource(source: Source, text: string, edited = false): Uint8Array {
   if (!edited && text === source.text) return source.original.slice();
   if (source.readonly) throw new Error(source.reason);
   if (/[\uD800-\uDFFF]/u.test(text)) throw new Error("완성되지 않은 Unicode 문자는 저장할 수 없습니다.");
   if (text.includes("\r")) throw new Error("편집기 줄바꿈은 LF여야 합니다.");
   const raw = (source.bom ? "\uFEFF" : "") + text;
-  const bytes = new TextEncoder().encode(raw);
-  if (bytes.length > 5 * 1024 * 1024) throw new Error("편집 가능한 최대 크기는 5 MiB입니다.");
-  return bytes;
+  return new TextEncoder().encode(raw);
 }

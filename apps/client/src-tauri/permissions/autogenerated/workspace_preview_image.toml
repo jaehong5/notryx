@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-preview-image"
+description = "Enables the workspace_preview_image command without any pre-configured scope."
+commands.allow = ["workspace_preview_image"]
+
+[[permission]]
+identifier = "deny-workspace-preview-image"
+description = "Denies the workspace_preview_image command without any pre-configured scope."
+commands.deny = ["workspace_preview_image"]

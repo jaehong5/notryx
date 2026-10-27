@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-inventory"
+description = "Enables the workspace_inventory command without any pre-configured scope."
+commands.allow = ["workspace_inventory"]
+
+[[permission]]
+identifier = "deny-workspace-inventory"
+description = "Denies the workspace_inventory command without any pre-configured scope."
+commands.deny = ["workspace_inventory"]

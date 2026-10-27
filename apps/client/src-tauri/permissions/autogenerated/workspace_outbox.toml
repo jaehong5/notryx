@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-outbox"
+description = "Enables the workspace_outbox command without any pre-configured scope."
+commands.allow = ["workspace_outbox"]
+
+[[permission]]
+identifier = "deny-workspace-outbox"
+description = "Denies the workspace_outbox command without any pre-configured scope."
+commands.deny = ["workspace_outbox"]

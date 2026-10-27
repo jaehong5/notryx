@@ -1,4 +1,4 @@
-import { saveSource, type Source } from "./source";
+import { recoverySource, saveSource, type Source } from "./source";
 
 export type Save = (generation: string, bytes: Uint8Array) => Promise<{ edit_session_id: string; generation: string }>;
 
@@ -7,6 +7,7 @@ export class Draft {
   generation: bigint;
   durable: bigint;
   private pending?: Promise<void>;
+  private edited = false;
 
   constructor(readonly source: Source, readonly session: string, generation: string, private save: Save) {
     this.text = source.text;
@@ -17,7 +18,10 @@ export class Draft {
   change(text: string) {
     this.text = text;
     this.generation += 1n;
+    this.edited = true;
   }
+
+  recoveryBytes(): Uint8Array { return recoverySource(this.source, this.text, this.edited); }
 
   get dirty() { return this.generation !== this.durable; }
 

@@ -78,4 +78,47 @@ describe("AT-01 to AT-05 source preservation", () => {
     const source = openSource(encode(""));
     expect(() => saveSource(source, "가".repeat(2 * 1024 * 1024))).toThrow();
   });
+
+  test("the 5 MiB UTF-8 byte boundary separates editing from read-only viewing", () => {
+    const text = "x".repeat(5 * 1024 * 1024 - 3) + "가";
+    const bytes = encode(text);
+    expect(bytes.length).toBe(5 * 1024 * 1024);
+    const editable = openSource(bytes);
+    expect(editable.readonly).toBe(false);
+    const checkpoint = saveSource(editable, text, true);
+    expect(checkpoint.length).toBe(bytes.length);
+    expect(checkpoint.every((byte, index) => byte === bytes[index])).toBe(true);
+    expect(() => saveSource(editable, text + "x", true)).toThrow();
+
+    const larger = encode(text + "x");
+    const readonly = openSource(larger);
+    expect(readonly.readonly).toBe(true);
+    const unchanged = saveSource(readonly, readonly.text);
+    expect(unchanged.length).toBe(larger.length);
+    expect(unchanged.every((byte, index) => byte === larger[index])).toBe(true);
+    expect(() => saveSource(readonly, readonly.text + "x", true)).toThrow();
+  });
+
+  test("the 5 MiB editing limit includes the UTF-8 BOM", () => {
+    const bytes = new Uint8Array(5 * 1024 * 1024);
+    bytes.set([0xef, 0xbb, 0xbf]);
+    bytes.fill(0x61, 3);
+    const editable = openSource(bytes);
+    expect(editable.bom).toBe(true);
+    expect(editable.readonly).toBe(false);
+    const checkpoint = saveSource(editable, editable.text, true);
+    expect(checkpoint.length).toBe(bytes.length);
+    expect(checkpoint.every((byte, index) => byte === bytes[index])).toBe(true);
+    expect(() => saveSource(editable, editable.text + "x", true)).toThrow();
+
+    const larger = new Uint8Array(bytes.length + 1);
+    larger.set(bytes);
+    larger[bytes.length] = 0x61;
+    const readonly = openSource(larger);
+    expect(readonly.bom).toBe(true);
+    expect(readonly.readonly).toBe(true);
+    const unchanged = saveSource(readonly, readonly.text);
+    expect(unchanged.length).toBe(larger.length);
+    expect(unchanged.every((byte, index) => byte === larger[index])).toBe(true);
+  });
 });

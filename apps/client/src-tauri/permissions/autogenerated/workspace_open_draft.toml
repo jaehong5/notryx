@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-open-draft"
+description = "Enables the workspace_open_draft command without any pre-configured scope."
+commands.allow = ["workspace_open_draft"]
+
+[[permission]]
+identifier = "deny-workspace-open-draft"
+description = "Denies the workspace_open_draft command without any pre-configured scope."
+commands.deny = ["workspace_open_draft"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-export-source"
+description = "Enables the workspace_export_source command without any pre-configured scope."
+commands.allow = ["workspace_export_source"]
+
+[[permission]]
+identifier = "deny-workspace-export-source"
+description = "Denies the workspace_export_source command without any pre-configured scope."
+commands.deny = ["workspace_export_source"]

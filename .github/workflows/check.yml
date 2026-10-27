@@ -22,6 +22,9 @@ jobs:
       - run: bash scripts/check.sh
       - run: npm run tauri -- build --debug --no-bundle
       - run: xvfb-run -a python3 scripts/m0-webdriver.py --output ci-artifacts/webdriver
+      - run: cargo build --locked -p notryx-server
+      - run: xvfb-run -a python3 scripts/m2-workspace-webdriver.py
+      - run: xvfb-run -a python3 scripts/m2-migration-recovery-webdriver.py
       - name: Upload WebDriver failure diagnostics
         if: failure()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

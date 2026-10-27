@@ -6,8 +6,12 @@ header strong { font-size: 21px; letter-spacing: -.6px; }
 .badge { background: #e6ecf6; border-radius: 5px; padding: 3px 7px; font-size: 11px; }
 .caption { color: #607080; font-size: 13px; }
 .layout { display: grid; grid-template-columns: 215px minmax(0, 1fr); height: calc(100dvh - 64px); }
-nav { padding: 18px 12px; border-right: 1px solid #dce1e7; }
+nav { padding: 18px 12px; border-right: 1px solid #dce1e7; overflow-y: auto; }
 nav p { color: #6b7784; font-size: 12px; padding: 0 10px; }
+.workspace-connect { display: grid; gap: 8px; padding: 0 4px 12px; }
+.workspace-connect label { display: grid; gap: 4px; font-size: 12px; color: #526477; }
+.workspace-connect input { width: 100%; min-width: 0; padding: 6px; border: 1px solid #dce1e7; border-radius: 4px; font: inherit; }
+.workspace-connect button { text-align: center; border-color: #dce1e7; background: #fff; }
 button { cursor: pointer; font: inherit; border: 1px solid #dce1e7; border-radius: 6px; padding: 8px 12px; background: white; color: inherit; }
 button:focus-visible { outline: 2px solid #3869a6; outline-offset: 2px; }
 nav button { display: block; width: 100%; text-align: left; border-color: transparent; background: transparent; margin: 4px 0; font-size: 13px; }
@@ -15,7 +19,14 @@ nav button[aria-current="page"] { background: #e3eaf5; color: #234c80; }
 nav small { display: block; color: #6b7784; line-height: 1.6; padding: 18px 10px; }
 .document { display: flex; flex-direction: column; min-height: 0; background: #fff; }
 .toolbar { padding: 12px 22px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e7ebef; font-size: 12px; color: #526477; }
+.toolbar-actions { display: flex; gap: 8px; }
+.document-content { display: flex; flex: 1; min-height: 0; }
 #editor { flex: 1; min-height: 0; overflow: hidden; }
+.preview-pane { flex: 1; min-width: 0; overflow: auto; padding: 8px 24px; border-left: 1px solid #e7ebef; overflow-wrap: anywhere; }
+.markdown-preview pre { overflow: auto; }
+.markdown-preview img { max-width: 100%; height: auto; }
+.markdown-preview table { border-collapse: collapse; }
+.markdown-preview td, .markdown-preview th { border: 1px solid #dce1e7; padding: 4px 8px; }
 .cm-editor { height: 100%; font-size: 14px; }
 .cm-scroller { overflow: auto; font-family: ui-monospace, monospace; }
 .cm-content { padding: 24px 0; }
@@ -29,6 +40,7 @@ iframe { height: 130px; border: 0; border-top: 1px solid #dce1e7; }
   header { height: 52px; padding: 0 16px; }
   .layout { display: flex; flex-direction: column; height: calc(100dvh - 52px); }
   nav { display: flex; overflow-x: auto; gap: 6px; padding: 8px; flex-shrink: 0; border-right: 0; border-bottom: 1px solid #dce1e7; }
+  .workspace-connect { min-width: 210px; padding: 0; }
   nav p, nav small { display: none; }
   nav button { white-space: nowrap; width: auto; }
   .document { flex: 1; }

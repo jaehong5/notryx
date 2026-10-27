@@ -2,5 +2,5 @@
   "identifier": "main",
   "description": "Minimal bundled editor commands",
   "windows": ["main"],
-  "permissions": ["allow-m0-renderer-session", "allow-m0-open", "allow-m0-save", "allow-m0-close", "allow-m0-exit", "allow-m0-open-isolation", "core:event:allow-listen", "core:event:allow-unlisten"]
+  "permissions": ["allow-m0-renderer-session", "allow-m0-open", "allow-m0-save", "allow-m0-close", "allow-m0-exit", "allow-m0-open-isolation", "allow-workspace-pair", "allow-workspace-inventory", "allow-workspace-open", "allow-workspace-save", "allow-workspace-close", "allow-workspace-local-drafts", "allow-workspace-open-draft", "allow-workspace-pair-status", "allow-workspace-adopt-pending-pair", "allow-workspace-discard-pending-pair", "allow-workspace-queue", "allow-workspace-request-abandon", "allow-workspace-send-next", "allow-workspace-outbox", "allow-workspace-document-outbox", "allow-workspace-preview-image", "allow-workspace-open-external", "allow-workspace-export-source", "allow-workspace-copy-source", "allow-client-startup-status", "allow-migration-inventory", "allow-migration-source", "allow-migration-export", "core:event:allow-listen", "core:event:allow-unlisten"]
 }

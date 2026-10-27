@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-client-startup-status"
+description = "Enables the client_startup_status command without any pre-configured scope."
+commands.allow = ["client_startup_status"]
+
+[[permission]]
+identifier = "deny-client-startup-status"
+description = "Denies the client_startup_status command without any pre-configured scope."
+commands.deny = ["client_startup_status"]

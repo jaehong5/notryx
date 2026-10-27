@@ -2,10 +2,19 @@ use std::{collections::BTreeMap, error::Error, fs, path::PathBuf};
 
 use notryx_protocol::{
     AbandonRequest, AckRequest, AckResponse, AdminRecoverySummary, AdminRequest, AdminResponse,
-    AdminResult, ApiError, CreateNodeRequest, HeadHint, InventoryPage, M0CloseRequest,
-    M0OpenRequest, M0OpenedDocument, M0SaveRequest, M0SavedCheckpoint, MoveNodeRequest, NodeKind,
-    NodeMetadata, NodeState, OperationError, OperationReceipt, PairRequest, PairResponse,
-    RestoreNodeRequest, ServerInfo, TrashNode, TrashPage, UploadResponse, WorkspaceRole,
+    AdminResult, ApiError, ClientStartupMode, ClientStartupStatus, CreateNodeRequest, HeadHint,
+    InventoryPage, M0CloseRequest, M0OpenRequest, M0OpenedDocument, M0SaveRequest,
+    M0SavedCheckpoint, MigrationDraft, MigrationInventory, MigrationInventoryRequest,
+    MigrationOperation, MigrationSource, MigrationSourceKind, MigrationSourceRequest,
+    MoveNodeRequest, NodeKind, NodeMetadata, NodeState, OperationError, OperationReceipt,
+    PairRequest, PairResponse, RestoreNodeRequest, ServerInfo, TrashNode, TrashPage,
+    UploadResponse, WorkspaceAbandonRequest, WorkspaceAbandonState, WorkspaceDocumentOutboxState,
+    WorkspaceDraft, WorkspaceDraftRequest, WorkspaceExternalLinkRequest, WorkspaceInventoryRequest,
+    WorkspaceLocalRequest, WorkspaceOpenRequest, WorkspaceOpenedDocument, WorkspaceOutboxEntry,
+    WorkspaceOutboxFailure, WorkspaceOutboxPage, WorkspaceOutboxRequest, WorkspaceOutboxStatus,
+    WorkspacePairRequest, WorkspacePairStatus, WorkspacePreviewImage, WorkspacePreviewImageRequest,
+    WorkspaceQueueRequest, WorkspaceQueuedOperation, WorkspaceRecoveryRequest,
+    WorkspaceRegistration, WorkspaceRole, WorkspaceSendResult, WorkspaceSendStatus,
 };
 use schemars::{JsonSchema, schema_for};
 use ts_rs::{Config, TS};
@@ -43,6 +52,40 @@ fn main() -> Result<(), Box<dyn Error>> {
     add_type::<M0OpenedDocument>(&config, &mut declarations, &mut schemas)?;
     add_type::<M0SaveRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<M0SavedCheckpoint>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspacePairRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceInventoryRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceOpenRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceOpenedDocument>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceRegistration>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDraft>(&config, &mut declarations, &mut schemas)?;
+    add_type::<ClientStartupMode>(&config, &mut declarations, &mut schemas)?;
+    add_type::<ClientStartupStatus>(&config, &mut declarations, &mut schemas)?;
+    add_type::<MigrationDraft>(&config, &mut declarations, &mut schemas)?;
+    add_type::<MigrationOperation>(&config, &mut declarations, &mut schemas)?;
+    add_type::<MigrationInventory>(&config, &mut declarations, &mut schemas)?;
+    add_type::<MigrationInventoryRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<MigrationSourceKind>(&config, &mut declarations, &mut schemas)?;
+    add_type::<MigrationSourceRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<MigrationSource>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspacePairStatus>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceLocalRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDraftRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspacePreviewImageRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspacePreviewImage>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceQueueRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceExternalLinkRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceRecoveryRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceAbandonRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceQueuedOperation>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceSendStatus>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceSendResult>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceOutboxStatus>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceAbandonState>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceOutboxFailure>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceOutboxEntry>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDocumentOutboxState>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceOutboxPage>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceOutboxRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceRole>(&config, &mut declarations, &mut schemas)?;
     add_type::<NodeKind>(&config, &mut declarations, &mut schemas)?;
     add_type::<PairRequest>(&config, &mut declarations, &mut schemas)?;

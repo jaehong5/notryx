@@ -87,6 +87,7 @@ sdkmanager --sdk_root="$ANDROID_HOME" --list_installed
 adb version
 pkg-config --modversion gtk+-3.0 webkit2gtk-4.1 libsoup-3.0 openssl
 sqlite3 --version
+openssl version
 ```
 
 도구 설치와 앱 빌드는 실제 기기의 입력, 접근성, 저장 성능과 복구 검증을 대신하지 않는다. 측정 전에 장치, workload, 허용 지연과 자원 기준을 정하고 실제 실행 결과와 미실행 항목을 구분한다.
@@ -106,17 +107,20 @@ npm run tauri -- dev
 bash scripts/check.sh
 npm run tauri -- build --debug --no-bundle
 xvfb-run -a python3 scripts/m0-webdriver.py
+cargo build --locked -p notryx-server
+xvfb-run -a python3 scripts/m2-workspace-webdriver.py
+xvfb-run -a python3 scripts/m2-migration-recovery-webdriver.py
 xvfb-run -a python3 scripts/m0-webdriver.py --measure
 cargo run --locked -p notryx-client-store --example checkpoint_bench
 python3 scripts/m0-fsync.py
 npm run tauri -- android build --debug --target aarch64 --apk --ci
 ```
 
-WebKitWebDriver를 별도 위치에 추출했다면 `--driver /path/to/WebKitWebDriver`를 추가한다. UI와 저장 성능 측정 중에는 다른 빌드를 실행하지 않는다. 현재 `.cargo/config.toml`은 작업 수를 2로 제한하며 Android도 Gradle worker 2개와 최대 JVM heap 2 GiB를 사용한다. Android Studio와 에뮬레이터는 사용하지 않는다.
+WebKitWebDriver를 별도 위치에 추출했다면 `--driver /path/to/WebKitWebDriver`를 추가한다. 마이그레이션 복구 시험은 격리된 Xvfb에서 GTK 파일 대화상자와 합성 SQLite를 사용한다. 일반 편집기의 복사 및 파일 내보내기 대화상자를 검사하려면 `dbus-run-session -- xvfb-run -a python3 scripts/m2-workspace-webdriver.py --recovery-dialogs`를 실행한다. 이 추가 시험에는 Python GI와 GTK3 typelib, libX11, libXtst가 필요하다. UI와 저장 성능 측정 중에는 다른 빌드를 실행하지 않는다. 현재 `.cargo/config.toml`은 작업 수를 2로 제한하며 Android도 Gradle worker 2개와 최대 JVM heap 2 GiB를 사용한다. Android Studio와 에뮬레이터는 사용하지 않는다.
 
-전체 검사는 TS build/lint/unit, Rust format/clippy/unit/integration, 생성 계약 drift, 순수 계층 의존성과 npm 보안 정보를 확인한다. 저장 시험은 독립 임시 DB를 만들고 실제 프로세스 강제 종료도 수행한다. WebDriver 역시 임시 client store를 사용하며 결과와 화면을 `.artifacts/m0-webview`에 남긴다. 성능은 검사 프로세스 종료 코드와 구분해 측정 전에 정한 기준에 따라 판정한다.
+전체 검사는 TS build/lint/unit, Rust format/clippy/unit/integration, 생성 계약 drift, 순수 계층 의존성과 npm 보안 정보를 확인한다. 저장 시험은 독립 임시 DB를 만들고 실제 프로세스 강제 종료도 수행한다. TLS 시험은 OpenSSL CLI로 임시 자체 서명 인증서와 loopback 서버를 만든다. WebDriver 역시 임시 client store를 사용하며 결과와 화면을 `.artifacts/m0-webview`에 남긴다. 성능은 검사 프로세스 종료 코드와 구분해 측정 전에 정한 기준에 따라 판정한다.
 
-`.github/workflows/check.yml`은 Linux 검사와 Tauri WebDriver 시험, 서버 Docker 이미지 빌드와 격리 실행 시험을 CI에 연결한다. 생성된 WebDriver 실패 자료와 Docker 시험 결과는 각각 7일간 보관한다. CI는 이미지를 게시하거나 서버에 배포하지 않는다. 원격 GitHub Actions 실행은 소스를 올린 뒤 별도로 확인해야 한다. 프로토콜 파일은 `cargo run -p notryx-protocol --bin generate-contracts`로 생성하고 직접 수정하지 않는다.
+`.github/workflows/check.yml`은 Linux 검사와 Tauri WebDriver 시험, 합성 서버와 실제 클라이언트의 M2 통합 시험, 마이그레이션 복구 시험, 서버 Docker 이미지 빌드와 격리 실행 시험을 CI에 연결한다. M0 WebDriver 실패 자료와 Docker 시험 결과는 각각 7일간 보관한다. M2 시험은 credential과 본문을 로그나 결과 파일에 기록하지 않는다. CI는 이미지를 게시하거나 서버에 배포하지 않는다. 원격 GitHub Actions 실행은 소스를 올린 뒤 별도로 확인해야 한다. 프로토콜 파일은 `cargo run -p notryx-protocol --bin generate-contracts`로 생성하고 직접 수정하지 않는다.
 
 
 ## 개발 서버 실행과 조회
@@ -425,4 +429,4 @@ cargo test --locked -p notryx-server --test http_upload progressing_upload_obeys
 
 저장 코어는 content revision, 요청 순번과 digest를 검사한다. 저장 전후의 예상 상태와 다른 파일이 발견되면 자료를 보존하고 쓰기를 막는다. 로컬 관리자가 현재 상태를 검증하고 명시적으로 해결할 수 있다. 다른 프로세스의 동시 파일 변경을 완전히 제어할 수는 없다.
 
-일반 본문 객체의 GC, watcher와 외부 변경 수용, SSE와 journal 동기화, token renew, gateway 인증과 클라이언트 서버 연동은 후속 범위다. 실제 Linux IME와 Android 실기기 검증도 별도로 남아 있다. 실패 주입 hook은 테스트용이며 운영 환경변수로 활성화하지 않는다.
+일반 본문 객체의 GC, watcher와 외부 변경 수용, SSE와 journal 동기화, token renew와 gateway 인증은 후속 범위다. 실제 Linux IME와 Android 실기기 검증도 별도로 남아 있다. 실패 주입 hook은 테스트용이며 운영 환경변수로 활성화하지 않는다.

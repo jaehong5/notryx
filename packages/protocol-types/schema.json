@@ -782,6 +782,48 @@
       "title": "ApiError",
       "type": "object"
     },
+    "ClientStartupMode": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "ready",
+        "recovery",
+        "store_locked",
+        "unavailable"
+      ],
+      "title": "ClientStartupMode",
+      "type": "string"
+    },
+    "ClientStartupStatus": {
+      "$defs": {
+        "ClientStartupMode": {
+          "enum": [
+            "ready",
+            "recovery",
+            "store_locked",
+            "unavailable"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/ClientStartupMode"
+        },
+        "renderer_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "ClientStartupStatus",
+      "type": "object"
+    },
     "CreateNodeRequest": {
       "$defs": {
         "NodeKind": {
@@ -1071,6 +1113,458 @@
         "generation"
       ],
       "title": "M0SavedCheckpoint",
+      "type": "object"
+    },
+    "MigrationDraft": {
+      "$defs": {
+        "WorkspaceRegistration": {
+          "additionalProperties": false,
+          "properties": {
+            "device_id": {
+              "type": "string"
+            },
+            "device_stream_id": {
+              "type": "string"
+            },
+            "server_origin": {
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "server_origin",
+            "workspace_id",
+            "workspace_epoch",
+            "device_id",
+            "device_stream_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceRegistration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "document_id": {
+          "type": "string"
+        },
+        "generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "has_base": {
+          "type": "boolean"
+        },
+        "has_checkpoint": {
+          "type": "boolean"
+        },
+        "metadata_error": {
+          "type": "boolean"
+        },
+        "registration_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "storage_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "storage_id",
+        "document_id",
+        "has_checkpoint",
+        "has_base",
+        "metadata_error"
+      ],
+      "title": "MigrationDraft",
+      "type": "object"
+    },
+    "MigrationInventory": {
+      "$defs": {
+        "MigrationDraft": {
+          "additionalProperties": false,
+          "properties": {
+            "binding": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceRegistration"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "document_id": {
+              "type": "string"
+            },
+            "generation": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "has_base": {
+              "type": "boolean"
+            },
+            "has_checkpoint": {
+              "type": "boolean"
+            },
+            "metadata_error": {
+              "type": "boolean"
+            },
+            "registration_status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "storage_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "storage_id",
+            "document_id",
+            "has_checkpoint",
+            "has_base",
+            "metadata_error"
+          ],
+          "type": "object"
+        },
+        "MigrationOperation": {
+          "additionalProperties": false,
+          "properties": {
+            "binding": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceRegistration"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "document_id": {
+              "type": "string"
+            },
+            "generation": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "metadata_error": {
+              "type": "boolean"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "registration_status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sequence": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "type": "string"
+            },
+            "terminal_kind": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "operation_id",
+            "document_id",
+            "status",
+            "metadata_error"
+          ],
+          "type": "object"
+        },
+        "WorkspaceRegistration": {
+          "additionalProperties": false,
+          "properties": {
+            "device_id": {
+              "type": "string"
+            },
+            "device_stream_id": {
+              "type": "string"
+            },
+            "server_origin": {
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "server_origin",
+            "workspace_id",
+            "workspace_epoch",
+            "device_id",
+            "device_stream_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "draft_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "drafts": {
+          "items": {
+            "$ref": "#/$defs/MigrationDraft"
+          },
+          "type": "array"
+        },
+        "next_draft_after_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "next_operation_after_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operations": {
+          "items": {
+            "$ref": "#/$defs/MigrationOperation"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "drafts",
+        "operations"
+      ],
+      "title": "MigrationInventory",
+      "type": "object"
+    },
+    "MigrationInventoryRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "draft_after_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "include_drafts": {
+          "type": "boolean"
+        },
+        "include_operations": {
+          "type": "boolean"
+        },
+        "operation_after_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "renderer_session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "renderer_session_id",
+        "include_drafts",
+        "include_operations"
+      ],
+      "title": "MigrationInventoryRequest",
+      "type": "object"
+    },
+    "MigrationOperation": {
+      "$defs": {
+        "WorkspaceRegistration": {
+          "additionalProperties": false,
+          "properties": {
+            "device_id": {
+              "type": "string"
+            },
+            "device_stream_id": {
+              "type": "string"
+            },
+            "server_origin": {
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "server_origin",
+            "workspace_id",
+            "workspace_epoch",
+            "device_id",
+            "device_stream_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceRegistration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "document_id": {
+          "type": "string"
+        },
+        "generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata_error": {
+          "type": "boolean"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "registration_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sequence": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "terminal_kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "document_id",
+        "status",
+        "metadata_error"
+      ],
+      "title": "MigrationOperation",
+      "type": "object"
+    },
+    "MigrationSource": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "bytes_base64": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bytes_base64"
+      ],
+      "title": "MigrationSource",
+      "type": "object"
+    },
+    "MigrationSourceKind": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "store",
+        "draft",
+        "base",
+        "outbox"
+      ],
+      "title": "MigrationSourceKind",
+      "type": "string"
+    },
+    "MigrationSourceRequest": {
+      "$defs": {
+        "MigrationSourceKind": {
+          "enum": [
+            "store",
+            "draft",
+            "base",
+            "outbox"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/MigrationSourceKind"
+        },
+        "renderer_session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "renderer_session_id",
+        "kind"
+      ],
+      "title": "MigrationSourceRequest",
       "type": "object"
     },
     "MoveNodeRequest": {
@@ -3153,6 +3647,1098 @@
       "title": "UploadResponse",
       "type": "object"
     },
+    "WorkspaceAbandonRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "renderer_session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "renderer_session_id",
+        "operation_id"
+      ],
+      "title": "WorkspaceAbandonRequest",
+      "type": "object"
+    },
+    "WorkspaceAbandonState": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "none",
+        "requested",
+        "sent"
+      ],
+      "title": "WorkspaceAbandonState",
+      "type": "string"
+    },
+    "WorkspaceDocumentOutboxState": {
+      "$defs": {
+        "WorkspaceAbandonState": {
+          "enum": [
+            "none",
+            "requested",
+            "sent"
+          ],
+          "type": "string"
+        },
+        "WorkspaceOutboxEntry": {
+          "additionalProperties": false,
+          "properties": {
+            "abandon_state": {
+              "$ref": "#/$defs/WorkspaceAbandonState"
+            },
+            "document_id": {
+              "type": "string"
+            },
+            "failure": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceOutboxFailure"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "frozen": {
+              "type": "boolean"
+            },
+            "generation": {
+              "type": "string"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "type": "string"
+            },
+            "payload_retired": {
+              "type": "boolean"
+            },
+            "status": {
+              "$ref": "#/$defs/WorkspaceOutboxStatus"
+            }
+          },
+          "required": [
+            "operation_id",
+            "operation_seq",
+            "document_id",
+            "generation",
+            "status",
+            "frozen",
+            "abandon_state",
+            "payload_retired"
+          ],
+          "type": "object"
+        },
+        "WorkspaceOutboxFailure": {
+          "enum": [
+            "node_deleted",
+            "recovery_conflict",
+            "not_found",
+            "not_applied"
+          ],
+          "type": "string"
+        },
+        "WorkspaceOutboxStatus": {
+          "enum": [
+            "queued",
+            "sent",
+            "committed",
+            "conflict",
+            "abandoning",
+            "abandoned",
+            "failed"
+          ],
+          "type": "string"
+        },
+        "WorkspaceRegistration": {
+          "additionalProperties": false,
+          "properties": {
+            "device_id": {
+              "type": "string"
+            },
+            "device_stream_id": {
+              "type": "string"
+            },
+            "server_origin": {
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "server_origin",
+            "workspace_id",
+            "workspace_epoch",
+            "device_id",
+            "device_stream_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/WorkspaceRegistration"
+        },
+        "confirmed_through": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "document_id": {
+          "type": "string"
+        },
+        "has_conflict": {
+          "type": "boolean"
+        },
+        "has_failure": {
+          "type": "boolean"
+        },
+        "latest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceOutboxEntry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "binding",
+        "document_id",
+        "has_conflict",
+        "has_failure",
+        "confirmed_through"
+      ],
+      "title": "WorkspaceDocumentOutboxState",
+      "type": "object"
+    },
+    "WorkspaceDraft": {
+      "$defs": {
+        "WorkspaceRegistration": {
+          "additionalProperties": false,
+          "properties": {
+            "device_id": {
+              "type": "string"
+            },
+            "device_stream_id": {
+              "type": "string"
+            },
+            "server_origin": {
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "server_origin",
+            "workspace_id",
+            "workspace_epoch",
+            "device_id",
+            "device_stream_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/WorkspaceRegistration"
+        },
+        "current_registration": {
+          "type": "boolean"
+        },
+        "document_id": {
+          "type": "string"
+        },
+        "generation": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "has_session": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "binding",
+        "document_id",
+        "generation",
+        "current_registration",
+        "has_session"
+      ],
+      "title": "WorkspaceDraft",
+      "type": "object"
+    },
+    "WorkspaceDraftRequest": {
+      "$defs": {
+        "WorkspaceRegistration": {
+          "additionalProperties": false,
+          "properties": {
+            "device_id": {
+              "type": "string"
+            },
+            "device_stream_id": {
+              "type": "string"
+            },
+            "server_origin": {
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "server_origin",
+            "workspace_id",
+            "workspace_epoch",
+            "device_id",
+            "device_stream_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/WorkspaceRegistration"
+        },
+        "document_id": {
+          "type": "string"
+        },
+        "renderer_session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "renderer_session_id",
+        "binding",
+        "document_id"
+      ],
+      "title": "WorkspaceDraftRequest",
+      "type": "object"
+    },
+    "WorkspaceExternalLinkRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "document_id": {
+          "type": "string"
+        },
+        "edit_session_id": {
+          "type": "string"
+        },
+        "renderer_session_id": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "renderer_session_id",
+        "document_id",
+        "edit_session_id",
+        "url"
+      ],
+      "title": "WorkspaceExternalLinkRequest",
+      "type": "object"
+    },
+    "WorkspaceInventoryRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "after_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "renderer_session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "renderer_session_id"
+      ],
+      "title": "WorkspaceInventoryRequest",
+      "type": "object"
+    },
+    "WorkspaceLocalRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "renderer_session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "renderer_session_id"
+      ],
+      "title": "WorkspaceLocalRequest",
+      "type": "object"
+    },
+    "WorkspaceOpenRequest": {
+      "$defs": {
+        "NodeKind": {
+          "enum": [
+            "file",
+            "folder"
+          ],
+          "type": "string"
+        },
+        "NodeState": {
+          "additionalProperties": false,
+          "properties": {
+            "children_generation": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "content_etag": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_rev": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "deleted": {
+              "type": "boolean"
+            },
+            "kind": {
+              "$ref": "#/$defs/NodeKind"
+            },
+            "last_change_seq": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "meta_etag": {
+              "type": "string"
+            },
+            "meta_rev": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "node_etag": {
+              "type": "string"
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "size": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "node_id",
+            "parent_id",
+            "name",
+            "kind",
+            "deleted",
+            "content_rev",
+            "content_etag",
+            "meta_rev",
+            "meta_etag",
+            "node_etag",
+            "content_hash",
+            "size",
+            "children_generation",
+            "last_change_seq"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/NodeState"
+        },
+        "renderer_session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "renderer_session_id",
+        "node"
+      ],
+      "title": "WorkspaceOpenRequest",
+      "type": "object"
+    },
+    "WorkspaceOpenedDocument": {
+      "$defs": {
+        "WorkspaceRegistration": {
+          "additionalProperties": false,
+          "properties": {
+            "device_id": {
+              "type": "string"
+            },
+            "device_stream_id": {
+              "type": "string"
+            },
+            "server_origin": {
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "server_origin",
+            "workspace_id",
+            "workspace_epoch",
+            "device_id",
+            "device_stream_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/WorkspaceRegistration"
+        },
+        "bytes_base64": {
+          "type": "string"
+        },
+        "document_id": {
+          "type": "string"
+        },
+        "edit_session_id": {
+          "type": "string"
+        },
+        "generation": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "local_draft": {
+          "type": "boolean"
+        },
+        "readonly": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "binding",
+        "document_id",
+        "edit_session_id",
+        "generation",
+        "bytes_base64",
+        "readonly",
+        "local_draft"
+      ],
+      "title": "WorkspaceOpenedDocument",
+      "type": "object"
+    },
+    "WorkspaceOutboxEntry": {
+      "$defs": {
+        "WorkspaceAbandonState": {
+          "enum": [
+            "none",
+            "requested",
+            "sent"
+          ],
+          "type": "string"
+        },
+        "WorkspaceOutboxFailure": {
+          "enum": [
+            "node_deleted",
+            "recovery_conflict",
+            "not_found",
+            "not_applied"
+          ],
+          "type": "string"
+        },
+        "WorkspaceOutboxStatus": {
+          "enum": [
+            "queued",
+            "sent",
+            "committed",
+            "conflict",
+            "abandoning",
+            "abandoned",
+            "failed"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "abandon_state": {
+          "$ref": "#/$defs/WorkspaceAbandonState"
+        },
+        "document_id": {
+          "type": "string"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceOutboxFailure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "frozen": {
+          "type": "boolean"
+        },
+        "generation": {
+          "type": "string"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "operation_seq": {
+          "type": "string"
+        },
+        "payload_retired": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/WorkspaceOutboxStatus"
+        }
+      },
+      "required": [
+        "operation_id",
+        "operation_seq",
+        "document_id",
+        "generation",
+        "status",
+        "frozen",
+        "abandon_state",
+        "payload_retired"
+      ],
+      "title": "WorkspaceOutboxEntry",
+      "type": "object"
+    },
+    "WorkspaceOutboxFailure": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "node_deleted",
+        "recovery_conflict",
+        "not_found",
+        "not_applied"
+      ],
+      "title": "WorkspaceOutboxFailure",
+      "type": "string"
+    },
+    "WorkspaceOutboxPage": {
+      "$defs": {
+        "WorkspaceAbandonState": {
+          "enum": [
+            "none",
+            "requested",
+            "sent"
+          ],
+          "type": "string"
+        },
+        "WorkspaceOutboxEntry": {
+          "additionalProperties": false,
+          "properties": {
+            "abandon_state": {
+              "$ref": "#/$defs/WorkspaceAbandonState"
+            },
+            "document_id": {
+              "type": "string"
+            },
+            "failure": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceOutboxFailure"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "frozen": {
+              "type": "boolean"
+            },
+            "generation": {
+              "type": "string"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "type": "string"
+            },
+            "payload_retired": {
+              "type": "boolean"
+            },
+            "status": {
+              "$ref": "#/$defs/WorkspaceOutboxStatus"
+            }
+          },
+          "required": [
+            "operation_id",
+            "operation_seq",
+            "document_id",
+            "generation",
+            "status",
+            "frozen",
+            "abandon_state",
+            "payload_retired"
+          ],
+          "type": "object"
+        },
+        "WorkspaceOutboxFailure": {
+          "enum": [
+            "node_deleted",
+            "recovery_conflict",
+            "not_found",
+            "not_applied"
+          ],
+          "type": "string"
+        },
+        "WorkspaceOutboxStatus": {
+          "enum": [
+            "queued",
+            "sent",
+            "committed",
+            "conflict",
+            "abandoning",
+            "abandoned",
+            "failed"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/WorkspaceOutboxEntry"
+          },
+          "type": "array"
+        },
+        "next_after_seq": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "entries"
+      ],
+      "title": "WorkspaceOutboxPage",
+      "type": "object"
+    },
+    "WorkspaceOutboxRequest": {
+      "$defs": {
+        "WorkspaceRegistration": {
+          "additionalProperties": false,
+          "properties": {
+            "device_id": {
+              "type": "string"
+            },
+            "device_stream_id": {
+              "type": "string"
+            },
+            "server_origin": {
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "server_origin",
+            "workspace_id",
+            "workspace_epoch",
+            "device_id",
+            "device_stream_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "after_seq": {
+          "type": "string"
+        },
+        "binding": {
+          "$ref": "#/$defs/WorkspaceRegistration"
+        },
+        "limit": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "renderer_session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "renderer_session_id",
+        "binding",
+        "after_seq",
+        "limit"
+      ],
+      "title": "WorkspaceOutboxRequest",
+      "type": "object"
+    },
+    "WorkspaceOutboxStatus": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "queued",
+        "sent",
+        "committed",
+        "conflict",
+        "abandoning",
+        "abandoned",
+        "failed"
+      ],
+      "title": "WorkspaceOutboxStatus",
+      "type": "string"
+    },
+    "WorkspacePairRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "origin": {
+          "type": "string"
+        },
+        "pairing_secret": {
+          "type": "string"
+        },
+        "renderer_session_id": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "renderer_session_id",
+        "origin",
+        "workspace_id",
+        "pairing_secret"
+      ],
+      "title": "WorkspacePairRequest",
+      "type": "object"
+    },
+    "WorkspacePairStatus": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "none",
+        "in_progress",
+        "pending_adoption"
+      ],
+      "title": "WorkspacePairStatus",
+      "type": "string"
+    },
+    "WorkspacePreviewImage": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "png_base64": {
+          "type": "string"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "png_base64",
+        "width",
+        "height"
+      ],
+      "title": "WorkspacePreviewImage",
+      "type": "object"
+    },
+    "WorkspacePreviewImageRequest": {
+      "$defs": {
+        "NodeKind": {
+          "enum": [
+            "file",
+            "folder"
+          ],
+          "type": "string"
+        },
+        "NodeState": {
+          "additionalProperties": false,
+          "properties": {
+            "children_generation": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "content_etag": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_rev": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "deleted": {
+              "type": "boolean"
+            },
+            "kind": {
+              "$ref": "#/$defs/NodeKind"
+            },
+            "last_change_seq": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "meta_etag": {
+              "type": "string"
+            },
+            "meta_rev": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "node_etag": {
+              "type": "string"
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "size": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "node_id",
+            "parent_id",
+            "name",
+            "kind",
+            "deleted",
+            "content_rev",
+            "content_etag",
+            "meta_rev",
+            "meta_etag",
+            "node_etag",
+            "content_hash",
+            "size",
+            "children_generation",
+            "last_change_seq"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "document_id": {
+          "type": "string"
+        },
+        "edit_session_id": {
+          "type": "string"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeState"
+        },
+        "renderer_session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "renderer_session_id",
+        "document_id",
+        "edit_session_id",
+        "node"
+      ],
+      "title": "WorkspacePreviewImageRequest",
+      "type": "object"
+    },
+    "WorkspaceQueueRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "document_id": {
+          "type": "string"
+        },
+        "edit_session_id": {
+          "type": "string"
+        },
+        "expected_generation": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "renderer_session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "renderer_session_id",
+        "document_id",
+        "edit_session_id",
+        "expected_generation"
+      ],
+      "title": "WorkspaceQueueRequest",
+      "type": "object"
+    },
+    "WorkspaceQueuedOperation": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "committed": {
+          "type": "boolean"
+        },
+        "document_id": {
+          "type": "string"
+        },
+        "generation": {
+          "type": "string"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "operation_seq": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "operation_seq",
+        "document_id",
+        "generation",
+        "committed"
+      ],
+      "title": "WorkspaceQueuedOperation",
+      "type": "object"
+    },
+    "WorkspaceRecoveryRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "bytes_base64": {
+          "type": "string"
+        },
+        "document_id": {
+          "type": "string"
+        },
+        "edit_session_id": {
+          "type": "string"
+        },
+        "renderer_session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "renderer_session_id",
+        "document_id",
+        "edit_session_id",
+        "bytes_base64"
+      ],
+      "title": "WorkspaceRecoveryRequest",
+      "type": "object"
+    },
+    "WorkspaceRegistration": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "device_id": {
+          "type": "string"
+        },
+        "device_stream_id": {
+          "type": "string"
+        },
+        "server_origin": {
+          "type": "string"
+        },
+        "workspace_epoch": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "server_origin",
+        "workspace_id",
+        "workspace_epoch",
+        "device_id",
+        "device_stream_id"
+      ],
+      "title": "WorkspaceRegistration",
+      "type": "object"
+    },
     "WorkspaceRole": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "enum": [
@@ -3161,6 +4747,104 @@
         "owner"
       ],
       "title": "WorkspaceRole",
+      "type": "string"
+    },
+    "WorkspaceSendResult": {
+      "$defs": {
+        "WorkspaceRegistration": {
+          "additionalProperties": false,
+          "properties": {
+            "device_id": {
+              "type": "string"
+            },
+            "device_stream_id": {
+              "type": "string"
+            },
+            "server_origin": {
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "server_origin",
+            "workspace_id",
+            "workspace_epoch",
+            "device_id",
+            "device_stream_id"
+          ],
+          "type": "object"
+        },
+        "WorkspaceSendStatus": {
+          "enum": [
+            "idle",
+            "pending",
+            "committed",
+            "conflict",
+            "failed",
+            "abandoned",
+            "needs_review",
+            "ack_pending",
+            "auth_required",
+            "gateway_auth_required"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/WorkspaceRegistration"
+        },
+        "document_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/WorkspaceSendStatus"
+        }
+      },
+      "required": [
+        "binding",
+        "status"
+      ],
+      "title": "WorkspaceSendResult",
+      "type": "object"
+    },
+    "WorkspaceSendStatus": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "idle",
+        "pending",
+        "committed",
+        "conflict",
+        "failed",
+        "abandoned",
+        "needs_review",
+        "ack_pending",
+        "auth_required",
+        "gateway_auth_required"
+      ],
+      "title": "WorkspaceSendStatus",
       "type": "string"
     }
   },

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-pair"
+description = "Enables the workspace_pair command without any pre-configured scope."
+commands.allow = ["workspace_pair"]
+
+[[permission]]
+identifier = "deny-workspace-pair"
+description = "Denies the workspace_pair command without any pre-configured scope."
+commands.deny = ["workspace_pair"]

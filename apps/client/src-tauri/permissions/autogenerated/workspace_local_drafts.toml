@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-local-drafts"
+description = "Enables the workspace_local_drafts command without any pre-configured scope."
+commands.allow = ["workspace_local_drafts"]
+
+[[permission]]
+identifier = "deny-workspace-local-drafts"
+description = "Denies the workspace_local_drafts command without any pre-configured scope."
+commands.deny = ["workspace_local_drafts"]

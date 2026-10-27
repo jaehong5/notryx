@@ -70,3 +70,28 @@ test("edited then undone CRLF text still writes an LF checkpoint", async () => {
   expect(new TextDecoder().decode(bytes[0])).toBe("edited\nb");
   expect(new TextDecoder().decode(bytes[1])).toBe("a\nb");
 });
+
+test("recovery snapshot retains original bytes until an edit and keeps input after a failed flush", async () => {
+  const original = new TextEncoder().encode("\uFEFFa\r\nb");
+  const draft = new Draft(openSource(original), "session", "0", async () => { throw new Error("disk"); });
+  expect(draft.recoveryBytes()).toEqual(original);
+  draft.change("수정\n내용");
+  await expect(draft.flush()).rejects.toThrow("disk");
+  expect(draft.recoveryBytes()).toEqual(new TextEncoder().encode("\uFEFF수정\n내용"));
+  expect(draft.dirty).toBe(true);
+  draft.change("a\nb");
+  expect(draft.recoveryBytes()).toEqual(new TextEncoder().encode("\uFEFFa\nb"));
+});
+
+test("recovery snapshot keeps oversized edited input even when checkpoint refuses it", async () => {
+  const draft = new Draft(source(), "session", "0", async () => { throw new Error("must not save"); });
+  draft.change("x".repeat(5 * 1024 * 1024 + 1));
+  await expect(draft.flush()).rejects.toThrow("5 MiB");
+  expect(draft.recoveryBytes().length).toBe(5 * 1024 * 1024 + 1);
+});
+
+test("read-only recovery snapshot preserves non-UTF8 original bytes", () => {
+  const original = Uint8Array.from([0xff, 0xfe, 0x00]);
+  const draft = new Draft(openSource(original), "session", "0", async () => { throw new Error("must not save"); });
+  expect(draft.recoveryBytes()).toEqual(original);
+});

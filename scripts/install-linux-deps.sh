@@ -16,6 +16,7 @@ apt-get install --no-install-recommends --no-remove -y \
     libwebkit2gtk-4.1-dev webkit2gtk-driver \
     libxdo-dev \
     libssl-dev \
+    openssl \
     libayatana-appindicator3-dev \
     librsvg2-dev \
     sqlite3 \

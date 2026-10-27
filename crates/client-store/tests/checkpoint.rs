@@ -88,6 +88,78 @@ async fn old_session_cannot_write_after_document_is_closed_and_reopened() {
 }
 
 #[tokio::test]
+async fn repeated_checkpoint_preserves_existing_base_and_recovers_missing_base_atomically() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("drafts.db");
+    let base = vec![b'b'; 5 * 1024 * 1024];
+    let mut store = ClientStore::open(&path).await.unwrap();
+    let document = store
+        .open_document("document-a", &base, "rev-a")
+        .await
+        .unwrap();
+    store
+        .save_checkpoint("document-a", &document.edit_session_id, 1, b"first")
+        .await
+        .unwrap();
+
+    let mut injection =
+        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+    sqlx::raw_sql("CREATE TRIGGER reject_base_insert BEFORE INSERT ON draft_bases BEGIN SELECT RAISE(ABORT, 'unexpected base insertion'); END;")
+        .execute(&mut injection).await.unwrap();
+    store
+        .save_checkpoint("document-a", &document.edit_session_id, 2, b"second")
+        .await
+        .unwrap();
+    let draft = store.read_checkpoint("document-a").await.unwrap().unwrap();
+    assert_eq!(draft.generation, 2);
+    assert_eq!(draft.bytes, b"second");
+    assert_eq!(draft.base_bytes, base);
+    assert_eq!(draft.base_revision, "rev-a");
+
+    sqlx::query("DELETE FROM draft_bases WHERE document_id = 'document-a'")
+        .execute(&mut injection)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .save_checkpoint("document-a", &document.edit_session_id, 3, b"third")
+            .await,
+        Err(StoreError::Storage)
+    );
+    let (generation, bytes): (i64, Vec<u8>) = sqlx::query_as(
+        "SELECT generation, bytes FROM draft_checkpoints WHERE document_id = 'document-a'",
+    )
+    .fetch_one(&mut injection)
+    .await
+    .unwrap();
+    assert_eq!((generation, bytes.as_slice()), (2, b"second".as_slice()));
+    sqlx::query("DROP TRIGGER reject_base_insert")
+        .execute(&mut injection)
+        .await
+        .unwrap();
+    injection.close().await.unwrap();
+
+    store
+        .save_checkpoint("document-a", &document.edit_session_id, 3, b"third")
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let mut reopened = ClientStore::open(&path).await.unwrap();
+    let draft = reopened
+        .read_checkpoint("document-a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(draft.generation, 3);
+    assert_eq!(draft.bytes, b"third");
+    assert_eq!(draft.base_bytes, base);
+    assert_eq!(draft.base_revision, "rev-a");
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn rejects_another_writer_and_releases_lock_after_close() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("drafts.db");

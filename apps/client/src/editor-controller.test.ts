@@ -35,6 +35,26 @@ function fixture() {
 
 afterEach(() => { vi.useRealTimers(); });
 
+test("recovery snapshot keeps failed input in its current session and waits for composition", async () => {
+  const { controller, ports, views } = fixture();
+  vi.mocked(ports.saveDocument).mockRejectedValueOnce(new Error("disk"));
+  await controller.open("a");
+  views[0].options.change("미저장");
+  await expect(controller.flush()).rejects.toThrow("disk");
+  const snapshot = controller.recoverySnapshot();
+  expect(snapshot.id).toBe("a");
+  expect(snapshot.session).toBe("session-a");
+  expect(controller.isCurrentSnapshot(snapshot.session, snapshot.generation)).toBe(true);
+  expect(new TextDecoder().decode(snapshot.bytes)).toBe("미저장");
+  views[0].options.change("추가 입력");
+  expect(controller.isCurrentSnapshot(snapshot.session, snapshot.generation)).toBe(false);
+  expect(controller.isCurrentSession(snapshot.session)).toBe(true);
+  views[0].composing = true;
+  expect(() => controller.recoverySnapshot()).toThrow("조합");
+  views[0].composing = false;
+  await controller.dispose();
+});
+
 test("continuous edits keep the first 250 ms deadline and save the latest text", async () => {
   vi.useFakeTimers();
   const { controller, ports, views } = fixture();
@@ -46,6 +66,141 @@ test("continuous edits keep the first 250 ms deadline and save the latest text",
   expect(ports.saveDocument).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(1);
   expect(ports.saveDocument).toHaveBeenCalledExactlyOnceWith({ document_id: "a", edit_session_id: "session-a", generation: "2", bytes_base64: btoa("latest") });
+  await controller.dispose();
+});
+
+test("saving an unchanged document does not claim a local checkpoint", async () => {
+  const { controller, ports, states } = fixture();
+  await controller.open("a");
+  await controller.flush();
+  expect(ports.saveDocument).not.toHaveBeenCalled();
+  expect(states.at(-1)?.status).toBe("수정 없음");
+  await controller.dispose();
+});
+
+test("transmission receives the actual edit session and each edit generation", async () => {
+  const { controller, ports, views } = fixture();
+  const edited = vi.fn();
+  ports.edited = edited;
+  await controller.open("a");
+  views[0].options.change("one");
+  views[0].options.change("two");
+  expect(edited).toHaveBeenNthCalledWith(1, "a", "session-a", "1");
+  expect(edited).toHaveBeenNthCalledWith(2, "a", "session-a", "2");
+  await controller.dispose();
+});
+
+test("composition events are bound to the active edit session", async () => {
+  const { controller, ports, views } = fixture();
+  const compositionChanged = vi.fn();
+  ports.compositionChanged = compositionChanged;
+  await controller.open("a");
+  views[0].options.composition(true);
+  views[0].options.composition(false);
+  expect(compositionChanged).toHaveBeenNthCalledWith(1, "a", "session-a", true);
+  expect(compositionChanged).toHaveBeenNthCalledWith(2, "a", "session-a", false);
+  await controller.open("b");
+  views[0].options.composition(true);
+  expect(compositionChanged).toHaveBeenCalledTimes(2);
+  await controller.dispose();
+});
+
+test("server acknowledgement is current only after the latest edit is durable", async () => {
+  const { controller, views } = fixture();
+  await controller.open("a");
+  views[0].options.change("one");
+  expect(controller.isCurrentSaved("session-a", "1")).toBe(false);
+  await controller.flush();
+  expect(controller.isCurrentSaved("session-a", "1")).toBe(true);
+  views[0].options.change("two");
+  expect(controller.isCurrentSaved("session-a", "1")).toBe(false);
+  expect(controller.isCurrentSaved("other-session", "2")).toBe(false);
+  await controller.dispose();
+});
+
+test("opening a durable local draft reports its generation after the session is active", async () => {
+  const { controller, ports } = fixture();
+  const restored = vi.fn((_, sessionId: string, generation: string) => {
+    expect(controller.isCurrentSaved(sessionId, generation)).toBe(true);
+  });
+  ports.opened = restored;
+  vi.mocked(ports.openDocument).mockResolvedValueOnce({ ...opened("draft"), generation: "3", local_draft: true });
+  await controller.open("draft");
+  expect(restored).toHaveBeenCalledExactlyOnceWith("draft", "session-draft", "3", true);
+  await controller.dispose();
+});
+
+test("preview receives only the active document and its subsequent edits", async () => {
+  const { controller, ports, views } = fixture();
+  const sourceChanged = vi.fn();
+  ports.sourceChanged = sourceChanged;
+  await controller.open("a");
+  expect(sourceChanged).toHaveBeenLastCalledWith("base", true);
+  views[0].options.change("updated");
+  expect(sourceChanged).toHaveBeenLastCalledWith("updated", false);
+  await controller.open("b");
+  expect(sourceChanged).toHaveBeenLastCalledWith("base", true);
+  views[0].options.change("stale view");
+  expect(sourceChanged).toHaveBeenLastCalledWith("base", true);
+  await controller.dispose();
+});
+
+test("workspace change flushes and closes the editor before pairing", async () => {
+  const { controller, ports, views, states } = fixture();
+  await controller.open("a");
+  views[0].options.change("pending");
+  await expect(controller.prepareForWorkspaceChange()).resolves.toBe(true);
+  expect(ports.saveDocument).toHaveBeenCalledOnce();
+  expect(ports.closeDocument).toHaveBeenCalledExactlyOnceWith({ document_id: "a", edit_session_id: "session-a" });
+  expect(views[0].destroy).toHaveBeenCalledOnce();
+  expect(states.at(-1)?.selected).toBe("");
+  await controller.dispose();
+});
+
+test("workspace change does not discard input when flush fails", async () => {
+  const { controller, ports, views, states } = fixture();
+  await controller.open("a");
+  views[0].options.change("pending");
+  vi.mocked(ports.saveDocument).mockRejectedValueOnce(new Error("disk"));
+  await expect(controller.prepareForWorkspaceChange()).resolves.toBe(false);
+  expect(ports.closeDocument).not.toHaveBeenCalled();
+  expect(views[0].destroy).not.toHaveBeenCalled();
+  expect(views[0].editable).toBe(true);
+  expect(states.at(-1)?.selected).toBe("a");
+  await controller.dispose();
+});
+
+test("oversized UTF-8 documents can be opened read-only without saving", async () => {
+  const { controller, ports, views, states } = fixture();
+  const bytes = btoa("x".repeat(5 * 1024 * 1024 + 2));
+  vi.mocked(ports.openDocument).mockResolvedValueOnce({ ...opened("large"), bytes_base64: bytes });
+  await controller.open("large");
+  expect(states.at(-1)?.selected).toBe("large");
+  expect(views[0].options.source.readonly).toBe(true);
+  expect(views[0].editable).toBe(false);
+  await controller.flush();
+  expect(ports.saveDocument).not.toHaveBeenCalled();
+  await controller.dispose();
+});
+
+test("native read-only decisions cannot be overridden by an editable source", async () => {
+  const { controller, ports, views } = fixture();
+  vi.mocked(ports.openDocument).mockResolvedValueOnce({ ...opened("restricted"), readonly: true });
+  await controller.open("restricted");
+  expect(views[0].options.source.readonly).toBe(true);
+  expect(views[0].editable).toBe(false);
+  views[0].options.change("must not save");
+  await controller.flush();
+  expect(ports.saveDocument).not.toHaveBeenCalled();
+  await controller.dispose();
+});
+
+test("a recovered local draft is not described as a confirmed server version", async () => {
+  const { controller, ports, states } = fixture();
+  vi.mocked(ports.openDocument).mockResolvedValueOnce({ ...opened("draft"), generation: "2", local_draft: true });
+  await controller.open("draft");
+  expect(states.at(-1)?.notice).toContain("서버 상태는 아직 확인하지 않았습니다");
+  expect(states.at(-1)?.status).toBe("이 기기에 저장됨");
   await controller.dispose();
 });
 

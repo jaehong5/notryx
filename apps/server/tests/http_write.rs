@@ -15,6 +15,71 @@ use support::{HttpResponse, initialized, pairing_request, post_json, request};
 const ORIGINAL: &[u8] = b"# Original\r\n";
 const UPDATED: &[u8] = b"\xef\xbb\xbf---\r\nsynthetic: true\r\n---\r\n# kept\r\n\xff\0";
 
+#[tokio::test]
+async fn invalid_credentials_are_rejected_before_waiting_for_content_bodies() {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let (_directory, config) = initialized().await;
+    let document = adopt(&config).await;
+    let server = RunningServer::start(config.clone()).await.unwrap();
+    let paired = pair_owner(&config, server.local_addr()).await;
+    let mut connections = Vec::new();
+    for _ in 0..2 {
+        let mut stream = TcpStream::connect(server.local_addr()).await.unwrap();
+        let head = format!(
+            "PUT /v1/nodes/{}/content HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer invalid-test-credential\r\nX-Workspace-Epoch: {}\r\nX-Device-Stream: {}\r\nX-Operation-Seq: 1\r\nIdempotency-Key: {}\r\nIf-Match: \"synthetic-revision\"\r\nContent-Digest: sha-256=:{}:\r\nContent-Length: 26214400\r\n\r\n",
+            uuid::Uuid::now_v7(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::now_v7(),
+            STANDARD.encode(Sha256::digest([])),
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        connections.push(stream);
+    }
+    let early_rejection = tokio::time::timeout(Duration::from_secs(2), async {
+        for stream in &mut connections {
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await.unwrap();
+            assert!(response.starts_with(b"HTTP/1.1 401"));
+        }
+    })
+    .await;
+    let saved = if early_rejection.is_ok() {
+        Some(
+            put(
+                server.local_addr(),
+                &document,
+                &headers(
+                    &paired,
+                    &document,
+                    &uuid::Uuid::now_v7().to_string(),
+                    1,
+                    UPDATED,
+                ),
+                UPDATED,
+            )
+            .await
+            .status,
+        )
+    } else {
+        None
+    };
+    drop(connections);
+    server.shutdown().await.unwrap();
+    assert!(
+        early_rejection.is_ok(),
+        "invalid credentials must not wait for a content body"
+    );
+    assert_eq!(saved, Some(200));
+    assert_eq!(
+        std::fs::read(config.workspace.notes_root.join("Document.md")).unwrap(),
+        UPDATED
+    );
+}
+
 async fn adopt(config: &Config) -> Document {
     std::fs::write(config.workspace.notes_root.join("Document.md"), ORIGINAL).unwrap();
     let mut workspace = Workspace::open(&config.workspace.notes_root, &config.workspace.state_root)

@@ -91,6 +91,10 @@ pub struct WorkspaceHandle {
 }
 
 enum Command {
+    Authenticate {
+        token: String,
+        reply: oneshot::Sender<Result<(), RuntimeError>>,
+    },
     #[cfg(test)]
     Barrier {
         entered: oneshot::Sender<()>,
@@ -399,6 +403,12 @@ impl WorkspaceHandle {
         response.await.map_err(|_| RuntimeError::Closed)?
     }
 
+    pub(crate) async fn authenticate(&self, token: String) -> Result<(), RuntimeError> {
+        let (reply, response) = oneshot::channel();
+        self.enqueue(Command::Authenticate { token, reply })?;
+        response.await.map_err(|_| RuntimeError::Closed)?
+    }
+
     pub async fn metadata(
         &self,
         token: String,
@@ -657,6 +667,20 @@ async fn execute_save_content(
 
 async fn execute(command: Command, workspace: &mut Workspace, shutting_down: bool) {
     match command {
+        Command::Authenticate { token, reply } => {
+            if !reply.is_closed() {
+                let result = match now() {
+                    Ok(now) if !shutting_down => workspace
+                        .authenticate(&token, now)
+                        .await
+                        .map(|_| ())
+                        .map_err(RuntimeError::Auth),
+                    Ok(_) => Err(RuntimeError::Closed),
+                    Err(error) => Err(error),
+                };
+                let _ = reply.send(result);
+            }
+        }
         #[cfg(test)]
         Command::Barrier { entered, release } => {
             let _ = entered.send(());

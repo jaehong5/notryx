@@ -374,12 +374,20 @@ async fn bounded_request(request: Request, next: Next) -> Response {
 }
 
 async fn bounded_content_write(
-    State(permits): State<Arc<Semaphore>>,
+    State((handle, permits)): State<(WorkspaceHandle, Arc<Semaphore>)>,
     mut request: Request,
     next: Next,
 ) -> Response {
     if request.method() != axum::http::Method::PUT {
         return next.run(request).await;
+    }
+    let token = match bearer(request.headers()) {
+        Ok(token) => token,
+        Err(error) => return runtime_error(error),
+    };
+    // Check identity before reserving a large body; admission still rechecks current permissions.
+    if let Err(error) = handle.authenticate(token).await {
+        return runtime_error(error);
     }
     // The coordinator retains this permit if HTTP cancellation leaves a queued 25 MiB body.
     let Ok(permit) = permits.try_acquire_owned() else {
@@ -506,7 +514,10 @@ impl RunningServer {
                     .put(write::put_content)
                     .layer(DefaultBodyLimit::max(notryx_server_storage::MAX_FILE_BYTES))
                     .layer(middleware::from_fn_with_state(
-                        Arc::new(Semaphore::new(MAX_CONTENT_WRITES)),
+                        (
+                            runtime.handle(),
+                            Arc::new(Semaphore::new(MAX_CONTENT_WRITES)),
+                        ),
                         bounded_content_write,
                     )),
             )

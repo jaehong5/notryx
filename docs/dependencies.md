@@ -1,11 +1,11 @@
 # 개발 의존성 기록
 
-2026-10-26의 `Cargo.lock`, `package-lock.json` 기준이다. Rust와 npm의 직접 의존성은 각 manifest에서 버전을 고정하고 전이 의존성은 lockfile로 고정한다. 현재 앱 버전은 `0.1.0`, 프로토콜 식별자는 `mdw-sync/1.2`다.
+2026-10-27의 `Cargo.lock`, `package-lock.json` 기준이다. Rust와 npm의 직접 의존성은 각 manifest에서 버전을 고정하고 전이 의존성은 lockfile로 고정한다. 현재 앱 버전은 `0.1.0`, 프로토콜 식별자는 `mdw-sync/1.2`다.
 
 | 영역 | 주요 직접 의존성 |
 |---|---|
 | 순수 계약 | uuid 1.29.0, serde 1.0.229, serde_json 1.0.154, schemars 1.2.3, ts-rs 12.0.1, sha2 0.11.1, base64 0.23.1 |
-| 서버 HTTP와 설정 | axum 0.8.9, hyper 1.12.0, hyper-util 0.1.21, toml 1.1.8 |
+| 서버 HTTP와 설정 | axum 0.8.9, hyper 1.12.0, hyper-util 0.1.21, http-body-util 0.1.5, toml 1.1.8 |
 | 기기 인증 | getrandom 0.4.3, subtle 2.6.1 |
 | 서버 파일 접근과 이름 검사 | rustix 1.1.5, unicode-normalization 0.1.26, caseless 0.2.2 |
 | 초안 및 서버 상태 저장 | SQLx 0.9.0, Tokio 1.54.1 |

@@ -2,6 +2,16 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::fs;
 
+mod create;
+mod inventory;
+#[path = "../tests/support/legacy.rs"]
+mod legacy;
+mod lifecycle;
+mod move_node;
+mod recovery;
+mod stream;
+mod upload;
+
 fn digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -80,6 +90,96 @@ async fn conditional_save_preserves_exact_bytes_and_commits_one_post_state() {
     let (metadata, content) = reopened.read(saved.node_id).await.unwrap();
     assert_eq!(metadata, saved);
     assert_eq!(content, bytes);
+}
+
+#[tokio::test]
+async fn credential_expiry_during_preparation_does_not_admit_or_change_the_file() {
+    use notryx_protocol::{CONTRACT, PairRequest};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    let mut rig = Rig::new().await;
+    let owner = rig
+        .workspace
+        .auth_status()
+        .await
+        .unwrap()
+        .owner_principal_id;
+    let issued_at: i64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .try_into()
+        .unwrap();
+    let grant = rig.workspace.issue_pairing(owner, issued_at).await.unwrap();
+    let device = rig
+        .workspace
+        .pair(
+            PairRequest {
+                protocol: CONTRACT.into(),
+                workspace_id: grant.workspace_id,
+                pairing_secret: grant.pairing_secret,
+            },
+            issued_at,
+        )
+        .await
+        .unwrap();
+    let checked_at: i64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .try_into()
+        .unwrap();
+    let expires_at = checked_at + 2;
+    sqlx::query("UPDATE devices SET idle_expires_at=? WHERE device_id=?")
+        .bind(expires_at)
+        .bind(&device.device_id)
+        .execute(&mut rig.workspace.state.connection)
+        .await
+        .unwrap();
+    rig.workspace
+        .authenticate(&device.device_token, checked_at)
+        .await
+        .unwrap();
+    let mut request = rig.command(b"must not be admitted\n");
+    request.stream_id = device.device_stream_id.parse().unwrap();
+    let (fingerprint, previous) = rig.workspace.prepare_save(&request).await.unwrap();
+    assert!(previous.is_none());
+    rig.workspace.hook = Some(Box::new(move |phase| {
+        if phase == Phase::BeforeAdmission {
+            let expires = UNIX_EPOCH + Duration::from_secs(expires_at as u64);
+            if let Ok(remaining) = expires.duration_since(SystemTime::now()) {
+                std::thread::sleep(remaining + Duration::from_millis(10));
+            }
+        }
+        Ok(())
+    }));
+    assert_eq!(
+        rig.workspace
+            .save_new(request.clone(), &fingerprint, Some(&device.device_token))
+            .await,
+        Err(Error::Auth(auth::AuthError::Unauthorized))
+    );
+    assert!(rig.workspace.ready());
+    assert_eq!(
+        rig.workspace.read(rig.initial.node_id).await.unwrap().0,
+        rig.initial
+    );
+    assert_eq!(
+        rig.workspace
+            .state
+            .operation(request.stream_id, request.operation_id)
+            .await,
+        Err(Error::NotFound)
+    );
+    rig.workspace
+        .state
+        .validate_admission(request.stream_id, request.operation_seq)
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(rig.dir.path().join("notes/Document.md")).unwrap(),
+        b"\xef\xbb\xbf# Original\r\n\r\n<!-- untouched -->\r\n"
+    );
 }
 
 #[tokio::test]

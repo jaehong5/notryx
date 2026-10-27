@@ -46,10 +46,10 @@ pub struct PairResponse {
     pub device_stream_id: String,
     pub device_token: String,
     pub role: WorkspaceRole,
-    #[serde(deserialize_with = "decimal_seconds")]
+    #[serde(deserialize_with = "decimal_u64")]
     #[schemars(regex(pattern = "^[0-9]+$"))]
     pub idle_expires_at: String,
-    #[serde(deserialize_with = "decimal_seconds")]
+    #[serde(deserialize_with = "decimal_u64")]
     #[schemars(regex(pattern = "^[0-9]+$"))]
     pub absolute_expires_at: String,
 }
@@ -76,6 +76,8 @@ pub struct ServerInfo {
     pub ready: bool,
     #[ts(type = "number")]
     pub max_document_bytes: u64,
+    #[ts(type = "number")]
+    pub max_attachment_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -108,7 +110,7 @@ pub struct ApiError {
     pub request_id: String,
 }
 
-fn uuid_v7_request_id<'de, D: serde::Deserializer<'de>>(
+pub(crate) fn uuid_v7_request_id<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<String, D::Error> {
     let value = String::deserialize(deserializer)?;
@@ -116,16 +118,16 @@ fn uuid_v7_request_id<'de, D: serde::Deserializer<'de>>(
     Ok(value)
 }
 
-pub(crate) fn decimal_seconds<'de, D: serde::Deserializer<'de>>(
+pub(crate) fn decimal_u64<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<String, D::Error> {
     let value = String::deserialize(deserializer)?;
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(serde::de::Error::custom("invalid decimal seconds"));
+        return Err(serde::de::Error::custom("invalid decimal value"));
     }
     value
         .parse::<u64>()
-        .map_err(|_| serde::de::Error::custom("invalid decimal seconds"))?;
+        .map_err(|_| serde::de::Error::custom("invalid decimal value"))?;
     Ok(value)
 }
 

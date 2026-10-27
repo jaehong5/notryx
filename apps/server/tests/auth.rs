@@ -1,3 +1,5 @@
+#[path = "support/legacy.rs"]
+mod legacy;
 use notryx_protocol::{CONTRACT, PairRequest, PairResponse, WorkspaceRole};
 use notryx_server::auth::{AuthError, PairingGrant};
 use notryx_server::{Error, Outcome, SaveContent, Workspace};
@@ -44,8 +46,12 @@ impl Fixture {
 
     async fn downgrade_to_v1(&self) {
         let mut db = self.database().await;
+        legacy::nodes_before_deletion(&mut db).await;
         sqlx::raw_sql(
-            "DROP TABLE IF EXISTS devices;
+            "ALTER TABLE operation_receipts DROP COLUMN node_etag;
+             DROP TABLE retired_operations;
+             ALTER TABLE operation_streams DROP COLUMN retired_through;
+             DROP TABLE IF EXISTS devices;
              DROP TABLE IF EXISTS pairing_secrets;
              DROP TABLE IF EXISTS principals;
              DROP INDEX IF EXISTS auth_workspace_id;
@@ -132,7 +138,7 @@ async fn fresh_init_has_one_credential_free_owner() {
         .fetch_one(&mut db)
         .await
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 9);
     let owners: Vec<String> =
         sqlx::query_scalar("SELECT principal_id FROM principals WHERE workspace_role='owner'")
             .fetch_all(&mut db)
@@ -691,7 +697,7 @@ async fn migration_requires_workspace_locks_and_preserves_unknown_versions() {
         Err(Error::Locked)
     );
     workspace.close().await.unwrap();
-    for query in ["PRAGMA user_version=0", "PRAGMA user_version=3"] {
+    for query in ["PRAGMA user_version=0", "PRAGMA user_version=999"] {
         let mut db = fixture.database().await;
         sqlx::raw_sql(query).execute(&mut db).await.unwrap();
         db.close().await.unwrap();

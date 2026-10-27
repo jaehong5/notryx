@@ -12,6 +12,7 @@ use tokio::task::JoinSet;
 
 const MAX_FRAME_BYTES: usize = 16 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const RECOVERY_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CONNECTIONS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,33 +174,52 @@ async fn write_frame(
 
 async fn connection(mut stream: UnixStream, handle: WorkspaceHandle) -> Result<(), AdminError> {
     validate_peer(&stream)?;
-    let response = match serde_json::from_slice::<AdminRequest>(&read_frame(&mut stream).await?) {
-        Ok(request) => match handle.admin(request).await {
-            Ok(result) => AdminResponse::Ok { result },
-            Err(error) => AdminResponse::Error {
-                code: error.code().into(),
-            },
-        },
+    let frame = tokio::time::timeout(REQUEST_TIMEOUT, read_frame(&mut stream))
+        .await
+        .map_err(|_| AdminError::Timeout)??;
+    let response = match serde_json::from_slice::<AdminRequest>(&frame) {
+        Ok(request) => {
+            match tokio::time::timeout(command_timeout(&request), handle.admin(request)).await {
+                Ok(Ok(result)) => AdminResponse::Ok { result },
+                Ok(Err(error)) => AdminResponse::Error {
+                    code: error.code().into(),
+                },
+                Err(_) => return Err(AdminError::Timeout),
+            }
+        }
         Err(_) => AdminResponse::Error {
             code: "invalid_request".into(),
         },
     };
-    write_frame(&mut stream, &response).await
+    tokio::time::timeout(REQUEST_TIMEOUT, write_frame(&mut stream, &response))
+        .await
+        .map_err(|_| AdminError::Timeout)?
+}
+
+fn command_timeout(request: &AdminRequest) -> Duration {
+    match request {
+        AdminRequest::RecoveryResolve { .. } => RECOVERY_TIMEOUT,
+        _ => REQUEST_TIMEOUT,
+    }
 }
 
 pub async fn request(path: &Path, request: &AdminRequest) -> Result<AdminResponse, AdminError> {
     validate_parent(path)?;
     validate_socket(path)?;
-    tokio::time::timeout(REQUEST_TIMEOUT, async {
+    let mut stream = tokio::time::timeout(REQUEST_TIMEOUT, async {
         let mut stream = UnixStream::connect(path)
             .await
             .map_err(|_| AdminError::Io)?;
         validate_peer(&stream)?;
         write_frame(&mut stream, request).await?;
-        serde_json::from_slice(&read_frame(&mut stream).await?).map_err(|_| AdminError::Protocol)
+        Ok::<_, AdminError>(stream)
     })
     .await
-    .map_err(|_| AdminError::Timeout)?
+    .map_err(|_| AdminError::Timeout)??;
+    let response = tokio::time::timeout(command_timeout(request), read_frame(&mut stream))
+        .await
+        .map_err(|_| AdminError::Timeout)??;
+    serde_json::from_slice(&response).map_err(|_| AdminError::Protocol)
 }
 
 pub struct AdminServer {
@@ -271,7 +291,7 @@ async fn serve(
                 match accepted {
                     Ok((stream, _)) => {
                         let handle = handle.clone();
-                        connections.spawn(async move { let _ = tokio::time::timeout(REQUEST_TIMEOUT, connection(stream, handle)).await; });
+                        connections.spawn(async move { let _ = connection(stream, handle).await; });
                     }
                     Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
                 }

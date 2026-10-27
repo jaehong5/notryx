@@ -1,9 +1,11 @@
 use std::{collections::BTreeMap, error::Error, fs, path::PathBuf};
 
 use notryx_protocol::{
-    AdminRequest, AdminResponse, AdminResult, ApiError, HeadHint, M0CloseRequest, M0OpenRequest,
-    M0OpenedDocument, M0SaveRequest, M0SavedCheckpoint, NodeKind, NodeMetadata, PairRequest,
-    PairResponse, ServerInfo, WorkspaceRole,
+    AbandonRequest, AckRequest, AckResponse, AdminRecoverySummary, AdminRequest, AdminResponse,
+    AdminResult, ApiError, CreateNodeRequest, HeadHint, InventoryPage, M0CloseRequest,
+    M0OpenRequest, M0OpenedDocument, M0SaveRequest, M0SavedCheckpoint, MoveNodeRequest, NodeKind,
+    NodeMetadata, NodeState, OperationError, OperationReceipt, PairRequest, PairResponse,
+    RestoreNodeRequest, ServerInfo, TrashNode, TrashPage, UploadResponse, WorkspaceRole,
 };
 use schemars::{JsonSchema, schema_for};
 use ts_rs::{Config, TS};
@@ -46,16 +48,35 @@ fn main() -> Result<(), Box<dyn Error>> {
     add_type::<PairRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<PairResponse>(&config, &mut declarations, &mut schemas)?;
     add_type::<ServerInfo>(&config, &mut declarations, &mut schemas)?;
+    add_type::<UploadResponse>(&config, &mut declarations, &mut schemas)?;
     add_type::<NodeMetadata>(&config, &mut declarations, &mut schemas)?;
+    add_type::<CreateNodeRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<MoveNodeRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<RestoreNodeRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<NodeState>(&config, &mut declarations, &mut schemas)?;
+    add_type::<InventoryPage>(&config, &mut declarations, &mut schemas)?;
+    add_type::<TrashNode>(&config, &mut declarations, &mut schemas)?;
+    add_type::<TrashPage>(&config, &mut declarations, &mut schemas)?;
+    declarations.push_str("export type CreatedNode = NodeState;\n");
+    schemas.insert(
+        "CreatedNode".into(),
+        serde_json::json!({"$ref": "#/$defs/NodeState"}),
+    );
     add_type::<ApiError>(&config, &mut declarations, &mut schemas)?;
+    add_type::<OperationReceipt>(&config, &mut declarations, &mut schemas)?;
+    add_type::<OperationError>(&config, &mut declarations, &mut schemas)?;
+    add_type::<AckRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<AckResponse>(&config, &mut declarations, &mut schemas)?;
+    add_type::<AbandonRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<AdminRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<AdminRecoverySummary>(&config, &mut declarations, &mut schemas)?;
     add_type::<AdminResult>(&config, &mut declarations, &mut schemas)?;
     add_type::<AdminResponse>(&config, &mut declarations, &mut schemas)?;
 
     let schema = serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Notryx protocol contract definitions",
-        "description": "구조와 문자열 형식의 스키마다. Rust 역직렬화는 UUID version과 RFC variant 및 seq, 만료 시각, generation의 u64 범위를 추가로 검사한다. protocol 일치와 만료 여부, 권한은 application에서 검사한다. M0 generation의 SQLite 저장 가능 범위와 문서 크기, session 및 원문 검증은 native runtime과 store가 담당한다. 이 스키마 단독으로 모든 계약을 검증할 수 없다.",
+        "description": "구조와 문자열 형식의 스키마다. Rust 역직렬화는 UUID version과 RFC variant 및 seq, 만료 시각, generation의 u64 범위를 추가로 검사한다. node 이름의 경로 규칙, root와 파일/폴더 content 형태도 Rust에서 검사한다. protocol 일치와 만료 여부, 권한은 application에서 검사한다. M0 generation의 SQLite 저장 가능 범위와 문서 크기, session 및 원문 검증은 native runtime과 store가 담당한다. 이 스키마 단독으로 모든 계약을 검증할 수 없다.",
         "$defs": schemas,
     });
     let files = [

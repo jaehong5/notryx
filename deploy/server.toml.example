@@ -1,0 +1,14 @@
+[server]
+listen = "0.0.0.0:8080"
+admin_socket = "/run/mdw/admin.sock"
+
+[workspace]
+notes_root = "/data/notes"
+state_root = "/data/state"
+
+[workspace.uploads]
+max_device_bytes = 134217728
+max_device_uploads = 64
+max_workspace_bytes = 536870912
+max_workspace_uploads = 256
+max_receiving = 2

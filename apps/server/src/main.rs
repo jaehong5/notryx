@@ -6,8 +6,11 @@ use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::PathBuf;
 
+mod healthcheck;
+
 const HELP: &str = "사용법:
   notryx-server init|serve|migrate --config <설정 파일>
+  notryx-server healthcheck --address <IP:port>
   notryx-server adopt --config <설정 파일> <루트 파일 이름>
   notryx-server admin --config <설정 파일> status
   notryx-server admin --config <설정 파일> create-principal <reader|editor>
@@ -15,8 +18,15 @@ const HELP: &str = "사용법:
   notryx-server admin --config <설정 파일> transfer-owner <principal UUID> <이전 owner의 reader|editor 역할>
   notryx-server admin --config <설정 파일> issue-pairing <principal UUID>
   notryx-server admin --config <설정 파일> revoke-device <device UUID>
+  notryx-server admin --config <설정 파일> recovery-list [after operation UUID]
+  notryx-server admin --config <설정 파일> recovery-inspect <operation UUID> [after SHA-256 hex]
+  notryx-server admin --config <설정 파일> recovery-resolve <operation UUID>
+  notryx-server admin --config <설정 파일> recovery-release <operation UUID>
 
 init, migrate와 adopt는 서버를 중지한 상태에서 실행합니다.
+recovery-resolve는 외부 파일 변경을 중지하고 자료를 대조한 뒤 현재 파일 상태를 채택합니다.
+복구 응답 대기는 최대 120초이며 응답을 잃으면 같은 operation UUID로 다시 요청합니다.
+recovery-release는 해결한 작업의 격리 사본 보호를 해제합니다.
 issue-pairing의 JSON 표준 출력에는 일회용 credential이 포함됩니다.";
 
 enum Command {
@@ -52,6 +62,26 @@ fn identifier(value: &OsStr) -> Result<String, &'static str> {
         .map_err(|_| "invalid_request")
 }
 
+fn operation_id(value: &OsStr) -> Result<notryx_domain::OperationId, &'static str> {
+    value
+        .to_str()
+        .ok_or("invalid_request")?
+        .parse()
+        .map_err(|_| "invalid_request")
+}
+
+fn recovery_hash(value: &OsStr) -> Result<String, &'static str> {
+    let hash = value.to_str().ok_or("invalid_request")?;
+    if hash.len() != 64
+        || !hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("invalid_request");
+    }
+    Ok(hash.to_owned())
+}
+
 fn parse(arguments: &[OsString]) -> Result<(PathBuf, Command), &'static str> {
     let [command, flag, path, rest @ ..] = arguments else {
         return Err("invalid_request; 명령 안내는 --help를 사용하세요");
@@ -71,6 +101,28 @@ fn parse(arguments: &[OsString]) -> Result<(PathBuf, Command), &'static str> {
         (Some("admin"), [action, values @ ..]) => {
             let request = match (action.to_str(), values) {
                 (Some("status"), []) => AdminRequest::Status {},
+                (Some("recovery-list"), []) => AdminRequest::RecoveryList {
+                    after_operation_id: None,
+                    limit: 20,
+                },
+                (Some("recovery-list"), [after]) => AdminRequest::RecoveryList {
+                    after_operation_id: Some(operation_id(after)?),
+                    limit: 20,
+                },
+                (Some("recovery-inspect"), [operation]) => AdminRequest::RecoveryInspect {
+                    operation_id: operation_id(operation)?,
+                    after_hash: None,
+                },
+                (Some("recovery-inspect"), [operation, after]) => AdminRequest::RecoveryInspect {
+                    operation_id: operation_id(operation)?,
+                    after_hash: Some(recovery_hash(after)?),
+                },
+                (Some("recovery-resolve"), [operation]) => AdminRequest::RecoveryResolve {
+                    operation_id: operation_id(operation)?,
+                },
+                (Some("recovery-release"), [operation]) => AdminRequest::RecoveryRelease {
+                    operation_id: operation_id(operation)?,
+                },
                 (Some("create-principal"), [value]) => {
                     AdminRequest::CreatePrincipal { role: role(value)? }
                 }
@@ -117,12 +169,21 @@ fn admin_error(code: &str) -> &'static str {
         "runtime_error" => "runtime_error",
         "migration_required" => "migration_required",
         "locked" => "locked",
+        "external_change" => "external_change",
+        "operation_pending" => "operation_pending",
         _ => "invalid_admin_response",
     }
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if arguments
+        .first()
+        .is_some_and(|value| value == "healthcheck")
+    {
+        healthcheck::run(&arguments[1..])?;
+        return Ok(());
+    }
     if arguments.as_slice() == [OsStr::new("--help")] {
         println!("{HELP}");
         return Ok(());

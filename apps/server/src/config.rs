@@ -44,6 +44,8 @@ fn default_admin_socket() -> PathBuf {
 pub struct WorkspaceConfig {
     pub notes_root: PathBuf,
     pub state_root: PathBuf,
+    #[serde(default)]
+    pub uploads: UploadLimits,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +79,7 @@ impl Config {
         {
             return Err(ConfigError::Invalid);
         }
+        config.workspace.uploads.validate()?;
         Ok(config)
     }
 
@@ -88,5 +91,45 @@ impl Config {
             .read_to_string(&mut text)
             .map_err(|_| ConfigError::Read)?;
         Self::from_toml(&text)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UploadLimits {
+    pub max_device_bytes: u64,
+    pub max_device_uploads: u16,
+    pub max_workspace_bytes: u64,
+    pub max_workspace_uploads: u16,
+    pub max_receiving: u16,
+}
+
+impl Default for UploadLimits {
+    fn default() -> Self {
+        Self {
+            max_device_bytes: 128 * 1024 * 1024,
+            max_device_uploads: 64,
+            max_workspace_bytes: 512 * 1024 * 1024,
+            max_workspace_uploads: 256,
+            max_receiving: 2,
+        }
+    }
+}
+
+impl UploadLimits {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_device_bytes == 0
+            || self.max_device_bytes > self.max_workspace_bytes
+            || self.max_workspace_bytes > 64 * 1024 * 1024 * 1024
+            || self.max_device_uploads == 0
+            || self.max_device_uploads > self.max_workspace_uploads
+            || self.max_workspace_uploads > 4096
+            || self.max_receiving == 0
+            || self.max_receiving > 16
+            || self.max_receiving > self.max_workspace_uploads
+        {
+            return Err(ConfigError::Invalid);
+        }
+        Ok(())
     }
 }

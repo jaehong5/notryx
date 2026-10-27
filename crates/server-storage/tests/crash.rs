@@ -127,3 +127,54 @@ fn process_kill_during_object_publication_never_exposes_partial_objects() {
         assert_eq!(reopened.put_object(b"proposed").unwrap(), proposed_hash);
     }
 }
+
+#[test]
+fn process_kill_during_upload_staging_leaves_only_known_recoverable_files() {
+    for stage in [
+        StorageStage::BeforeUploadPublish,
+        StorageStage::AfterUploadPublish,
+        StorageStage::AfterUploadFileSync,
+        StorageStage::AfterUploadDirectorySync,
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let notes = directory.path().join("notes");
+        let state = directory.path().join("state");
+        std::fs::create_dir(&notes).unwrap();
+        std::fs::create_dir(&state).unwrap();
+        let store = FileStore::init(
+            &notes,
+            &state,
+            "550e8400-e29b-41d4-a716-446655440000".parse().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(state.join("state.db"), b"state adapter fixture").unwrap();
+        std::fs::write(state.join("staging/unknown-file"), b"preserve").unwrap();
+        drop(store);
+        kill_at(&notes, &state, "upload", stage);
+        let reopened = FileStore::open(&notes, &state).unwrap();
+        let entries = reopened.list_upload_staging().unwrap();
+        assert_eq!(entries.len(), 1, "{stage:?}");
+        assert_eq!(
+            entries[0].complete,
+            stage != StorageStage::BeforeUploadPublish
+        );
+        let suffix = if entries[0].complete { "ready" } else { "part" };
+        assert_eq!(
+            std::fs::read(state.join(format!("staging/upload-{}.{suffix}", entries[0].id)))
+                .unwrap(),
+            b"proposed"
+        );
+        reopened.remove_staged_entry(&entries[0]).unwrap();
+        assert!(reopened.list_upload_staging().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read(state.join("staging/unknown-file")).unwrap(),
+            b"preserve"
+        );
+        assert!(
+            std::fs::read_dir(state.join("objects/sha256"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+}

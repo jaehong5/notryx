@@ -8,11 +8,21 @@ use sha2::{Digest, Sha256};
 use ts_rs::TS;
 
 pub mod admin;
+pub mod create;
 pub mod http;
-pub use admin::{AdminRequest, AdminResponse, AdminResult};
+pub mod node;
+pub mod operation;
+pub mod structure;
+pub mod upload;
+pub use admin::{AdminRecoverySummary, AdminRequest, AdminResponse, AdminResult};
+pub use create::{CreateNodeRequest, CreatedNode};
 pub use http::{
     ApiError, NodeKind, NodeMetadata, PairRequest, PairResponse, ServerInfo, WorkspaceRole,
 };
+pub use node::{InventoryPage, NodeState};
+pub use operation::{AbandonRequest, AckRequest, AckResponse, OperationError, OperationReceipt};
+pub use structure::{MoveNodeRequest, RestoreNodeRequest, TrashNode, TrashPage};
+pub use upload::UploadResponse;
 
 pub const CONTRACT: &str = "mdw-sync/1.2";
 
@@ -86,6 +96,19 @@ impl ContentPrecondition {
         &self.0
     }
 
+    pub fn revision(&self) -> Result<ContentRevision, InvalidContract> {
+        let value = self
+            .0
+            .as_str()
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .ok_or(InvalidContract::Etag)?;
+        if value.len() > 256 {
+            return Err(InvalidContract::Etag);
+        }
+        ContentRevision::new(value).map_err(|_| InvalidContract::Etag)
+    }
+
     pub fn matches(&self, current: &ContentRevision) -> Result<bool, InvalidContract> {
         Ok(self.0 == StrongEtag::from_content_revision(current)?)
     }
@@ -101,6 +124,19 @@ impl MetadataPrecondition {
 
     pub fn etag(&self) -> &StrongEtag {
         &self.0
+    }
+
+    pub fn revision(&self) -> Result<MetaRevision, InvalidContract> {
+        let value = self
+            .0
+            .as_str()
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .ok_or(InvalidContract::Etag)?;
+        if value.len() > 256 {
+            return Err(InvalidContract::Etag);
+        }
+        MetaRevision::new(value).map_err(|_| InvalidContract::Etag)
     }
 
     pub fn matches(&self, current: &MetaRevision) -> Result<bool, InvalidContract> {

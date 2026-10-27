@@ -9,28 +9,80 @@ use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt, path::Path, time::Durat
 use uuid::Uuid;
 
 pub(crate) mod auth;
-mod read;
+pub(crate) mod create;
+pub(crate) mod lifecycle;
+pub(crate) mod move_node;
+pub(crate) mod node;
+pub(crate) mod recovery;
+mod stream;
+pub(crate) mod upload;
+use create::CreateIntent;
 
 const APPLICATION_ID: i64 = 0x4e545253;
+pub(crate) const CURRENT_SCHEMA_VERSION: i64 = 9;
 
-pub(crate) fn db_error(_: impl std::fmt::Debug) -> Error {
+pub(crate) fn db_error(error: sqlx::Error) -> Error {
+    // SQLite exposes extended result codes as decimal strings; preserve the primary FULL code.
+    if error
+        .as_database_error()
+        .and_then(|error| error.code())
+        .and_then(|code| code.parse::<i32>().ok())
+        .is_some_and(|code| code & 255 == 13)
+    {
+        Error::NoSpace
+    } else {
+        Error::Storage
+    }
+}
+pub(crate) fn serialization_error(_: serde_json::Error) -> Error {
     Error::Storage
+}
+fn io_error(error: std::io::Error) -> Error {
+    if error.raw_os_error().is_some_and(|code| {
+        code == rustix::io::Errno::NOSPC.raw_os_error()
+            || code == rustix::io::Errno::DQUOT.raw_os_error()
+    }) {
+        Error::NoSpace
+    } else {
+        Error::Storage
+    }
 }
 fn decode<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, Error> {
     serde_json::from_str(text).map_err(|_| Error::InvalidFormat)
 }
 fn encode(value: &impl Serialize) -> Result<String, Error> {
-    serde_json::to_string(value).map_err(db_error)
+    serde_json::to_string(value).map_err(serialization_error)
 }
 fn parse<T: std::str::FromStr>(value: &str) -> Result<T, Error> {
     value.parse().map_err(|_| Error::InvalidFormat)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Intent {
     pub operation_id: notryx_domain::OperationId,
     pub before: Document,
     pub proposed: Document,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum PendingIntent {
+    Save(Intent),
+    Create(CreateIntent),
+    Move(move_node::MoveIntent),
+    Lifecycle(lifecycle::LifecycleIntent),
+}
+
+impl PendingIntent {
+    pub(crate) fn operation_id(&self) -> notryx_domain::OperationId {
+        match self {
+            Self::Save(intent) => intent.operation_id,
+            Self::Create(intent) => intent.operation_id,
+            Self::Move(intent) => intent.operation_id,
+            Self::Lifecycle(intent) => intent.operation_id,
+        }
+    }
 }
 
 pub(crate) struct State {
@@ -49,8 +101,8 @@ impl State {
             .create_new(true)
             .mode(0o600)
             .open(path)
-            .map_err(db_error)?;
-        file.sync_all().map_err(db_error)?;
+            .map_err(io_error)?;
+        file.sync_all().map_err(io_error)?;
         let mut connection = Self::connect(path).await?;
         let epoch = parse(&Uuid::new_v4().to_string())?;
         let root_id = parse(&Uuid::now_v7().to_string())?;
@@ -63,7 +115,8 @@ impl State {
                 name TEXT NOT NULL, normalized_name_key TEXT NOT NULL, kind TEXT NOT NULL,
                 content_rev TEXT, meta_rev TEXT NOT NULL, content_hash TEXT, size TEXT,
                 children_generation TEXT NOT NULL, last_change_seq TEXT NOT NULL,
-                UNIQUE(parent_id, normalized_name_key));
+                deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN(0,1)));
+            CREATE UNIQUE INDEX live_node_name ON nodes(parent_id, normalized_name_key) WHERE deleted=0;
             CREATE TABLE change_sets (seq TEXT PRIMARY KEY NOT NULL, operation_id TEXT UNIQUE);
             CREATE TABLE node_changes (seq TEXT NOT NULL REFERENCES change_sets(seq),
                 node_id TEXT NOT NULL REFERENCES nodes(node_id), post_state TEXT NOT NULL,
@@ -85,13 +138,21 @@ impl State {
             .execute(&mut *tx)
             .await
             .map_err(db_error)?;
-        sqlx::query("INSERT INTO nodes VALUES(?,NULL,'','','folder',NULL,?,NULL,NULL,'0','0')")
+        sqlx::query("INSERT INTO nodes VALUES(?,NULL,'','','folder',NULL,?,NULL,NULL,'0','0',0)")
             .bind(format!("{root_id}"))
             .bind(Uuid::new_v4().to_string())
             .execute(&mut *tx)
             .await
             .map_err(db_error)?;
         auth::initialize(&mut tx, workspace_id).await?;
+        stream::initialize(&mut tx).await?;
+        stream::migrate_receipt_etags(&mut tx).await?;
+        recovery::initialize(&mut tx).await?;
+        upload::initialize(&mut tx).await?;
+        sqlx::query("PRAGMA user_version=9")
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error)?;
         tx.commit().await.map_err(db_error)?;
         Ok(Self {
             connection,
@@ -149,7 +210,10 @@ impl State {
             .fetch_one(&mut probe)
             .await
             .map_err(db_error)?;
-        if app_id != APPLICATION_ID || !matches!(version, 1 | 2) || check != "ok" {
+        if app_id != APPLICATION_ID
+            || !(1..=CURRENT_SCHEMA_VERSION).contains(&version)
+            || check != "ok"
+        {
             return Err(Error::InvalidFormat);
         }
         let row =
@@ -176,10 +240,11 @@ impl State {
         if inconsistent != 0 {
             return Err(Error::InvalidFormat);
         }
-        validate_layout(&mut probe, root_id).await?;
-        if version == 2 {
+        validate_layout(&mut probe, root_id, version).await?;
+        if version >= 2 {
             auth::validate(&mut probe, workspace_id).await?;
-        } else if !allow_legacy {
+        }
+        if version < CURRENT_SCHEMA_VERSION && !allow_legacy {
             return Err(Error::MigrationRequired);
         }
         probe.close().await.map_err(db_error)?;
@@ -194,10 +259,67 @@ impl State {
         ))
     }
 
-    pub async fn migrate_auth(&mut self) -> Result<(), Error> {
+    pub async fn migrate(&mut self, version: i64) -> Result<(), Error> {
+        // SQLite requires foreign keys to be disabled before the rebuild transaction.
+        sqlx::query("PRAGMA foreign_keys=OFF")
+            .execute(&mut self.connection)
+            .await
+            .map_err(db_error)?;
+        let result = self.migrate_transaction(version).await;
+        let restored = sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&mut self.connection)
+            .await
+            .map_err(db_error);
+        restored?;
+        result
+    }
+
+    async fn migrate_transaction(&mut self, version: i64) -> Result<(), Error> {
         let mut tx = self.connection.begin().await.map_err(db_error)?;
-        auth::initialize(&mut tx, self.workspace_id).await?;
+        if version == 1 {
+            auth::initialize(&mut tx, self.workspace_id).await?;
+        }
+        if version < 3 {
+            stream::initialize(&mut tx).await?;
+        }
+        if version < 5 {
+            stream::migrate_receipt_etags(&mut tx).await?;
+        }
+        if version < 7 {
+            sqlx::raw_sql("CREATE TABLE nodes_new (
+                node_id TEXT PRIMARY KEY NOT NULL, parent_id TEXT REFERENCES nodes(node_id),
+                name TEXT NOT NULL, normalized_name_key TEXT NOT NULL, kind TEXT NOT NULL,
+                content_rev TEXT, meta_rev TEXT NOT NULL, content_hash TEXT, size TEXT,
+                children_generation TEXT NOT NULL, last_change_seq TEXT NOT NULL,
+                deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN(0,1)));
+                INSERT INTO nodes_new SELECT node_id,parent_id,name,normalized_name_key,kind,
+                    content_rev,meta_rev,content_hash,size,children_generation,last_change_seq,0 FROM nodes;
+                DROP TABLE nodes;
+                ALTER TABLE nodes_new RENAME TO nodes;
+                CREATE UNIQUE INDEX live_node_name ON nodes(parent_id, normalized_name_key) WHERE deleted=0;")
+                .execute(&mut *tx).await.map_err(db_error)?;
+        }
+        if version < 8 {
+            recovery::initialize(&mut tx).await?;
+            recovery::migrate_existing(&mut tx).await?;
+        }
+        if version < 9 {
+            upload::initialize(&mut tx).await?;
+        }
+        if !sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(db_error)?
+            .is_empty()
+        {
+            return Err(Error::InvalidFormat);
+        }
         auth::validate(&mut tx, self.workspace_id).await?;
+        validate_layout(&mut tx, self.root_id, CURRENT_SCHEMA_VERSION).await?;
+        sqlx::query("PRAGMA user_version=9")
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error)?;
         tx.commit().await.map_err(db_error)
     }
 
@@ -222,6 +344,10 @@ impl State {
             .fetch_optional(&mut self.connection)
             .await
             .map_err(db_error)?;
+        let row = match row {
+            Some(row) if node::snapshot(&row)?.deleted => None,
+            other => other,
+        };
         row.map(|row| {
             Ok(Document {
                 node_id,
@@ -254,11 +380,9 @@ impl State {
             .map_err(db_error)?;
         let mut docs = Vec::new();
         for id in ids {
-            docs.push(
-                self.document(parse(&id)?)
-                    .await?
-                    .ok_or(Error::InvalidFormat)?,
-            );
+            if let Some(document) = self.document(parse(&id)?).await? {
+                docs.push(document);
+            }
         }
         Ok(docs)
     }
@@ -266,7 +390,7 @@ impl State {
     pub async fn adopt(&mut self, document: &Document) -> Result<(), Error> {
         let mut tx = self.connection.begin().await.map_err(db_error)?;
         let seq = document.last_change_seq.get().to_string();
-        sqlx::query("INSERT INTO nodes VALUES(?,?,?,?,'file',?,?,?,?,'0',?)")
+        sqlx::query("INSERT INTO nodes VALUES(?,?,?,?,'file',?,?,?,?,'0',?,0)")
             .bind(document.node_id.to_string())
             .bind(document.parent_id.to_string())
             .bind(&document.name)
@@ -302,9 +426,23 @@ impl State {
             .execute(&mut *tx)
             .await
             .map_err(db_error)?;
-        let root = serde_json::json!({"node_id":self.root_id,"parent_id":null,"name":"","kind":"folder",
-            "content_rev":null,"meta_rev":row.try_get::<String,_>("meta_rev").map_err(db_error)?,"content_hash":null,
-            "size":null,"deleted":false,"children_generation":generation.to_string(),"last_change_seq":seq});
+        let root = node::node_post_state(&crate::NodeSnapshot {
+            node_id: self.root_id,
+            parent_id: None,
+            name: String::new(),
+            kind: notryx_protocol::NodeKind::Folder,
+            content_rev: None,
+            meta_rev: row
+                .try_get::<String, _>("meta_rev")
+                .map_err(db_error)?
+                .try_into()
+                .map_err(|_| Error::InvalidFormat)?,
+            content_hash: None,
+            size: None,
+            children_generation: generation,
+            last_change_seq: document.last_change_seq,
+            deleted: false,
+        });
         sqlx::query("INSERT INTO node_changes VALUES(?,?,?)")
             .bind(&seq)
             .bind(self.root_id.to_string())
@@ -320,68 +458,6 @@ impl State {
         tx.commit().await.map_err(db_error)
     }
 
-    pub async fn register_stream(&mut self) -> Result<Uuid, Error> {
-        let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO operation_streams VALUES(?,'0')")
-            .bind(id.to_string())
-            .execute(&mut self.connection)
-            .await
-            .map_err(db_error)?;
-        Ok(id)
-    }
-
-    pub async fn previous(
-        &mut self,
-        request: &SaveContent,
-        fingerprint: &str,
-    ) -> Result<Option<Receipt>, Error> {
-        let last: Option<String> =
-            sqlx::query_scalar("SELECT last_seq FROM operation_streams WHERE stream_id=?")
-                .bind(request.stream_id.to_string())
-                .fetch_optional(&mut self.connection)
-                .await
-                .map_err(db_error)?;
-        let last: u64 = parse(&last.ok_or(Error::UnknownStream)?)?;
-        let rows = sqlx::query("SELECT * FROM operation_receipts WHERE operation_id=? OR (stream_id=? AND operation_seq=?)")
-            .bind(request.operation_id.to_string()).bind(request.stream_id.to_string()).bind(request.operation_seq.to_string())
-            .fetch_all(&mut self.connection).await.map_err(db_error)?;
-        if !rows.is_empty() {
-            if rows.len() != 1 {
-                return Err(Error::IdempotencyMismatch);
-            }
-            let row = &rows[0];
-            if row.try_get::<String, _>("operation_id").map_err(db_error)?
-                != request.operation_id.to_string()
-                || row.try_get::<String, _>("stream_id").map_err(db_error)?
-                    != request.stream_id.to_string()
-                || row
-                    .try_get::<String, _>("operation_seq")
-                    .map_err(db_error)?
-                    != request.operation_seq.to_string()
-                || row.try_get::<String, _>("fingerprint").map_err(db_error)? != fingerprint
-            {
-                return Err(Error::IdempotencyMismatch);
-            }
-            return Ok(Some(Receipt {
-                operation_id: request.operation_id,
-                outcome: decode(row.try_get("outcome").map_err(db_error)?)?,
-            }));
-        }
-        if last.checked_add(1) != Some(request.operation_seq) {
-            return Err(Error::OperationGap);
-        }
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM operation_receipts WHERE stream_id=?")
-                .bind(request.stream_id.to_string())
-                .fetch_one(&mut self.connection)
-                .await
-                .map_err(db_error)?;
-        if count >= 10_000 {
-            return Err(Error::ReceiptLimit);
-        }
-        Ok(None)
-    }
-
     pub async fn admit(
         &mut self,
         request: &SaveContent,
@@ -390,28 +466,15 @@ impl State {
         intent: Option<&Intent>,
     ) -> Result<(), Error> {
         let mut tx = self.connection.begin().await.map_err(db_error)?;
-        let changed =
-            sqlx::query("UPDATE operation_streams SET last_seq=? WHERE stream_id=? AND last_seq=?")
-                .bind(request.operation_seq.to_string())
-                .bind(request.stream_id.to_string())
-                .bind((request.operation_seq - 1).to_string())
-                .execute(&mut *tx)
-                .await
-                .map_err(db_error)?
-                .rows_affected();
-        if changed != 1 {
-            return Err(Error::OperationGap);
-        }
-        sqlx::query("INSERT INTO operation_receipts VALUES(?,?,?,?,?,?)")
-            .bind(request.operation_id.to_string())
-            .bind(request.stream_id.to_string())
-            .bind(request.operation_seq.to_string())
-            .bind(fingerprint)
-            .bind(encode(outcome)?)
-            .bind(i64::from(intent.is_some()))
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
+        stream::insert_receipt(
+            &mut tx,
+            request.stream_id,
+            request.operation_seq,
+            request.operation_id,
+            fingerprint,
+            outcome,
+        )
+        .await?;
         if let Some(intent) = intent {
             sqlx::query("INSERT INTO write_intents(operation_id,intent) VALUES(?,?)")
                 .bind(request.operation_id.to_string())
@@ -423,34 +486,40 @@ impl State {
         tx.commit().await.map_err(db_error)
     }
 
-    pub async fn pending(&mut self) -> Result<Vec<Intent>, Error> {
-        let rows: Vec<String> = sqlx::query_scalar("SELECT intent FROM write_intents")
+    pub async fn pending(&mut self) -> Result<Vec<PendingIntent>, Error> {
+        let rows = sqlx::query("SELECT operation_id,intent FROM write_intents")
             .fetch_all(&mut self.connection)
             .await
             .map_err(db_error)?;
-        rows.into_iter().map(|s| decode(&s)).collect()
+        rows.into_iter()
+            .map(|row| {
+                let intent: PendingIntent = decode(row.try_get("intent").map_err(db_error)?)?;
+                if row.try_get::<&str, _>("operation_id").map_err(db_error)?
+                    != intent.operation_id().to_string()
+                {
+                    return Err(Error::InvalidFormat);
+                }
+                Ok(intent)
+            })
+            .collect()
     }
 
     pub async fn quarantine(
         &mut self,
-        intent: &Intent,
+        operation_id: notryx_domain::OperationId,
         observed_hash: Option<&str>,
     ) -> Result<(), Error> {
-        sqlx::query(
-            "UPDATE write_intents SET observed_hash=?,recovery_conflict=1 WHERE operation_id=?",
-        )
-        .bind(observed_hash)
-        .bind(intent.operation_id.to_string())
-        .execute(&mut self.connection)
-        .await
-        .map_err(db_error)?;
-        Ok(())
+        self.quarantine_intent(operation_id, observed_hash, None)
+            .await
     }
 
-    pub async fn is_quarantined(&mut self, intent: &Intent) -> Result<bool, Error> {
+    pub async fn is_quarantined(
+        &mut self,
+        operation_id: notryx_domain::OperationId,
+    ) -> Result<bool, Error> {
         let flag: i64 =
             sqlx::query_scalar("SELECT recovery_conflict FROM write_intents WHERE operation_id=?")
-                .bind(intent.operation_id.to_string())
+                .bind(operation_id.to_string())
                 .fetch_one(&mut self.connection)
                 .await
                 .map_err(db_error)?;
@@ -497,23 +566,7 @@ impl State {
         } else {
             Outcome::NotApplied
         };
-        let changed = sqlx::query(
-            "UPDATE operation_receipts SET outcome=?,pending=0 WHERE operation_id=? AND pending=1",
-        )
-        .bind(encode(&outcome)?)
-        .bind(intent.operation_id.to_string())
-        .execute(&mut *tx)
-        .await
-        .map_err(db_error)?
-        .rows_affected();
-        if changed != 1 {
-            return Err(Error::InvalidFormat);
-        }
-        sqlx::query("DELETE FROM write_intents WHERE operation_id=?")
-            .bind(intent.operation_id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(db_error)?;
+        stream::finish_pending(&mut tx, intent.operation_id, &outcome).await?;
         tx.commit().await.map_err(db_error)?;
         Ok(Receipt {
             operation_id: intent.operation_id,
@@ -523,18 +576,48 @@ impl State {
 }
 
 fn document_post_state(document: &Document) -> Result<String, Error> {
-    let mut value = serde_json::to_value(document).map_err(db_error)?;
-    value["kind"] = "file".into();
-    value["deleted"] = false.into();
-    value["children_generation"] = "0".into();
-    value["size"] = document.size.to_string().into();
-    encode(&value)
+    encode(&node::node_post_state(&crate::NodeSnapshot::from(document)))
 }
 
-async fn validate_layout(connection: &mut SqliteConnection, root_id: NodeId) -> Result<(), Error> {
+async fn validate_layout(
+    connection: &mut SqliteConnection,
+    root_id: NodeId,
+    version: i64,
+) -> Result<(), Error> {
+    if version >= 7 {
+        let index: Option<String> = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='live_node_name'",
+        )
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(db_error)?;
+        if index.as_deref()
+            != Some(
+                "CREATE UNIQUE INDEX live_node_name ON nodes(parent_id, normalized_name_key) WHERE deleted=0",
+            )
+        {
+            return Err(Error::InvalidFormat);
+        }
+        let deleted: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('nodes') WHERE name='deleted' AND [notnull]=1",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(db_error)?;
+        if deleted != 1 {
+            return Err(Error::InvalidFormat);
+        }
+    }
     let head = validate_journal(connection).await?;
-    validate_nodes(connection, root_id, head).await?;
-    validate_streams(connection).await
+    node::validate_tree(connection, root_id, head, version).await?;
+    stream::validate(connection, version).await?;
+    if version >= 8 {
+        recovery::validate(connection).await?;
+    }
+    if version >= 9 {
+        upload::validate(connection).await?;
+    }
+    Ok(())
 }
 
 async fn validate_journal(connection: &mut SqliteConnection) -> Result<u64, Error> {
@@ -560,145 +643,6 @@ async fn validate_journal(connection: &mut SqliteConnection) -> Result<u64, Erro
         return Err(Error::InvalidFormat);
     }
     Ok(head)
-}
-
-async fn validate_nodes(
-    connection: &mut SqliteConnection,
-    root_id: NodeId,
-    head: u64,
-) -> Result<(), Error> {
-    let nodes = sqlx::query("SELECT * FROM nodes")
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(db_error)?;
-    let mut roots = 0;
-    let mut children = 0;
-    let mut expected_children = None;
-    for node in &nodes {
-        let id: String = node.try_get("node_id").map_err(db_error)?;
-        let _: NodeId = parse(&id)?;
-        let parent: Option<String> = node.try_get("parent_id").map_err(db_error)?;
-        let kind: String = node.try_get("kind").map_err(db_error)?;
-        let name: String = node.try_get("name").map_err(db_error)?;
-        let key: String = node.try_get("normalized_name_key").map_err(db_error)?;
-        let meta: String = node.try_get("meta_rev").map_err(db_error)?;
-        let seq = canonical_u64(node.try_get("last_change_seq").map_err(db_error)?)?;
-        let generation = canonical_u64(node.try_get("children_generation").map_err(db_error)?)?;
-        if seq > head || meta.is_empty() {
-            return Err(Error::InvalidFormat);
-        }
-        match parent {
-            None => {
-                roots += 1;
-                if id != root_id.to_string()
-                    || kind != "folder"
-                    || !name.is_empty()
-                    || !key.is_empty()
-                    || node
-                        .try_get::<Option<String>, _>("content_rev")
-                        .map_err(db_error)?
-                        .is_some()
-                    || node
-                        .try_get::<Option<String>, _>("content_hash")
-                        .map_err(db_error)?
-                        .is_some()
-                    || node
-                        .try_get::<Option<String>, _>("size")
-                        .map_err(db_error)?
-                        .is_some()
-                {
-                    return Err(Error::InvalidFormat);
-                }
-                expected_children = Some(generation);
-            }
-            Some(parent) => {
-                children += 1;
-                if parent != root_id.to_string()
-                    || kind != "file"
-                    || generation != 0
-                    || seq == 0
-                    || notryx_domain::mutation::validate_name(&name).is_err()
-                    || key != notryx_domain::mutation::normalized_name_key(&name)
-                {
-                    return Err(Error::InvalidFormat);
-                }
-                canonical_u64(node.try_get("size").map_err(db_error)?)?;
-                let revision: String = node.try_get("content_rev").map_err(db_error)?;
-                if revision.is_empty() {
-                    return Err(Error::InvalidFormat);
-                }
-            }
-        }
-        if seq != 0 {
-            let post: Option<String> =
-                sqlx::query_scalar("SELECT post_state FROM node_changes WHERE seq=? AND node_id=?")
-                    .bind(seq.to_string())
-                    .bind(&id)
-                    .fetch_optional(&mut *connection)
-                    .await
-                    .map_err(db_error)?;
-            let value: serde_json::Value = decode(&post.ok_or(Error::InvalidFormat)?)?;
-            let nullable = |column: &str| -> Result<serde_json::Value, Error> {
-                Ok(node
-                    .try_get::<Option<String>, _>(column)
-                    .map_err(db_error)?
-                    .map_or(serde_json::Value::Null, Into::into))
-            };
-            let expected = serde_json::json!({"node_id":id,"parent_id":nullable("parent_id")?,"name":name,
-                "kind":kind,"meta_rev":meta,"content_rev":nullable("content_rev")?,"content_hash":nullable("content_hash")?,
-                "size":nullable("size")?,"deleted":false,"children_generation":generation.to_string(),"last_change_seq":seq.to_string()});
-            if value != expected {
-                return Err(Error::InvalidFormat);
-            }
-        }
-    }
-    if roots != 1 || expected_children != Some(children) {
-        return Err(Error::InvalidFormat);
-    }
-    Ok(())
-}
-
-async fn validate_streams(connection: &mut SqliteConnection) -> Result<(), Error> {
-    let streams = sqlx::query("SELECT stream_id,last_seq FROM operation_streams")
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(db_error)?;
-    for stream in streams {
-        let id: String = stream.try_get("stream_id").map_err(db_error)?;
-        let parsed: Uuid = parse(&id)?;
-        if parsed.get_version_num() != 4 || parsed.get_variant() != uuid::Variant::RFC4122 {
-            return Err(Error::InvalidFormat);
-        }
-        let last = canonical_u64(stream.try_get("last_seq").map_err(db_error)?)?;
-        let rows = sqlx::query(
-            "SELECT operation_seq,outcome,pending FROM operation_receipts WHERE stream_id=?",
-        )
-        .bind(id)
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(db_error)?;
-        let mut sequences = Vec::new();
-        for row in rows {
-            sequences.push(canonical_u64(
-                row.try_get("operation_seq").map_err(db_error)?,
-            )?);
-            let outcome: Outcome = decode(row.try_get("outcome").map_err(db_error)?)?;
-            let pending: i64 = row.try_get("pending").map_err(db_error)?;
-            if (pending == 1) != (outcome == Outcome::Pending) {
-                return Err(Error::InvalidFormat);
-            }
-        }
-        sequences.sort_unstable();
-        if sequences.len() as u64 != last
-            || sequences
-                .iter()
-                .enumerate()
-                .any(|(index, seq)| *seq != index as u64 + 1)
-        {
-            return Err(Error::InvalidFormat);
-        }
-    }
-    Ok(())
 }
 
 fn canonical_u64(value: &str) -> Result<u64, Error> {

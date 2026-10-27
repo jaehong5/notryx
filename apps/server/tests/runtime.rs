@@ -33,6 +33,7 @@ async fn initialized() -> (tempfile::TempDir, Config) {
         workspace: WorkspaceConfig {
             notes_root: notes,
             state_root: state,
+            uploads: Default::default(),
         },
     };
     (directory, config)
@@ -82,19 +83,21 @@ fn configuration_defaults_to_loopback_and_rejects_unknown_fields() {
 }
 
 #[tokio::test]
-async fn serving_an_initialized_workspace_exposes_only_health_and_releases_locks() {
+async fn serving_workspace_keeps_health_public_protects_api_and_releases_locks() {
     let (_directory, config) = initialized().await;
     let server = RunningServer::start(config.clone())
         .await
         .expect("start must open the initialized workspace and bind HTTP");
     let live = get(server.local_addr(), "/health/live").await;
     let ready = get(server.local_addr(), "/health/ready").await;
-    let private = get(server.local_addr(), "/v1/nodes").await;
+    let inventory = get(server.local_addr(), "/v1/nodes").await;
+    let private = get(server.local_addr(), "/v1/server-info").await;
     assert!(live.starts_with("HTTP/1.1 200"));
     assert!(live.ends_with("live\n"));
     assert!(ready.starts_with("HTTP/1.1 200"));
     assert!(ready.ends_with("ready\n"));
-    assert!(private.starts_with("HTTP/1.1 404"));
+    assert!(inventory.starts_with("HTTP/1.1 401"));
+    assert!(private.starts_with("HTTP/1.1 401"));
     assert!(!live.contains(config.workspace.notes_root.to_str().unwrap()));
     server.shutdown().await.unwrap();
     Workspace::open(&config.workspace.notes_root, &config.workspace.state_root)
@@ -116,6 +119,7 @@ async fn missing_or_corrupt_stores_fail_startup_without_initializing_or_overwrit
         workspace: WorkspaceConfig {
             notes_root: directory.path().join("missing-notes"),
             state_root: directory.path().join("missing-state"),
+            uploads: Default::default(),
         },
     };
     assert!(RunningServer::start(config.clone()).await.is_err());
@@ -254,7 +258,7 @@ fn cli_separates_initialization_from_serve_and_handles_termination_signals() {
     use std::io::BufRead;
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
-    for signal in ["-TERM", "-INT"] {
+    for signal in [rustix::process::Signal::TERM, rustix::process::Signal::INT] {
         let directory = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()
@@ -313,10 +317,7 @@ fn cli_separates_initialization_from_serve_and_handles_termination_signals() {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        let sent = Command::new("kill")
-            .args([signal, &child.id().to_string()])
-            .status()
-            .unwrap();
+        let sent = rustix::process::kill_process(rustix::process::Pid::from_child(&child), signal);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
@@ -330,10 +331,10 @@ fn cli_separates_initialization_from_serve_and_handles_termination_signals() {
             std::thread::sleep(Duration::from_millis(10));
         };
         reader.join().unwrap();
-        assert!(sent.success());
+        assert!(sent.is_ok(), "failed to send {signal:?}: {sent:?}");
         assert!(
             status.is_some_and(|status| status.success()),
-            "graceful termination failed for {signal}"
+            "graceful termination failed for {signal:?}"
         );
         tokio::runtime::Builder::new_current_thread()
             .enable_all()

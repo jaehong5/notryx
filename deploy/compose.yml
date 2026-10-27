@@ -1,0 +1,49 @@
+name: notryx
+
+services:
+  server:
+    image: "${NOTRYX_IMAGE:?Set the built image tag or release digest}"
+    restart: unless-stopped
+    init: true
+    user: "${NOTRYX_UID:-1000}:${NOTRYX_GID:-1000}"
+    command: ["serve", "--config", "/etc/notryx/server.toml"]
+    ports:
+      - "127.0.0.1:${NOTRYX_HTTP_PORT:-8080}:8080"
+    volumes:
+      - type: bind
+        source: "${NOTRYX_NOTES_DIR:?Set the absolute notes directory}"
+        target: /data/notes
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${NOTRYX_STATE_DIR:?Set the absolute state directory}"
+        target: /data/state
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${NOTRYX_CONFIG_FILE:?Set the absolute server.toml path}"
+        target: /etc/notryx/server.toml
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+      - /run/mdw:rw,noexec,nosuid,nodev,size=8m,mode=0700,uid=${NOTRYX_UID:-1000},gid=${NOTRYX_GID:-1000}
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: "2.0"
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD, /app/notryx-server, healthcheck, --address, "127.0.0.1:8080"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

@@ -6,16 +6,28 @@ use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-pub const MAX_FILE_BYTES: usize = 5 * 1024 * 1024;
+pub const MAX_DOCUMENT_BYTES: usize = 5 * 1024 * 1024;
+
+pub const MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
+
+mod tree;
+pub use tree::{FolderStamp, ObservedEntry};
+mod move_entry;
+pub use move_entry::EntryStamp;
+mod remove_entry;
+mod upload;
+pub use upload::{SealedUpload, StagingEntry, StoredUpload, UploadWriter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageError {
     Io,
+    NoSpace,
     NotFound,
     UnsupportedPlatform,
     UnsafeFile,
@@ -27,6 +39,7 @@ pub enum StorageError {
     NotEmpty,
     InvalidMarker,
     ChecksumMismatch,
+    AlreadyExists,
 }
 
 impl std::fmt::Display for StorageError {
@@ -57,6 +70,13 @@ pub struct ObservedFile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageStage {
+    BeforeUploadPublish,
+    AfterUploadPublish,
+    BeforeUploadFileSync,
+    AfterUploadFileSync,
+    BeforeUploadDirectorySync,
+    AfterUploadDirectorySync,
+    AfterDirectoryRead,
     BeforeObjectFileSync,
     AfterObjectFileSync,
     BeforeObjectPublish,
@@ -65,16 +85,32 @@ pub enum StorageStage {
     AfterObjectDirectorySync,
     BeforeTemporaryFileSync,
     AfterTemporaryFileSync,
+    BeforeTemporaryFolderSync,
+    AfterTemporaryFolderSync,
     BeforeTargetRevalidation,
     AfterTargetRevalidation,
     BeforeRename,
     AfterRename,
+    BeforeUnlink,
+    AfterUnlink,
+    BeforeMoveEntrySync,
+    AfterMoveEntrySync,
+    BeforeMoveSourceDirectorySync,
+    AfterMoveSourceDirectorySync,
+    BeforeMoveDestinationDirectorySync,
+    AfterMoveDestinationDirectorySync,
     BeforeParentDirectorySync,
     AfterParentDirectorySync,
     BeforeRecoveryFileSync,
     AfterRecoveryFileSync,
+    BeforeRecoveryFolderSync,
+    AfterRecoveryFolderSync,
     BeforeRecoveryDirectorySync,
     AfterRecoveryDirectorySync,
+    BeforeRecoverySourceDirectorySync,
+    AfterRecoverySourceDirectorySync,
+    BeforeRecoveryDestinationDirectorySync,
+    AfterRecoveryDestinationDirectorySync,
 }
 
 const RESOLVE: ResolveFlags = ResolveFlags::BENEATH
@@ -92,22 +128,46 @@ pub struct FileStore {
     notes: File,
     state: File,
     objects: File,
-    _notes_lock: File,
-    _state_lock: File,
+    lease: Arc<StoreLease>,
     workspace_id: WorkspaceId,
+}
+
+struct StoreLease {
+    _notes_lock: StoreLock,
+    _state_lock: StoreLock,
+}
+
+struct StoreLock {
+    file: File,
+    owner_pid: u32,
+}
+
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        // Fork/dup aliases can outlive the owner; a fork child must not unlock its parent's lock.
+        if std::process::id() == self.owner_pid {
+            let _ = fs::flock(&self.file, FlockOperation::Unlock);
+        }
+    }
 }
 
 fn errno(error: Errno) -> StorageError {
     match error {
+        Errno::NOSPC | Errno::DQUOT => StorageError::NoSpace,
         Errno::NOENT => StorageError::NotFound,
+        Errno::EXIST => StorageError::AlreadyExists,
+        Errno::NOTEMPTY => StorageError::NotEmpty,
         Errno::NOSYS | Errno::INVAL => StorageError::UnsupportedPlatform,
         Errno::LOOP | Errno::XDEV | Errno::NOTDIR => StorageError::UnsafeFile,
         _ => StorageError::Io,
     }
 }
 
-fn io(_: std::io::Error) -> StorageError {
-    StorageError::Io
+fn io(error: std::io::Error) -> StorageError {
+    match Errno::from_io_error(&error) {
+        Some(Errno::NOSPC | Errno::DQUOT) => StorageError::NoSpace,
+        _ => StorageError::Io,
+    }
 }
 
 fn open_at(
@@ -177,7 +237,7 @@ fn create_regular(root: &File, name: &str) -> Result<File, StorageError> {
     )
 }
 
-fn lock_file(root: &File, name: &str, create: bool) -> Result<File, StorageError> {
+fn lock_file(root: &File, name: &str, create: bool) -> Result<StoreLock, StorageError> {
     let file = if create {
         create_regular(root, name)?
     } else {
@@ -190,10 +250,14 @@ fn lock_file(root: &File, name: &str, create: bool) -> Result<File, StorageError
             errno(error)
         }
     })?;
+    let lock = StoreLock {
+        file,
+        owner_pid: std::process::id(),
+    };
     if create {
-        file.sync_all().map_err(io)?;
+        lock.file.sync_all().map_err(io)?;
     }
-    Ok(file)
+    Ok(lock)
 }
 
 fn distinct_roots(notes: &File, state: &File) -> Result<(), StorageError> {
@@ -252,8 +316,11 @@ fn read_observed(file: &File) -> Result<ObservedFile, StorageError> {
     if before.len() > MAX_FILE_BYTES as u64 {
         return Err(StorageError::TooLarge);
     }
+    let mut reader = file;
+    reader.rewind().map_err(io)?;
     let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES as u64 + 1)
+    reader
+        .take(MAX_FILE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(io)?;
     if bytes.len() > MAX_FILE_BYTES {
@@ -267,6 +334,52 @@ fn read_observed(file: &File) -> Result<ObservedFile, StorageError> {
     }
     let stamp = metadata_stamp(&after, content_hash(&bytes));
     Ok(ObservedFile { bytes, stamp })
+}
+
+fn hash_observed(file: &File) -> Result<FileStamp, StorageError> {
+    scan_observed(file, None)
+}
+
+fn copy_observed(file: &File, target: &mut File) -> Result<FileStamp, StorageError> {
+    scan_observed(file, Some(target))
+}
+
+fn scan_observed(file: &File, mut target: Option<&mut File>) -> Result<FileStamp, StorageError> {
+    let before = checked_regular(file)?;
+    if before.len() > MAX_FILE_BYTES as u64 {
+        return Err(StorageError::TooLarge);
+    }
+    let mut reader = file;
+    reader.rewind().map_err(io)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut size = 0u64;
+    loop {
+        let count = reader.read(&mut buffer).map_err(io)?;
+        if count == 0 {
+            break;
+        }
+        size += count as u64;
+        if size > MAX_FILE_BYTES as u64 {
+            return Err(StorageError::TooLarge);
+        }
+        if let Some(target) = target.as_mut() {
+            target.write_all(&buffer[..count]).map_err(io)?;
+        }
+        hash.update(&buffer[..count]);
+    }
+    let after = checked_regular(file)?;
+    if metadata_stamp(&before, String::new()) != metadata_stamp(&after, String::new())
+        || size != after.len()
+    {
+        return Err(StorageError::Changed);
+    }
+    let hash = hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(metadata_stamp(&after, hash))
 }
 
 struct TemporaryFile<'a> {
@@ -289,8 +402,8 @@ impl<'a> TemporaryFile<'a> {
     }
 
     fn validate(&self, expected: &FileStamp) -> Result<(), StorageError> {
-        let observed = read_observed(&open_regular(self.root, &self.name)?)?;
-        if &observed.stamp != expected {
+        let observed = hash_observed(&open_regular(self.root, &self.name)?)?;
+        if &observed != expected {
             return Err(StorageError::Changed);
         }
         Ok(())
@@ -354,14 +467,18 @@ impl FileStore {
         file.write_all(&bytes).map_err(io)?;
         file.sync_all().map_err(io)?;
         notes.sync_all().map_err(io)?;
-        Ok(Self {
+        let store = Self {
             notes,
             state,
             objects,
-            _notes_lock: notes_lock,
-            _state_lock: state_lock,
+            lease: Arc::new(StoreLease {
+                _notes_lock: notes_lock,
+                _state_lock: state_lock,
+            }),
             workspace_id,
-        })
+        };
+        store.prepare_upload_staging()?;
+        Ok(store)
     }
 
     pub fn open(notes: impl AsRef<Path>, state: impl AsRef<Path>) -> Result<Self, StorageError> {
@@ -392,8 +509,10 @@ impl FileStore {
             notes,
             state,
             objects,
-            _notes_lock: notes_lock,
-            _state_lock: state_lock,
+            lease: Arc::new(StoreLease {
+                _notes_lock: notes_lock,
+                _state_lock: state_lock,
+            }),
             workspace_id: marker.workspace_id,
         };
         result.validate_state_database()?;
@@ -405,8 +524,17 @@ impl FileStore {
     }
 
     pub fn observe(&self, name: &str) -> Result<ObservedFile, StorageError> {
-        validate_name(name)?;
-        read_observed(&open_regular(&self.notes, name)?)
+        let parent = self.note_parent(name)?;
+        let observed = read_observed(&open_regular(&parent.directory, &parent.name)?)?;
+        parent.revalidate(self)?;
+        Ok(observed)
+    }
+
+    fn observe_stamp(&self, name: &str) -> Result<FileStamp, StorageError> {
+        let parent = self.note_parent(name)?;
+        let stamp = hash_observed(&open_regular(&parent.directory, &parent.name)?)?;
+        parent.revalidate(self)?;
+        Ok(stamp)
     }
 
     pub fn put_object(&self, bytes: &[u8]) -> Result<String, StorageError> {
@@ -414,7 +542,12 @@ impl FileStore {
     }
 
     pub fn read_object(&self, hash: &str) -> Result<Vec<u8>, StorageError> {
-        self.verified_object(hash).map(|(_, bytes)| bytes)
+        validate_hash(hash)?;
+        let observed = read_observed(&open_regular(&self.objects, hash)?)?;
+        if observed.stamp.hash != hash {
+            return Err(StorageError::ChecksumMismatch);
+        }
+        Ok(observed.bytes)
     }
 
     pub fn replace(
@@ -451,14 +584,14 @@ impl FileStore {
         self.state.sync_all().map_err(io)
     }
 
-    fn verified_object(&self, hash: &str) -> Result<(File, Vec<u8>), StorageError> {
+    fn verified_object(&self, hash: &str) -> Result<(File, FileStamp), StorageError> {
         validate_hash(hash)?;
         let file = open_regular(&self.objects, hash)?;
-        let observed = read_observed(&file)?;
-        if observed.stamp.hash != hash {
+        let stamp = hash_observed(&file)?;
+        if stamp.hash != hash {
             return Err(StorageError::ChecksumMismatch);
         }
-        Ok((file, observed.bytes))
+        Ok((file, stamp))
     }
 
     fn put_object_inner(
@@ -516,15 +649,17 @@ impl FileStore {
         object_hash: &str,
         hook: &mut impl FnMut(StorageStage) -> Result<(), StorageError>,
     ) -> Result<FileStamp, StorageError> {
-        validate_name(name)?;
-        let bytes = self.read_object(object_hash)?;
-        let target = open_regular(&self.notes, name)?;
-        let initial = read_observed(&target)?;
-        if &initial.stamp != expected {
+        let parent = self.note_parent(name)?;
+        let (object, _) = self.verified_object(object_hash)?;
+        let target = open_regular(&parent.directory, &parent.name)?;
+        let initial = hash_observed(&target)?;
+        if &initial != expected {
             return Err(StorageError::Changed);
         }
-        let mut temporary = TemporaryFile::new(&self.notes)?;
-        temporary.file.write_all(&bytes).map_err(io)?;
+        let mut temporary = TemporaryFile::new(&parent.directory)?;
+        if copy_observed(&object, &mut temporary.file)?.hash != object_hash {
+            return Err(StorageError::ChecksumMismatch);
+        }
         let permissions = target.metadata().map_err(io)?.mode() & 0o777;
         fs::fchmod(&temporary.file, Mode::from_raw_mode(permissions)).map_err(errno)?;
         hook(StorageStage::BeforeTemporaryFileSync)?;
@@ -535,25 +670,32 @@ impl FileStore {
         );
         hook(StorageStage::AfterTemporaryFileSync)?;
         hook(StorageStage::BeforeTargetRevalidation)?;
-        let current = self.observe(name)?;
-        if &current.stamp != expected {
+        let current = self.observe_stamp(name)?;
+        if &current != expected {
             return Err(StorageError::Changed);
         }
         hook(StorageStage::AfterTargetRevalidation)?;
         hook(StorageStage::BeforeRename)?;
         // A non-cooperating writer can still race after these checks.
+        parent.revalidate(self)?;
         temporary.validate(&durable)?;
-        fs::renameat(&self.notes, temporary.name.as_str(), &self.notes, name).map_err(errno)?;
+        fs::renameat(
+            &parent.directory,
+            temporary.name.as_str(),
+            &parent.directory,
+            parent.name.as_str(),
+        )
+        .map_err(errno)?;
         temporary.armed = false;
         hook(StorageStage::AfterRename)?;
         hook(StorageStage::BeforeParentDirectorySync)?;
-        self.notes.sync_all().map_err(io)?;
+        parent.directory.sync_all().map_err(io)?;
         hook(StorageStage::AfterParentDirectorySync)?;
-        let final_observation = self.observe(name)?;
-        if final_observation.stamp.hash != object_hash {
+        let final_observation = self.observe_stamp(name)?;
+        if final_observation.hash != object_hash {
             return Err(StorageError::Changed);
         }
-        Ok(final_observation.stamp)
+        Ok(final_observation)
     }
 
     fn sync_observed_inner(
@@ -562,8 +704,8 @@ impl FileStore {
         expected: &FileStamp,
         hook: &mut impl FnMut(StorageStage) -> Result<(), StorageError>,
     ) -> Result<(), StorageError> {
-        validate_name(name)?;
-        let file = open_regular(&self.notes, name)?;
+        let parent = self.note_parent(name)?;
+        let file = open_regular(&parent.directory, &parent.name)?;
         let observed = read_observed(&file)?;
         if &observed.stamp != expected {
             return Err(StorageError::Changed);
@@ -572,7 +714,7 @@ impl FileStore {
         file.sync_all().map_err(io)?;
         hook(StorageStage::AfterRecoveryFileSync)?;
         hook(StorageStage::BeforeRecoveryDirectorySync)?;
-        self.notes.sync_all().map_err(io)?;
+        parent.directory.sync_all().map_err(io)?;
         hook(StorageStage::AfterRecoveryDirectorySync)?;
         if self.observe(name)?.stamp != *expected {
             return Err(StorageError::Changed);
@@ -608,5 +750,135 @@ impl FileStore {
         mut hook: impl FnMut(StorageStage) -> Result<(), StorageError>,
     ) -> Result<(), StorageError> {
         self.sync_observed_inner(name, expected, &mut hook)
+    }
+}
+
+#[cfg(test)]
+mod lock_lifetime_tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, FileStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let notes = directory.path().join("notes");
+        let state = directory.path().join("state");
+        std::fs::create_dir(&notes).unwrap();
+        std::fs::create_dir(&state).unwrap();
+        let store = FileStore::init(
+            &notes,
+            &state,
+            "550e8400-e29b-41d4-a716-446655440000".parse().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(state.join("state.db"), b"state adapter fixture").unwrap();
+        (directory, store)
+    }
+
+    fn assert_locked(notes: &Path, state: &Path) {
+        assert!(matches!(
+            FileStore::open(notes, state),
+            Err(StorageError::Locked)
+        ));
+    }
+
+    #[test]
+    fn owner_drop_releases_aliased_locks_without_weakening_the_next_owner() {
+        let (directory, store) = fixture();
+        let notes = directory.path().join("notes");
+        let state = directory.path().join("state");
+        let inherited_notes = store.lease._notes_lock.file.try_clone().unwrap();
+        let inherited_state = store.lease._state_lock.file.try_clone().unwrap();
+        assert_locked(&notes, &state);
+        drop(store);
+
+        let next = FileStore::open(&notes, &state)
+            .expect("the owner must release both locks while duplicate descriptors remain open");
+        assert_locked(&notes, &state);
+        drop(inherited_notes);
+        drop(inherited_state);
+        assert_locked(&notes, &state);
+        drop(next);
+        FileStore::open(&notes, &state).unwrap();
+    }
+
+    #[test]
+    fn failed_initialization_releases_acquired_locks_despite_duplicate_descriptors() {
+        let (directory, store) = fixture();
+        drop(store);
+        let notes_path = directory.path().join("notes");
+        let state_path = directory.path().join("state");
+        let notes = open_root(&notes_path).unwrap();
+        let state = open_root(&state_path).unwrap();
+        for fail_after_notes in [true, false] {
+            let mut inherited = Vec::new();
+            let result: Result<(), StorageError> = (|| {
+                let notes_lock = lock_file(&notes, ".mdw-server.lock", false)?;
+                inherited.push(notes_lock.file.try_clone().map_err(io)?);
+                if fail_after_notes {
+                    open_regular(&state, "missing-database")?;
+                }
+                let state_lock = lock_file(&state, "server.lock", false)?;
+                inherited.push(state_lock.file.try_clone().map_err(io)?);
+                open_regular(&state, "missing-database")?;
+                Ok(())
+            })();
+            assert_eq!(result, Err(StorageError::NotFound));
+            let next = FileStore::open(&notes_path, &state_path)
+                .expect("a failed initialization must release every acquired lock");
+            assert_locked(&notes_path, &state_path);
+            drop(inherited);
+            assert_locked(&notes_path, &state_path);
+            drop(next);
+        }
+    }
+
+    #[test]
+    fn a_guard_owned_by_another_process_does_not_unlock_shared_descriptors() {
+        let (directory, mut store) = fixture();
+        let notes = directory.path().join("notes");
+        let state = directory.path().join("state");
+        let inherited = store.lease._notes_lock.file.try_clone().unwrap();
+        Arc::get_mut(&mut store.lease)
+            .unwrap()
+            ._notes_lock
+            .owner_pid = std::process::id().checked_add(1).unwrap();
+        drop(store);
+        assert_locked(&notes, &state);
+        drop(inherited);
+        FileStore::open(&notes, &state).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn actual_full_device_write_maps_to_no_space() {
+        let mut full = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        assert_eq!(
+            full.write_all(b"synthetic capacity probe").map_err(io),
+            Err(StorageError::NoSpace)
+        );
+    }
+
+    #[test]
+    fn only_capacity_and_quota_errors_become_no_space() {
+        for error in [Errno::NOSPC, Errno::DQUOT] {
+            assert_eq!(errno(error), StorageError::NoSpace);
+            assert_eq!(
+                io(std::io::Error::from_raw_os_error(error.raw_os_error())),
+                StorageError::NoSpace
+            );
+        }
+        for error in [Errno::ACCESS, Errno::ROFS, Errno::IO] {
+            assert_eq!(errno(error), StorageError::Io);
+            assert_eq!(
+                io(std::io::Error::from_raw_os_error(error.raw_os_error())),
+                StorageError::Io
+            );
+        }
     }
 }

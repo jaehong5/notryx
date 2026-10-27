@@ -320,7 +320,7 @@ async fn registered_device_reads_exact_bytes_and_stable_metadata_across_save_res
 }
 
 #[tokio::test]
-async fn conditional_content_reads_enforce_resource_etags_and_expose_no_remote_writes_or_admin() {
+async fn conditional_content_reads_enforce_etags_and_reject_unsupported_methods_and_remote_admin() {
     let (_directory, config) = initialized().await;
     let document = adopt(&config, ORIGINAL).await;
     let server = RunningServer::start(config.clone()).await.unwrap();
@@ -407,7 +407,7 @@ async fn conditional_content_reads_enforce_resource_etags_and_expose_no_remote_w
     let authorization = format!("Bearer {}", paired.device_token);
     let remote_write = request(
         server.local_addr(),
-        "PUT",
+        "PATCH",
         &path,
         &[("Authorization", &authorization)],
         b"must not replace content",

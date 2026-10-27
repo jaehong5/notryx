@@ -17,6 +17,7 @@ pub enum AuthError {
     Forbidden,
     NotFound,
     Storage,
+    NoSpace,
 }
 
 impl std::fmt::Display for AuthError {

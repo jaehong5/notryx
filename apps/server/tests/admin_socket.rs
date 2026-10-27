@@ -12,6 +12,7 @@ async fn fixture() -> (tempfile::TempDir, WorkspaceRuntime) {
     let config = WorkspaceConfig {
         notes_root: directory.path().join("notes"),
         state_root: directory.path().join("state"),
+        uploads: Default::default(),
     };
     std::fs::create_dir(&config.notes_root).unwrap();
     std::fs::create_dir(&config.state_root).unwrap();

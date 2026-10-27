@@ -1,5 +1,109 @@
 {
   "$defs": {
+    "AbandonRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "device_stream_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "operation_seq": {
+          "pattern": "^0*[1-9][0-9]*$",
+          "type": "string"
+        },
+        "workspace_epoch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_epoch",
+        "device_stream_id",
+        "operation_id",
+        "operation_seq"
+      ],
+      "title": "AbandonRequest",
+      "type": "object"
+    },
+    "AckRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "ack_through": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "device_stream_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "workspace_epoch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_epoch",
+        "device_stream_id",
+        "ack_through"
+      ],
+      "title": "AckRequest",
+      "type": "object"
+    },
+    "AckResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "device_stream_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "last_seq": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "retired_through": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "workspace_epoch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_epoch",
+        "device_stream_id",
+        "last_seq",
+        "retired_through"
+      ],
+      "title": "AckResponse",
+      "type": "object"
+    },
+    "AdminRecoverySummary": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "type": "string"
+        },
+        "resolved": {
+          "type": "boolean"
+        },
+        "retained_objects": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "resolved",
+        "retained_objects"
+      ],
+      "title": "AdminRecoverySummary",
+      "type": "object"
+    },
     "AdminRequest": {
       "$defs": {
         "WorkspaceRole": {
@@ -23,6 +127,91 @@
           },
           "required": [
             "command"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "after_operation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "command": {
+              "const": "recovery_list",
+              "type": "string"
+            },
+            "limit": {
+              "format": "uint16",
+              "maximum": 20,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "command",
+            "after_operation_id",
+            "limit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "after_hash": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "command": {
+              "const": "recovery_inspect",
+              "type": "string"
+            },
+            "operation_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "operation_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "const": "recovery_resolve",
+              "type": "string"
+            },
+            "operation_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "operation_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "const": "recovery_release",
+              "type": "string"
+            },
+            "operation_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "operation_id"
           ],
           "type": "object"
         },
@@ -124,8 +313,120 @@
     },
     "AdminResponse": {
       "$defs": {
+        "AdminRecoverySummary": {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "resolved": {
+              "type": "boolean"
+            },
+            "retained_objects": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation_id",
+            "resolved",
+            "retained_objects"
+          ],
+          "type": "object"
+        },
         "AdminResult": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "entries": {
+                  "items": {
+                    "$ref": "#/$defs/AdminRecoverySummary"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "const": "recovery_list",
+                  "type": "string"
+                },
+                "next_after_operation_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "entries",
+                "next_after_operation_id"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "recovery_detail",
+                  "type": "string"
+                },
+                "next_after_hash": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "objects": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "objects_truncated": {
+                  "type": "boolean"
+                },
+                "paths": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "summary": {
+                  "$ref": "#/$defs/AdminRecoverySummary"
+                }
+              },
+              "required": [
+                "kind",
+                "summary",
+                "paths",
+                "objects",
+                "objects_truncated",
+                "next_after_hash"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "recovery_resolved",
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "ready": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "kind",
+                "operation_id",
+                "ready"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -254,8 +555,122 @@
       "title": "AdminResponse"
     },
     "AdminResult": {
+      "$defs": {
+        "AdminRecoverySummary": {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "resolved": {
+              "type": "boolean"
+            },
+            "retained_objects": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "operation_id",
+            "resolved",
+            "retained_objects"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "entries": {
+              "items": {
+                "$ref": "#/$defs/AdminRecoverySummary"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "recovery_list",
+              "type": "string"
+            },
+            "next_after_operation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "entries",
+            "next_after_operation_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "recovery_detail",
+              "type": "string"
+            },
+            "next_after_hash": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "objects": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "objects_truncated": {
+              "type": "boolean"
+            },
+            "paths": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "summary": {
+              "$ref": "#/$defs/AdminRecoverySummary"
+            }
+          },
+          "required": [
+            "kind",
+            "summary",
+            "paths",
+            "objects",
+            "objects_truncated",
+            "next_after_hash"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "recovery_resolved",
+              "type": "string"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "ready": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "operation_id",
+            "ready"
+          ],
+          "type": "object"
+        },
         {
           "additionalProperties": false,
           "properties": {
@@ -367,6 +782,50 @@
       "title": "ApiError",
       "type": "object"
     },
+    "CreateNodeRequest": {
+      "$defs": {
+        "NodeKind": {
+          "enum": [
+            "file",
+            "folder"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/NodeKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "parent_id": {
+          "type": "string"
+        },
+        "upload_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "node_id",
+        "parent_id",
+        "name",
+        "kind"
+      ],
+      "title": "CreateNodeRequest",
+      "type": "object"
+    },
+    "CreatedNode": {
+      "$ref": "#/$defs/NodeState"
+    },
     "HeadHint": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -384,6 +843,125 @@
         "head_seq"
       ],
       "title": "HeadHint",
+      "type": "object"
+    },
+    "InventoryPage": {
+      "$defs": {
+        "NodeKind": {
+          "enum": [
+            "file",
+            "folder"
+          ],
+          "type": "string"
+        },
+        "NodeState": {
+          "additionalProperties": false,
+          "properties": {
+            "children_generation": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "content_etag": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_rev": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "deleted": {
+              "type": "boolean"
+            },
+            "kind": {
+              "$ref": "#/$defs/NodeKind"
+            },
+            "last_change_seq": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "meta_etag": {
+              "type": "string"
+            },
+            "meta_rev": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "node_etag": {
+              "type": "string"
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "size": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "node_id",
+            "parent_id",
+            "name",
+            "kind",
+            "deleted",
+            "content_rev",
+            "content_etag",
+            "meta_rev",
+            "meta_etag",
+            "node_etag",
+            "content_hash",
+            "size",
+            "children_generation",
+            "last_change_seq"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "next_after_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/NodeState"
+          },
+          "type": "array"
+        },
+        "workspace_epoch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_epoch",
+        "nodes",
+        "next_after_id"
+      ],
+      "title": "InventoryPage",
       "type": "object"
     },
     "M0CloseRequest": {
@@ -495,6 +1073,28 @@
       "title": "M0SavedCheckpoint",
       "type": "object"
     },
+    "MoveNodeRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "expected_parent_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parent_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expected_parent_id",
+        "parent_id",
+        "name"
+      ],
+      "title": "MoveNodeRequest",
+      "type": "object"
+    },
     "NodeKind": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "enum": [
@@ -554,6 +1154,1700 @@
       ],
       "title": "NodeMetadata",
       "type": "object"
+    },
+    "NodeState": {
+      "$defs": {
+        "NodeKind": {
+          "enum": [
+            "file",
+            "folder"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "children_generation": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "content_etag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content_rev": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deleted": {
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/NodeKind"
+        },
+        "last_change_seq": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "meta_etag": {
+          "type": "string"
+        },
+        "meta_rev": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "node_etag": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "parent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "node_id",
+        "parent_id",
+        "name",
+        "kind",
+        "deleted",
+        "content_rev",
+        "content_etag",
+        "meta_rev",
+        "meta_etag",
+        "node_etag",
+        "content_hash",
+        "size",
+        "children_generation",
+        "last_change_seq"
+      ],
+      "title": "NodeState",
+      "type": "object"
+    },
+    "OperationError": {
+      "$defs": {
+        "NodeKind": {
+          "enum": [
+            "file",
+            "folder"
+          ],
+          "type": "string"
+        },
+        "NodeState": {
+          "additionalProperties": false,
+          "properties": {
+            "children_generation": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "content_etag": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_rev": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "deleted": {
+              "type": "boolean"
+            },
+            "kind": {
+              "$ref": "#/$defs/NodeKind"
+            },
+            "last_change_seq": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "meta_etag": {
+              "type": "string"
+            },
+            "meta_rev": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "node_etag": {
+              "type": "string"
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "size": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "node_id",
+            "parent_id",
+            "name",
+            "kind",
+            "deleted",
+            "content_rev",
+            "content_etag",
+            "meta_rev",
+            "meta_etag",
+            "node_etag",
+            "content_hash",
+            "size",
+            "children_generation",
+            "last_change_seq"
+          ],
+          "type": "object"
+        },
+        "OperationReceipt": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "recovery_conflict",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "commit_seq": {
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
+                },
+                "node": {
+                  "$ref": "#/$defs/NodeState"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "deleted",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch",
+                "node",
+                "commit_seq"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "commit_seq": {
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
+                },
+                "node": {
+                  "$ref": "#/$defs/NodeState"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "restored",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch",
+                "node",
+                "commit_seq"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "current_node_etag": {
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "node_precondition_failed",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch",
+                "current_node_etag"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "node_deleted",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "not_deleted",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "folder_not_empty",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "history_expired",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "commit_seq": {
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
+                },
+                "node": {
+                  "$ref": "#/$defs/NodeState"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "moved",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch",
+                "node",
+                "commit_seq"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "current_meta_etag": {
+                  "type": "string"
+                },
+                "current_meta_rev": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "metadata_precondition_failed",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch",
+                "current_meta_rev",
+                "current_meta_etag"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "expected_parent_mismatch",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "cycle_detected",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "root_immutable",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "commit_seq": {
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
+                },
+                "node": {
+                  "$ref": "#/$defs/NodeState"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "created",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch",
+                "node",
+                "commit_seq"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "commit_seq": {
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
+                },
+                "content_etag": {
+                  "type": "string"
+                },
+                "content_hash": {
+                  "type": "string"
+                },
+                "content_rev": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "meta_etag": {
+                  "type": "string"
+                },
+                "meta_rev": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "node_etag": {
+                  "type": "string"
+                },
+                "node_id": {
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "committed",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch",
+                "node_id",
+                "content_rev",
+                "content_etag",
+                "meta_rev",
+                "meta_etag",
+                "node_etag",
+                "content_hash",
+                "commit_seq"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "current_content_etag": {
+                  "type": "string"
+                },
+                "current_content_rev": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "precondition_failed",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch",
+                "current_content_rev",
+                "current_content_etag"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "destination_exists",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "node_id_conflict",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "parent_not_folder",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "not_found",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "not_applied",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "abandoned",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "operation_seq": {
+                  "pattern": "^0*[1-9][0-9]*$",
+                  "type": "string"
+                },
+                "status": {
+                  "const": "pending",
+                  "type": "string"
+                },
+                "workspace_epoch": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "operation_id",
+                "operation_seq",
+                "workspace_epoch"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "operation": {
+          "$ref": "#/$defs/OperationReceipt"
+        },
+        "request_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "request_id",
+        "operation"
+      ],
+      "title": "OperationError",
+      "type": "object"
+    },
+    "OperationReceipt": {
+      "$defs": {
+        "NodeKind": {
+          "enum": [
+            "file",
+            "folder"
+          ],
+          "type": "string"
+        },
+        "NodeState": {
+          "additionalProperties": false,
+          "properties": {
+            "children_generation": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "content_etag": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_rev": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "deleted": {
+              "type": "boolean"
+            },
+            "kind": {
+              "$ref": "#/$defs/NodeKind"
+            },
+            "last_change_seq": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "meta_etag": {
+              "type": "string"
+            },
+            "meta_rev": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "node_etag": {
+              "type": "string"
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "size": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "node_id",
+            "parent_id",
+            "name",
+            "kind",
+            "deleted",
+            "content_rev",
+            "content_etag",
+            "meta_rev",
+            "meta_etag",
+            "node_etag",
+            "content_hash",
+            "size",
+            "children_generation",
+            "last_change_seq"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "recovery_conflict",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "commit_seq": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "node": {
+              "$ref": "#/$defs/NodeState"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "deleted",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch",
+            "node",
+            "commit_seq"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "commit_seq": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "node": {
+              "$ref": "#/$defs/NodeState"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "restored",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch",
+            "node",
+            "commit_seq"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "current_node_etag": {
+              "type": "string"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "node_precondition_failed",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch",
+            "current_node_etag"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "node_deleted",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "not_deleted",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "folder_not_empty",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "history_expired",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "commit_seq": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "node": {
+              "$ref": "#/$defs/NodeState"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "moved",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch",
+            "node",
+            "commit_seq"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "current_meta_etag": {
+              "type": "string"
+            },
+            "current_meta_rev": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "metadata_precondition_failed",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch",
+            "current_meta_rev",
+            "current_meta_etag"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "expected_parent_mismatch",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "cycle_detected",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "root_immutable",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "commit_seq": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "node": {
+              "$ref": "#/$defs/NodeState"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "created",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch",
+            "node",
+            "commit_seq"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "commit_seq": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "content_etag": {
+              "type": "string"
+            },
+            "content_hash": {
+              "type": "string"
+            },
+            "content_rev": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "meta_etag": {
+              "type": "string"
+            },
+            "meta_rev": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "node_etag": {
+              "type": "string"
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "committed",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch",
+            "node_id",
+            "content_rev",
+            "content_etag",
+            "meta_rev",
+            "meta_etag",
+            "node_etag",
+            "content_hash",
+            "commit_seq"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "current_content_etag": {
+              "type": "string"
+            },
+            "current_content_rev": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "precondition_failed",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch",
+            "current_content_rev",
+            "current_content_etag"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "destination_exists",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "node_id_conflict",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "parent_not_folder",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "not_found",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "not_applied",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "abandoned",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operation_id": {
+              "type": "string"
+            },
+            "operation_seq": {
+              "pattern": "^0*[1-9][0-9]*$",
+              "type": "string"
+            },
+            "status": {
+              "const": "pending",
+              "type": "string"
+            },
+            "workspace_epoch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation_id",
+            "operation_seq",
+            "workspace_epoch"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "OperationReceipt"
     },
     "PairRequest": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -639,6 +2933,30 @@
       "title": "PairResponse",
       "type": "object"
     },
+    "RestoreNodeRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "expected_meta_rev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parent_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expected_meta_rev",
+        "parent_id",
+        "name"
+      ],
+      "title": "RestoreNodeRequest",
+      "type": "object"
+    },
     "ServerInfo": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -650,6 +2968,11 @@
         "journal_floor_seq": {
           "pattern": "^[0-9]+$",
           "type": "string"
+        },
+        "max_attachment_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "max_document_bytes": {
           "format": "uint64",
@@ -680,9 +3003,154 @@
         "head_seq",
         "journal_floor_seq",
         "ready",
-        "max_document_bytes"
+        "max_document_bytes",
+        "max_attachment_bytes"
       ],
       "title": "ServerInfo",
+      "type": "object"
+    },
+    "TrashNode": {
+      "$defs": {
+        "NodeKind": {
+          "enum": [
+            "file",
+            "folder"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/NodeKind"
+        },
+        "meta_rev": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "parent_id": {
+          "type": "string"
+        },
+        "restorable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "node_id",
+        "parent_id",
+        "name",
+        "kind",
+        "meta_rev",
+        "restorable"
+      ],
+      "title": "TrashNode",
+      "type": "object"
+    },
+    "TrashPage": {
+      "$defs": {
+        "NodeKind": {
+          "enum": [
+            "file",
+            "folder"
+          ],
+          "type": "string"
+        },
+        "TrashNode": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/NodeKind"
+            },
+            "meta_rev": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "parent_id": {
+              "type": "string"
+            },
+            "restorable": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "node_id",
+            "parent_id",
+            "name",
+            "kind",
+            "meta_rev",
+            "restorable"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "next_after_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/TrashNode"
+          },
+          "type": "array"
+        },
+        "workspace_epoch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_epoch",
+        "nodes",
+        "next_after_id"
+      ],
+      "title": "TrashPage",
+      "type": "object"
+    },
+    "UploadResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "content_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "expires_at": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "size": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "upload_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "upload_id",
+        "content_hash",
+        "size",
+        "expires_at"
+      ],
+      "title": "UploadResponse",
       "type": "object"
     },
     "WorkspaceRole": {
@@ -697,6 +3165,6 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "구조와 문자열 형식의 스키마다. Rust 역직렬화는 UUID version과 RFC variant 및 seq, 만료 시각, generation의 u64 범위를 추가로 검사한다. protocol 일치와 만료 여부, 권한은 application에서 검사한다. M0 generation의 SQLite 저장 가능 범위와 문서 크기, session 및 원문 검증은 native runtime과 store가 담당한다. 이 스키마 단독으로 모든 계약을 검증할 수 없다.",
+  "description": "구조와 문자열 형식의 스키마다. Rust 역직렬화는 UUID version과 RFC variant 및 seq, 만료 시각, generation의 u64 범위를 추가로 검사한다. node 이름의 경로 규칙, root와 파일/폴더 content 형태도 Rust에서 검사한다. protocol 일치와 만료 여부, 권한은 application에서 검사한다. M0 generation의 SQLite 저장 가능 범위와 문서 크기, session 및 원문 검증은 native runtime과 store가 담당한다. 이 스키마 단독으로 모든 계약을 검증할 수 없다.",
   "title": "Notryx protocol contract definitions"
 }

@@ -41,7 +41,8 @@ fn server_info() -> Value {
         "head_seq": "9007199254740993",
         "journal_floor_seq": "0",
         "ready": true,
-        "max_document_bytes": 5242880
+        "max_document_bytes": 5242880,
+        "max_attachment_bytes": 26214400
     })
 }
 

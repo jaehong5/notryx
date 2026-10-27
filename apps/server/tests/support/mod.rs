@@ -22,6 +22,7 @@ pub async fn initialized() -> (tempfile::TempDir, Config) {
         workspace: WorkspaceConfig {
             notes_root: directory.path().join("notes"),
             state_root: directory.path().join("state"),
+            uploads: Default::default(),
         },
     };
     std::fs::create_dir(&config.workspace.notes_root).unwrap();
@@ -95,7 +96,18 @@ pub async fn request(
     headers: &[(&str, &str)],
     body: &[u8],
 ) -> HttpResponse {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    request_with_timeout(address, method, path, headers, body, Duration::from_secs(5)).await
+}
+
+pub async fn request_with_timeout(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    timeout: Duration,
+) -> HttpResponse {
+    tokio::time::timeout(timeout, async {
         let mut stream = TcpStream::connect(address).await.unwrap();
         let mut head = format!(
             "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n",
@@ -151,7 +163,7 @@ pub async fn request(
         response
     })
     .await
-    .expect("local HTTP request must complete within five seconds")
+    .expect("local HTTP request must complete within its test deadline")
 }
 
 pub async fn post_json(address: SocketAddr, body: &[u8]) -> HttpResponse {

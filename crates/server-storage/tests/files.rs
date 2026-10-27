@@ -172,7 +172,6 @@ fn document_paths_and_reserved_names_cannot_bypass_root_confinement() {
     for name in [
         "../outside",
         "/etc/passwd",
-        "nested/document.md",
         ".git",
         ".GiT",
         ".mdw-workspace.json",
@@ -188,6 +187,10 @@ fn document_paths_and_reserved_names_cannot_bypass_root_confinement() {
             "{name}"
         );
     }
+    assert_eq!(
+        store.observe("nested/document.md"),
+        Err(StorageError::NotFound)
+    );
     assert_eq!(
         store.read_object("../../outside"),
         Err(StorageError::InvalidHash)

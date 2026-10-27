@@ -20,6 +20,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     };
     match operation {
+        "upload" => {
+            let mut writer = store.begin_upload(uuid::Uuid::new_v4(), 8)?;
+            writer.write_chunk(b"proposed")?;
+            store.commit_upload_with_hook(writer.seal()?, hook)?;
+        }
         "object" => {
             store.put_object_with_hook(b"proposed", hook)?;
         }

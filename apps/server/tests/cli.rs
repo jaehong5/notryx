@@ -71,8 +71,77 @@ fn help_lists_offline_and_local_administration_commands() {
         "transfer-owner",
         "issue-pairing",
         "revoke-device",
+        "recovery-list",
+        "recovery-inspect",
+        "recovery-resolve",
+        "recovery-release",
     ] {
         assert!(help.contains(command), "missing command: {command}");
+    }
+}
+
+#[tokio::test]
+async fn recovery_cli_lists_records_and_reports_missing_operations_without_modifying_state() {
+    let (_directory, path, config) = fixture();
+    WorkspaceRuntime::initialize(config.workspace.clone())
+        .await
+        .unwrap();
+    let runtime = WorkspaceRuntime::start(config.workspace.clone())
+        .await
+        .unwrap();
+    let server =
+        notryx_server::admin::AdminServer::start(&config.server.admin_socket, runtime.handle())
+            .await
+            .unwrap();
+    let page = json(cli(&path, "admin", &["recovery-list"]).await);
+    assert_eq!(page["kind"], "recovery_list");
+    assert_eq!(page["entries"], serde_json::json!([]));
+    assert!(page["next_after_operation_id"].is_null());
+    let id = uuid::Uuid::now_v7().to_string();
+    assert_eq!(
+        json(cli(&path, "admin", &["recovery-list", &id]).await),
+        page
+    );
+    for command in ["recovery-inspect", "recovery-resolve", "recovery-release"] {
+        let output = cli(&path, "admin", &[command, &id]).await;
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("not_found"));
+    }
+    let output = cli(&path, "admin", &["recovery-inspect", &id, &"a".repeat(64)]).await;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not_found"));
+    assert!(runtime.handle().health().await.unwrap().ready);
+    server.shutdown().await.unwrap();
+    runtime.shutdown().await.unwrap();
+}
+
+#[test]
+fn recovery_cli_rejects_non_operation_ids_before_loading_configuration() {
+    for command in [
+        "recovery-list",
+        "recovery-inspect",
+        "recovery-resolve",
+        "recovery-release",
+    ] {
+        for invalid in ["private-not-an-id", "550e8400-e29b-41d4-a716-446655440000"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_notryx-server"))
+                .args([
+                    "admin",
+                    "--config",
+                    "/absent-notryx-config",
+                    command,
+                    invalid,
+                ])
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(error.contains("invalid_request"));
+            assert!(!error.contains("private-not-an-id"));
+            assert!(!error.contains("absent-notryx-config"));
+        }
     }
 }
 

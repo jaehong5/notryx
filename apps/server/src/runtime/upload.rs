@@ -259,10 +259,12 @@ mod tests {
         )
         .await
         .unwrap();
-        sqlx::query_scalar("SELECT count(*) FROM uploads WHERE status='receiving'")
+        let count = sqlx::query_scalar("SELECT count(*) FROM uploads WHERE status='receiving'")
             .fetch_one(&mut connection)
             .await
-            .unwrap()
+            .unwrap();
+        connection.close().await.unwrap();
+        count
     }
 
     #[tokio::test]

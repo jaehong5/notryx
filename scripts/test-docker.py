@@ -349,8 +349,12 @@ def verify_write_failure(image, prefix, readonly):
         case.notes.chmod(0o700)
         case.start()
         require(case.request("GET", path, expected=200)[2] == before, f"{label} recovery lost the source")
+        case.request("GET", f"/v1/operations/{identifier}", expected=404)
+        retried = b"must not replace before"
+        case.request("PUT", path, data=retried, headers=headers, expected=200)
         result = json.loads(case.request("GET", f"/v1/operations/{identifier}", expected=200)[2])
-        require(result["status"] == "not_applied", f"{label} failure was not resolved conservatively")
+        require(result["status"] == "committed", f"{label} failure consumed the operation before admission")
+        require((case.notes / "Preserved.md").read_bytes() == retried, f"{label} recovery did not apply the retry")
 
 
 def verify_disk_full(image, prefix):

@@ -743,8 +743,24 @@ impl Workspace {
                 }
             }
         }
+        self.cleanup_temporary_files()?;
         self.ready = true;
         Ok(())
+    }
+
+    fn cleanup_temporary_files(&mut self) -> Result<(), Error> {
+        #[cfg(test)]
+        return self
+            .files
+            .cleanup_temporary_files_with_hook(|stage| {
+                if let Some(hook) = &mut self.hook {
+                    hook(Phase::Storage(stage)).map_err(|_| StorageError::Io)?;
+                }
+                Ok(())
+            })
+            .map_err(Into::into);
+        #[cfg(not(test))]
+        self.files.cleanup_temporary_files().map_err(Into::into)
     }
 
     fn point(&mut self, _phase: Phase) -> Result<(), Error> {

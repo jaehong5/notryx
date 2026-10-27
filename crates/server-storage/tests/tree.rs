@@ -177,12 +177,12 @@ mod faults {
         for folder in [false, true] {
             let stages = [
                 if folder {
-                    StorageStage::BeforeTemporaryFolderSync
+                    StorageStage::BeforeCreatedFolderSync
                 } else {
                     StorageStage::BeforeTemporaryFileSync
                 },
                 if folder {
-                    StorageStage::AfterTemporaryFolderSync
+                    StorageStage::AfterCreatedFolderSync
                 } else {
                     StorageStage::AfterTemporaryFileSync
                 },
@@ -211,7 +211,18 @@ mod faults {
                 };
                 assert!(reached, "{cut:?}");
                 assert_eq!(result, Err(StorageError::Io), "{cut:?}");
-                if index < 5 {
+                // Empty folders are published by mkdir before their fsync; file bytes remain anonymous until publication.
+                let absent = if folder {
+                    matches!(
+                        cut,
+                        StorageStage::BeforeTargetRevalidation
+                            | StorageStage::AfterTargetRevalidation
+                            | StorageStage::BeforeRename
+                    )
+                } else {
+                    index < 5
+                };
+                if absent {
                     assert_eq!(store.observe_entry(&path).unwrap(), ObservedEntry::Absent);
                 } else if folder {
                     assert!(matches!(
@@ -310,27 +321,22 @@ mod faults {
     }
 
     #[test]
-    fn replaced_temporary_folders_are_preserved_and_never_published() {
+    fn replaced_created_folders_are_preserved_without_reporting_success() {
         let (directory, store) = fixture();
         let notes = directory.path().join("notes");
         let mut foreign = None;
         let result = store.create_folder_with_hook("new", |stage| {
-            if stage == StorageStage::AfterTemporaryFolderSync {
-                let temporary = std::fs::read_dir(&notes)
-                    .unwrap()
-                    .map(Result::unwrap)
-                    .find(|entry| entry.file_name().to_string_lossy().starts_with(".mdw-tmp-"))
-                    .unwrap()
-                    .path();
-                std::fs::rename(&temporary, directory.path().join("original-temporary")).unwrap();
-                std::fs::create_dir(&temporary).unwrap();
-                std::fs::write(temporary.join("foreign"), b"preserve").unwrap();
-                foreign = Some(temporary);
+            if stage == StorageStage::AfterCreatedFolderSync {
+                let created = notes.join("new");
+                std::fs::rename(&created, directory.path().join("original-created")).unwrap();
+                std::fs::create_dir(&created).unwrap();
+                std::fs::write(created.join("foreign"), b"preserve").unwrap();
+                foreign = Some(created);
             }
             Ok(())
         });
         assert_eq!(result, Err(StorageError::Changed));
-        assert!(!notes.join("new").exists());
+        assert!(directory.path().join("original-created").is_dir());
         assert_eq!(
             std::fs::read(foreign.unwrap().join("foreign")).unwrap(),
             b"preserve"

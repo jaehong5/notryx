@@ -311,11 +311,27 @@ async fn sigkill_at_create_boundaries_preserves_one_result_and_never_replays_cre
         notryx_protocol::NodeKind::File,
         notryx_protocol::NodeKind::Folder,
     ] {
-        for phase in [
-            Phase::AfterAdmission,
-            Phase::Storage(StorageStage::AfterRename),
-            Phase::BeforeFinish,
-            Phase::AfterFinish,
+        let creation_sync = match kind {
+            notryx_protocol::NodeKind::File => StorageStage::AfterTemporaryFileSync,
+            notryx_protocol::NodeKind::Folder => StorageStage::AfterCreatedFolderSync,
+        };
+        let before_creation_sync = match kind {
+            notryx_protocol::NodeKind::File => StorageStage::BeforeTemporaryFileSync,
+            notryx_protocol::NodeKind::Folder => StorageStage::BeforeCreatedFolderSync,
+        };
+        for (phase, applied) in [
+            (Phase::AfterAdmission, false),
+            (
+                Phase::Storage(before_creation_sync),
+                kind == notryx_protocol::NodeKind::Folder,
+            ),
+            (
+                Phase::Storage(creation_sync),
+                kind == notryx_protocol::NodeKind::Folder,
+            ),
+            (Phase::Storage(StorageStage::AfterRename), true),
+            (Phase::BeforeFinish, true),
+            (Phase::AfterFinish, true),
         ] {
             let rig = Rig::new().await;
             let request = CreateNode {
@@ -342,7 +358,7 @@ async fn sigkill_at_create_boundaries_preserves_one_result_and_never_replays_cre
                     .unwrap();
             assert!(reopened.ready());
             let first = reopened.create_node(request.clone()).await.unwrap();
-            if phase == Phase::AfterAdmission {
+            if !applied {
                 assert_eq!(first.outcome, Outcome::NotApplied);
                 assert!(!rig.dir.path().join("notes/Created").exists());
                 assert_eq!(reopened.server_info().await.unwrap().head_seq.get(), 1);
@@ -351,6 +367,16 @@ async fn sigkill_at_create_boundaries_preserves_one_result_and_never_replays_cre
                 assert!(rig.dir.path().join("notes/Created").exists());
                 assert_eq!(reopened.server_info().await.unwrap().head_seq.get(), 2);
             }
+            assert!(
+                !fs::read_dir(rig.dir.path().join("notes"))
+                    .unwrap()
+                    .any(|entry| entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".mdw-tmp-")),
+                "{kind:?} {phase:?}"
+            );
             assert_eq!(reopened.create_node(request.clone()).await.unwrap(), first);
             reopened
                 .ack_operations(AckOperations {
@@ -478,6 +504,186 @@ fn missing_cut_times_out_and_reaps_child() {
 }
 
 #[tokio::test]
+async fn interrupted_save_does_not_leave_a_temporary_file_blocking_folder_deletion() {
+    for stage in [
+        StorageStage::BeforeTemporaryFileSync,
+        StorageStage::AfterAnonymousFileSync,
+        StorageStage::AfterTemporaryRecordSync,
+        StorageStage::AfterTemporaryLink,
+        StorageStage::AfterTemporaryFileSync,
+        StorageStage::BeforeRename,
+    ] {
+        let mut rig = Rig::new().await;
+        let folder = node_id();
+        let child = node_id();
+        for (sequence, id, parent, name, kind) in [
+            (
+                1,
+                folder,
+                rig.workspace.state.root_id,
+                "Folder",
+                notryx_protocol::NodeKind::Folder,
+            ),
+            (2, child, folder, "Note.md", notryx_protocol::NodeKind::File),
+        ] {
+            assert!(matches!(
+                rig.workspace
+                    .create_node(CreateNode {
+                        epoch: rig.workspace.epoch(),
+                        stream_id: rig.stream,
+                        operation_seq: sequence,
+                        operation_id: op_id(),
+                        node_id: id,
+                        parent_id: parent,
+                        name: name.into(),
+                        kind,
+                        upload_id: None,
+                    })
+                    .await
+                    .unwrap()
+                    .outcome,
+                Outcome::Created(_)
+            ));
+        }
+        let before = rig.workspace.state.document(child).await.unwrap().unwrap();
+        let bytes = b"interrupted proposed bytes\n";
+        let request = SaveContent {
+            epoch: rig.workspace.epoch(),
+            stream_id: rig.stream,
+            operation_seq: 3,
+            operation_id: op_id(),
+            node_id: child,
+            expected_content_rev: before.content_rev,
+            content_hash: digest(bytes),
+            bytes: bytes.to_vec(),
+        };
+        fs::write(
+            rig.dir.path().join("request.json"),
+            serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap();
+        let legacy = rig.dir.path().join("notes/.mdw-tmp-unowned");
+        fs::write(&legacy, b"unproven ownership must be preserved").unwrap();
+        rig.workspace.close().await.unwrap();
+        kill_at(rig.dir.path(), Phase::Storage(stage), false);
+        let mut recovered =
+            Workspace::open(&rig.dir.path().join("notes"), &rig.dir.path().join("state"))
+                .await
+                .unwrap();
+        assert!(recovered.ready());
+        assert_eq!(
+            recovered.save(request).await.unwrap().outcome,
+            Outcome::NotApplied
+        );
+        assert_eq!(
+            fs::read(rig.dir.path().join("notes/Folder/Note.md")).unwrap(),
+            b""
+        );
+        for (sequence, node) in [(4, child), (5, folder)] {
+            let current = recovered.state.node(node).await.unwrap().unwrap();
+            let result = recovered
+                .delete_node(DeleteNode {
+                    epoch: recovered.epoch(),
+                    stream_id: rig.stream,
+                    operation_seq: sequence,
+                    operation_id: op_id(),
+                    node_id: node,
+                    expected_node_etag: current.etag().unwrap(),
+                })
+                .await
+                .unwrap();
+            assert!(
+                matches!(result.outcome, Outcome::Deleted(_)),
+                "{stage:?}: {:?}",
+                result.outcome
+            );
+        }
+        assert!(!rig.dir.path().join("notes/Folder").exists());
+        assert_eq!(
+            fs::read(&legacy).unwrap(),
+            b"unproven ownership must be preserved"
+        );
+        recovered.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn temporary_cleanup_survives_another_sigkill_and_directory_sync_failure() {
+    for kill_during_cleanup in [false, true] {
+        let rig = Rig::new().await;
+        let request = rig.command(b"preserved proposed object\n");
+        fs::write(
+            rig.dir.path().join("request.json"),
+            serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap();
+        rig.workspace.close().await.unwrap();
+        kill_at(
+            rig.dir.path(),
+            Phase::Storage(StorageStage::AfterTemporaryLink),
+            false,
+        );
+        if kill_during_cleanup {
+            kill_at(
+                rig.dir.path(),
+                Phase::Storage(StorageStage::AfterTemporaryCleanupUnlink),
+                true,
+            );
+        } else {
+            let mut interrupted =
+                Workspace::load(&rig.dir.path().join("notes"), &rig.dir.path().join("state"))
+                    .await
+                    .unwrap();
+            interrupted.hook = Some(Box::new(|phase| {
+                if phase == Phase::Storage(StorageStage::BeforeTemporaryCleanupDirectorySync) {
+                    Err(Error::Storage)
+                } else {
+                    Ok(())
+                }
+            }));
+            assert_eq!(interrupted.recover().await, Err(Error::Storage));
+            assert!(!interrupted.ready());
+            interrupted.close().await.unwrap();
+        }
+        assert_eq!(
+            fs::read_dir(rig.dir.path().join("state/temporary"))
+                .unwrap()
+                .count(),
+            1
+        );
+        let mut recovered =
+            Workspace::open(&rig.dir.path().join("notes"), &rig.dir.path().join("state"))
+                .await
+                .unwrap();
+        assert!(recovered.ready());
+        assert_eq!(
+            recovered.save(request).await.unwrap().outcome,
+            Outcome::NotApplied
+        );
+        assert_eq!(
+            recovered.read(rig.initial.node_id).await.unwrap().0,
+            rig.initial
+        );
+        assert_eq!(
+            fs::read_dir(rig.dir.path().join("state/temporary"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(
+            !fs::read_dir(rig.dir.path().join("notes"))
+                .unwrap()
+                .any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".mdw-tmp-"))
+        );
+        recovered.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn sigkill_at_save_boundaries_replays_exactly_one_terminal_result() {
     for (phase, applied) in [
         (Phase::AfterAdmission, false),
@@ -582,13 +788,20 @@ async fn sigkill_at_lifecycle_boundaries_and_recovery_preserves_one_terminal_res
             } else {
                 StorageStage::AfterUnlink
             };
-            for phase in [
+            let mut phases = vec![
                 Phase::AfterAdmission,
                 Phase::Storage(effect),
                 Phase::Storage(StorageStage::AfterParentDirectorySync),
                 Phase::BeforeFinish,
                 Phase::AfterFinish,
-            ] {
+            ];
+            if restoring {
+                phases.push(Phase::Storage(match kind {
+                    NodeKind::File => StorageStage::AfterTemporaryFileSync,
+                    NodeKind::Folder => StorageStage::AfterCreatedFolderSync,
+                }));
+            }
+            for phase in phases {
                 let mut rig = Rig::new().await;
                 let root = rig.workspace.state.root_id;
                 let (before, mut sequence) = if kind == NodeKind::Folder {
@@ -690,7 +903,8 @@ async fn sigkill_at_lifecycle_boundaries_and_recovery_preserves_one_terminal_res
                 } else {
                     reopened.delete_node(deletion.clone()).await.unwrap()
                 };
-                let applied = phase != Phase::AfterAdmission;
+                let applied = phase != Phase::AfterAdmission
+                    && phase != Phase::Storage(StorageStage::AfterTemporaryFileSync);
                 match (&receipt.outcome, restoring, applied) {
                     (Outcome::NotApplied, _, false)
                     | (Outcome::Deleted(_), false, true)

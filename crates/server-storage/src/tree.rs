@@ -1,5 +1,5 @@
 use super::{
-    FileStamp, FileStore, ObservedFile, StorageError, StorageStage, TemporaryFile, copy_observed,
+    AnonymousFile, FileStamp, FileStore, ObservedFile, StorageError, StorageStage, copy_observed,
     errno, io, metadata_stamp, open_at, open_regular, read_observed, validate_name,
 };
 use rustix::fs::{self, Dir, Mode, OFlags};
@@ -26,7 +26,7 @@ pub enum ObservedEntry {
 pub(super) struct NoteParent {
     pub directory: File,
     pub name: String,
-    path: String,
+    pub(super) path: String,
 }
 
 impl NoteParent {
@@ -118,64 +118,6 @@ fn child_names(directory: &File) -> Result<Vec<String>, StorageError> {
     Ok(names)
 }
 
-struct TemporaryFolder<'a> {
-    parent: &'a File,
-    name: String,
-    folder: File,
-    armed: bool,
-}
-
-impl<'a> TemporaryFolder<'a> {
-    fn new(parent: &'a File) -> Result<Self, StorageError> {
-        let name = format!(".mdw-tmp-{}", uuid::Uuid::new_v4());
-        fs::mkdirat(parent, name.as_str(), Mode::RUSR | Mode::WUSR | Mode::XUSR).map_err(errno)?;
-        let folder = open_at(
-            parent,
-            &name,
-            OFlags::RDONLY | OFlags::DIRECTORY,
-            Mode::empty(),
-        )?;
-        Ok(Self {
-            parent,
-            name,
-            folder,
-            armed: true,
-        })
-    }
-
-    fn validate(&self, expected: &FolderStamp) -> Result<(), StorageError> {
-        let current = open_at(
-            self.parent,
-            &self.name,
-            OFlags::RDONLY | OFlags::DIRECTORY,
-            Mode::empty(),
-        )?;
-        if folder_stamp(&current)? != *expected || !empty_folder(&current)? {
-            return Err(StorageError::Changed);
-        }
-        Ok(())
-    }
-}
-
-impl Drop for TemporaryFolder<'_> {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let current = open_at(
-            self.parent,
-            &self.name,
-            OFlags::RDONLY | OFlags::DIRECTORY,
-            Mode::empty(),
-        );
-        if let (Ok(original), Ok(current)) = (identity(&self.folder), current)
-            && identity(&current) == Ok(original)
-        {
-            let _ = fs::unlinkat(self.parent, self.name.as_str(), fs::AtFlags::REMOVEDIR);
-        }
-    }
-}
-
 impl FileStore {
     pub fn list_children(&self, path: &str) -> Result<Vec<String>, StorageError> {
         self.list_children_inner(path, &mut |_| Ok(()))
@@ -255,7 +197,7 @@ impl FileStore {
         let parent = self.note_parent(path)?;
         parent.ensure_available()?;
         let (object, _) = self.verified_object(hash)?;
-        let mut temporary = TemporaryFile::new(&parent.directory)?;
+        let mut temporary = AnonymousFile::new(&parent.directory)?;
         if copy_observed(&object, &mut temporary.file)?.hash != hash {
             return Err(StorageError::ChecksumMismatch);
         }
@@ -268,18 +210,9 @@ impl FileStore {
         parent.ensure_available()?;
         hook(StorageStage::AfterTargetRevalidation)?;
         hook(StorageStage::BeforeRename)?;
-        temporary.validate(&durable)?;
         parent.revalidate(self)?;
         parent.ensure_available()?;
-        fs::renameat_with(
-            &parent.directory,
-            temporary.name.as_str(),
-            &parent.directory,
-            parent.name.as_str(),
-            fs::RenameFlags::NOREPLACE,
-        )
-        .map_err(errno)?;
-        temporary.armed = false;
+        temporary.publish(&parent.directory, &parent.name)?;
         hook(StorageStage::AfterRename)?;
         hook(StorageStage::BeforeParentDirectorySync)?;
         parent.directory.sync_all().map_err(io)?;
@@ -304,36 +237,32 @@ impl FileStore {
     ) -> Result<FolderStamp, StorageError> {
         let parent = self.note_parent(path)?;
         parent.ensure_available()?;
-        let mut temporary = TemporaryFolder::new(&parent.directory)?;
-        hook(StorageStage::BeforeTemporaryFolderSync)?;
-        temporary.folder.sync_all().map_err(io)?;
-        let durable = folder_stamp(&temporary.folder)?;
-        hook(StorageStage::AfterTemporaryFolderSync)?;
         hook(StorageStage::BeforeTargetRevalidation)?;
         parent.revalidate(self)?;
         parent.ensure_available()?;
         hook(StorageStage::AfterTargetRevalidation)?;
         hook(StorageStage::BeforeRename)?;
-        temporary.validate(&durable)?;
         parent.revalidate(self)?;
         parent.ensure_available()?;
-        fs::renameat_with(
+        fs::mkdirat(&parent.directory, &parent.name, Mode::RWXU).map_err(errno)?;
+        let folder = open_at(
             &parent.directory,
-            temporary.name.as_str(),
-            &parent.directory,
-            parent.name.as_str(),
-            fs::RenameFlags::NOREPLACE,
-        )
-        .map_err(errno)?;
-        temporary.armed = false;
+            &parent.name,
+            OFlags::RDONLY | OFlags::DIRECTORY,
+            Mode::empty(),
+        )?;
+        let durable = folder_stamp(&folder)?;
         hook(StorageStage::AfterRename)?;
+        hook(StorageStage::BeforeCreatedFolderSync)?;
+        folder.sync_all().map_err(io)?;
+        hook(StorageStage::AfterCreatedFolderSync)?;
         hook(StorageStage::BeforeParentDirectorySync)?;
         parent.directory.sync_all().map_err(io)?;
         hook(StorageStage::AfterParentDirectorySync)?;
         let ObservedEntry::Folder { stamp, empty: true } = self.observe_entry(path)? else {
             return Err(StorageError::Changed);
         };
-        if (stamp.device, stamp.inode) != (durable.device, durable.inode) {
+        if stamp != durable {
             return Err(StorageError::Changed);
         }
         Ok(stamp)

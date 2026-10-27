@@ -23,6 +23,8 @@ pub use move_entry::EntryStamp;
 mod remove_entry;
 mod upload;
 pub use upload::{SealedUpload, StagingEntry, StoredUpload, UploadWriter};
+mod temporary;
+use temporary::AnonymousFile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageError {
@@ -85,8 +87,13 @@ pub enum StorageStage {
     AfterObjectDirectorySync,
     BeforeTemporaryFileSync,
     AfterTemporaryFileSync,
-    BeforeTemporaryFolderSync,
-    AfterTemporaryFolderSync,
+    AfterAnonymousFileSync,
+    AfterTemporaryRecordSync,
+    AfterTemporaryLink,
+    BeforeTemporaryCleanupDirectorySync,
+    AfterTemporaryCleanupUnlink,
+    BeforeCreatedFolderSync,
+    AfterCreatedFolderSync,
     BeforeTargetRevalidation,
     AfterTargetRevalidation,
     BeforeRename,
@@ -382,49 +389,6 @@ fn scan_observed(file: &File, mut target: Option<&mut File>) -> Result<FileStamp
     Ok(metadata_stamp(&after, hash))
 }
 
-struct TemporaryFile<'a> {
-    root: &'a File,
-    name: String,
-    file: File,
-    armed: bool,
-}
-
-impl<'a> TemporaryFile<'a> {
-    fn new(root: &'a File) -> Result<Self, StorageError> {
-        let name = format!(".mdw-tmp-{}", uuid::Uuid::new_v4());
-        let file = create_regular(root, &name)?;
-        Ok(Self {
-            root,
-            name,
-            file,
-            armed: true,
-        })
-    }
-
-    fn validate(&self, expected: &FileStamp) -> Result<(), StorageError> {
-        let observed = hash_observed(&open_regular(self.root, &self.name)?)?;
-        if &observed != expected {
-            return Err(StorageError::Changed);
-        }
-        Ok(())
-    }
-}
-
-impl Drop for TemporaryFile<'_> {
-    fn drop(&mut self) {
-        if self.armed {
-            let original = self.file.metadata();
-            let current =
-                open_regular(self.root, &self.name).and_then(|file| checked_regular(&file));
-            if let (Ok(original), Ok(current)) = (original, current)
-                && (original.dev(), original.ino()) == (current.dev(), current.ino())
-            {
-                let _ = fs::unlinkat(self.root, self.name.as_str(), fs::AtFlags::empty());
-            }
-        }
-    }
-}
-
 impl FileStore {
     pub fn init(
         notes: impl AsRef<Path>,
@@ -606,27 +570,16 @@ impl FileStore {
         let published = match self.verified_object(&hash) {
             Ok((file, _)) => file,
             Err(StorageError::NotFound) => {
-                let mut temporary = TemporaryFile::new(&self.objects)?;
+                let mut temporary = AnonymousFile::new(&self.objects)?;
                 temporary.file.write_all(bytes).map_err(io)?;
                 fs::fchmod(&temporary.file, Mode::RUSR).map_err(errno)?;
                 hook(StorageStage::BeforeObjectFileSync)?;
                 temporary.file.sync_all().map_err(io)?;
-                let durable = metadata_stamp(&temporary.file.metadata().map_err(io)?, hash.clone());
                 hook(StorageStage::AfterObjectFileSync)?;
                 hook(StorageStage::BeforeObjectPublish)?;
-                temporary.validate(&durable)?;
-                match fs::renameat_with(
-                    &self.objects,
-                    temporary.name.as_str(),
-                    &self.objects,
-                    hash.as_str(),
-                    fs::RenameFlags::NOREPLACE,
-                ) {
-                    Ok(()) => {
-                        temporary.armed = false;
-                    }
-                    Err(Errno::EXIST) => {}
-                    Err(error) => return Err(errno(error)),
+                match temporary.publish(&self.objects, &hash) {
+                    Ok(()) | Err(StorageError::AlreadyExists) => {}
+                    Err(error) => return Err(error),
                 }
                 hook(StorageStage::AfterObjectPublish)?;
                 self.verified_object(&hash)?.0
@@ -656,14 +609,14 @@ impl FileStore {
         if &initial != expected {
             return Err(StorageError::Changed);
         }
-        let mut temporary = TemporaryFile::new(&parent.directory)?;
+        let mut temporary = AnonymousFile::new(&parent.directory)?;
         if copy_observed(&object, &mut temporary.file)?.hash != object_hash {
             return Err(StorageError::ChecksumMismatch);
         }
         let permissions = target.metadata().map_err(io)?.mode() & 0o777;
         fs::fchmod(&temporary.file, Mode::from_raw_mode(permissions)).map_err(errno)?;
         hook(StorageStage::BeforeTemporaryFileSync)?;
-        temporary.file.sync_all().map_err(io)?;
+        let mut temporary = self.track_temporary(&parent, temporary, object_hash, hook)?;
         let durable = metadata_stamp(
             &temporary.file.metadata().map_err(io)?,
             object_hash.to_owned(),
@@ -695,6 +648,7 @@ impl FileStore {
         if final_observation.hash != object_hash {
             return Err(StorageError::Changed);
         }
+        temporary.finish_after_parent_sync()?;
         Ok(final_observation)
     }
 

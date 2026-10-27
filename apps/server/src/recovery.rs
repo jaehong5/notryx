@@ -134,6 +134,7 @@ impl Workspace {
         }
         self.state.validate_current().await?;
         self.validate_documents().await?;
+        self.cleanup_temporary_files()?;
         self.ready = self.state.pending().await?.is_empty();
         Ok(Receipt {
             operation_id: id,

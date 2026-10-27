@@ -124,6 +124,15 @@ fn process_kill_during_object_publication_never_exposes_partial_objects() {
         } else {
             assert_eq!(observed.unwrap(), b"proposed");
         }
+        let objects = std::fs::read_dir(state.join("objects/sha256"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        if stage == StorageStage::AfterObjectFileSync {
+            assert!(objects.is_empty(), "{stage:?}");
+        } else {
+            assert_eq!(objects, [std::ffi::OsString::from(&proposed_hash)]);
+        }
         assert_eq!(reopened.put_object(b"proposed").unwrap(), proposed_hash);
     }
 }

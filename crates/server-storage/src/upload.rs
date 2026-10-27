@@ -1,5 +1,5 @@
 use super::{
-    FileStamp, FileStore, MAX_FILE_BYTES, StorageError, StorageStage, StoreLease, TemporaryFile,
+    AnonymousFile, FileStamp, FileStore, MAX_FILE_BYTES, StorageError, StorageStage, StoreLease,
     checked_regular, copy_observed, create_regular, errno, hash_observed, io, metadata_stamp,
     open_at, open_regular, private_state, validate_hash,
 };
@@ -300,28 +300,18 @@ impl FileStore {
         let published = match self.verified_object(&stored.hash) {
             Ok((file, _)) => file,
             Err(StorageError::NotFound) => {
-                let mut temporary = TemporaryFile::new(&self.objects)?;
+                let mut temporary = AnonymousFile::new(&self.objects)?;
                 if copy_observed(&source, &mut temporary.file)? != expected {
                     return Err(StorageError::Changed);
                 }
                 fs::fchmod(&temporary.file, Mode::RUSR).map_err(errno)?;
                 hook(StorageStage::BeforeObjectFileSync)?;
                 temporary.file.sync_all().map_err(io)?;
-                let durable =
-                    metadata_stamp(&temporary.file.metadata().map_err(io)?, stored.hash.clone());
                 hook(StorageStage::AfterObjectFileSync)?;
                 hook(StorageStage::BeforeObjectPublish)?;
-                temporary.validate(&durable)?;
-                match fs::renameat_with(
-                    &self.objects,
-                    temporary.name.as_str(),
-                    &self.objects,
-                    stored.hash.as_str(),
-                    fs::RenameFlags::NOREPLACE,
-                ) {
-                    Ok(()) => temporary.armed = false,
-                    Err(rustix::io::Errno::EXIST) => {}
-                    Err(error) => return Err(errno(error)),
+                match temporary.publish(&self.objects, &stored.hash) {
+                    Ok(()) | Err(StorageError::AlreadyExists) => {}
+                    Err(error) => return Err(error),
                 }
                 hook(StorageStage::AfterObjectPublish)?;
                 self.verified_object(&stored.hash)?.0

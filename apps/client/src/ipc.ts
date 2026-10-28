@@ -209,6 +209,15 @@ export async function workspaceDocumentOutbox(binding: WorkspaceRegistration, do
 export function fromBase64(base64: string): Uint8Array {
   const maxBytes = 25 * 1024 * 1024;
   if (base64.length > Math.ceil(maxBytes / 3) * 4) throw new Error("문서가 너무 큽니다.");
+  const native = (Uint8Array as typeof Uint8Array & { fromBase64?: (value: string) => Uint8Array }).fromBase64;
+  if (typeof native === "function") {
+    let decoded: Uint8Array | undefined;
+    try { decoded = native.call(Uint8Array, base64); } catch { /* Preserve the atob error and compatibility behavior. */ }
+    if (decoded) {
+      if (decoded.length > maxBytes) throw new Error("문서가 너무 큽니다.");
+      return decoded;
+    }
+  }
   const binary = atob(base64);
   if (binary.length > maxBytes) throw new Error("문서가 너무 큽니다.");
   const bytes = new Uint8Array(binary.length);
@@ -217,6 +226,9 @@ export function fromBase64(base64: string): Uint8Array {
 }
 
 export function toBase64(bytes: Uint8Array): string {
+  if (bytes.length === 0) return "";
+  const native = (bytes as Uint8Array & { toBase64?: () => string }).toBase64;
+  if (typeof native === "function") return native.call(bytes);
   let binary = "";
   for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
   return btoa(binary);

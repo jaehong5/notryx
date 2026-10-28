@@ -3,7 +3,7 @@ import { EditorController, type EditorOptions, type EditorPorts, type EditorStat
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  let reject!: (reason: Error) => void;
+  let reject!: (reason: unknown) => void;
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
@@ -103,17 +103,303 @@ test("recovery snapshot keeps failed input in its current session and waits for 
   await controller.dispose();
 });
 
-test("continuous edits keep the first 250 ms deadline and save the latest text", async () => {
+test("automatic local save starts one second after the latest input", async () => {
   vi.useFakeTimers();
   const { controller, ports, views } = fixture();
   await controller.open("a");
   views[0].options.change("first");
-  await vi.advanceTimersByTimeAsync(200);
+  await vi.advanceTimersByTimeAsync(900);
   views[0].options.change("latest");
-  await vi.advanceTimersByTimeAsync(49);
+  await vi.advanceTimersByTimeAsync(999);
   expect(ports.saveDocument).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(1);
   expect(ports.saveDocument).toHaveBeenCalledExactlyOnceWith({ document_id: "a", edit_session_id: "session-a", generation: "2", bytes_base64: btoa("latest") });
+  await controller.dispose();
+});
+
+test("continuous input starts a local checkpoint after five seconds", async () => {
+  vi.useFakeTimers();
+  const { controller, ports, views } = fixture();
+  await controller.open("a");
+  views[0].options.change("0");
+  for (let i = 1; i <= 9; i++) {
+    await vi.advanceTimersByTimeAsync(500);
+    views[0].options.change(String(i));
+  }
+  await vi.advanceTimersByTimeAsync(499);
+  expect(ports.saveDocument).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.saveDocument).toHaveBeenCalledExactlyOnceWith({ document_id: "a", edit_session_id: "session-a", generation: "10", bytes_base64: btoa("9") });
+  await controller.dispose();
+});
+
+test("input during an automatic checkpoint waits for its own idle deadline", async () => {
+  vi.useFakeTimers();
+  const { controller, ports, views, states } = fixture();
+  await controller.open("a");
+  const response = deferred<{ edit_session_id: string; generation: string }>();
+  vi.mocked(ports.saveDocument).mockReturnValueOnce(response.promise);
+  views[0].options.change("first");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(1);
+  views[0].options.change("second");
+  await vi.advanceTimersByTimeAsync(100);
+  response.resolve({ edit_session_id: "session-a", generation: "1" });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(1);
+  expect(states.at(-1)?.status).not.toBe("이 기기에 저장됨");
+  await vi.advanceTimersByTimeAsync(899);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(2);
+  expect(ports.saveDocument).toHaveBeenLastCalledWith({ document_id: "a", edit_session_id: "session-a", generation: "2", bytes_base64: btoa("second") });
+  await controller.dispose();
+});
+
+test("an overdue five-second checkpoint waits for the prior write, then saves the newest input", async () => {
+  vi.useFakeTimers();
+  const { controller, ports, views } = fixture();
+  await controller.open("a");
+  const response = deferred<{ edit_session_id: string; generation: string }>();
+  vi.mocked(ports.saveDocument).mockReturnValueOnce(response.promise);
+  views[0].options.change("first");
+  await vi.advanceTimersByTimeAsync(1000);
+  for (let i = 1; i <= 11; i++) {
+    await vi.advanceTimersByTimeAsync(500);
+    views[0].options.change(`later-${i}`);
+  }
+  expect(ports.saveDocument).toHaveBeenCalledTimes(1);
+  response.resolve({ edit_session_id: "session-a", generation: "1" });
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(2);
+  expect(ports.saveDocument).toHaveBeenLastCalledWith({ document_id: "a", edit_session_id: "session-a", generation: "12", bytes_base64: btoa("later-11") });
+  await controller.dispose();
+});
+
+test("switching flushes immediately and does not reuse the old document's timer", async () => {
+  vi.useFakeTimers();
+  const { controller, ports, views } = fixture();
+  await controller.open("a");
+  views[0].options.change("a-input");
+  await vi.advanceTimersByTimeAsync(500);
+  await controller.open("b");
+  expect(ports.saveDocument).toHaveBeenCalledExactlyOnceWith({ document_id: "a", edit_session_id: "session-a", generation: "1", bytes_base64: btoa("a-input") });
+  views[1].options.change("b-input");
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(2);
+  expect(ports.saveDocument).toHaveBeenLastCalledWith({ document_id: "b", edit_session_id: "session-b", generation: "1", bytes_base64: btoa("b-input") });
+  await controller.dispose();
+});
+
+test("manual save waits for an in-flight automatic checkpoint and flushes later edits", async () => {
+  vi.useFakeTimers();
+  const { controller, ports, views } = fixture();
+  ports.manualSync = vi.fn(async () => {});
+  await controller.open("a");
+  const response = deferred<{ edit_session_id: string; generation: string }>();
+  vi.mocked(ports.saveDocument).mockReturnValueOnce(response.promise);
+  views[0].options.change("first");
+  await vi.advanceTimersByTimeAsync(1000);
+  views[0].options.change("second");
+  const saving = controller.save();
+  expect(ports.saveDocument).toHaveBeenCalledTimes(1);
+  response.resolve({ edit_session_id: "session-a", generation: "1" });
+  await saving;
+  expect(ports.saveDocument).toHaveBeenCalledTimes(2);
+  expect(ports.saveDocument).toHaveBeenLastCalledWith({ document_id: "a", edit_session_id: "session-a", generation: "2", bytes_base64: btoa("second") });
+  expect(ports.manualSync).toHaveBeenCalledExactlyOnceWith("a", "session-a");
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(2);
+  await controller.dispose();
+});
+
+test.each(["stale_session", "StaleSession", "invalid_generation", "InvalidGeneration", "document_too_large", "UnsupportedFormat", "unknown"]) ("terminal save error %s does not retry even after another edit", async (failure) => {
+  vi.useFakeTimers();
+  const { controller, ports, views, states } = fixture();
+  vi.mocked(ports.saveDocument).mockRejectedValueOnce(failure);
+  await controller.open("a");
+  views[0].options.change("first");
+  await vi.advanceTimersByTimeAsync(1000);
+  views[0].options.change("second");
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(1);
+  expect(states.at(-1)?.status).toBe("저장 오류, 입력 유지 중");
+  expect(states.at(-1)?.error).toContain(failure);
+  expect(new TextDecoder().decode(controller.recoverySnapshot().bytes)).toBe("second");
+  await controller.dispose();
+});
+
+test("one failed checkpoint shared by automatic and manual saves schedules one backoff", async () => {
+  vi.useFakeTimers();
+  const { controller, ports, views } = fixture();
+  await controller.open("a");
+  const response = deferred<{ edit_session_id: string; generation: string }>();
+  vi.mocked(ports.saveDocument).mockReturnValueOnce(response.promise);
+  views[0].options.change("first");
+  await vi.advanceTimersByTimeAsync(1000);
+  const saving = controller.flush();
+  response.reject("Storage");
+  await expect(saving).rejects.toBe("Storage");
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(2);
+  await controller.dispose();
+});
+
+test("failed automatic checkpoints retry with bounded backoff and preserve the draft", async () => {
+  vi.useFakeTimers();
+  const { controller, ports, views, states } = fixture();
+  vi.mocked(ports.saveDocument).mockRejectedValueOnce("Storage").mockRejectedValueOnce("Storage");
+  await controller.open("a");
+  views[0].options.change("first");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(states.at(-1)?.status).toBe("저장 오류, 입력 유지 중");
+  expect(new TextDecoder().decode(controller.recoverySnapshot().bytes)).toBe("first");
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(1999);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(3);
+  expect(ports.saveDocument).toHaveBeenLastCalledWith({ document_id: "a", edit_session_id: "session-a", generation: "1", bytes_base64: btoa("first") });
+  expect(states.at(-1)?.status).toBe("이 기기에 저장됨");
+  await controller.dispose();
+});
+
+test("persistent local storage failures stop increasing backoff at thirty seconds", async () => {
+  vi.useFakeTimers();
+  const { controller, ports, views } = fixture();
+  vi.mocked(ports.saveDocument).mockRejectedValue("Storage");
+  await controller.open("a");
+  views[0].options.change("unsent");
+  await vi.advanceTimersByTimeAsync(1000);
+  for (const delay of [1000, 2000, 4000, 8000, 16000]) await vi.advanceTimersByTimeAsync(delay);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(6);
+  await vi.advanceTimersByTimeAsync(29_999);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(6);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(7);
+  vi.mocked(ports.saveDocument).mockImplementation(async (request) => ({ edit_session_id: request.edit_session_id, generation: request.generation }));
+  await controller.dispose();
+});
+
+test("new input after a failed checkpoint still waits for one second of inactivity", async () => {
+  vi.useFakeTimers();
+  const { controller, ports, views } = fixture();
+  vi.mocked(ports.saveDocument).mockRejectedValueOnce("Storage");
+  await controller.open("a");
+  views[0].options.change("first");
+  await vi.advanceTimersByTimeAsync(1000);
+  await vi.advanceTimersByTimeAsync(500);
+  views[0].options.change("second");
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(2);
+  expect(ports.saveDocument).toHaveBeenLastCalledWith({ document_id: "a", edit_session_id: "session-a", generation: "2", bytes_base64: btoa("second") });
+  await controller.dispose();
+});
+
+test("manual save bypasses local retry backoff and resets it after success", async () => {
+  vi.useFakeTimers();
+  const { controller, ports, views } = fixture();
+  ports.manualSync = vi.fn(async () => {});
+  vi.mocked(ports.saveDocument).mockRejectedValueOnce("Storage");
+  await controller.open("a");
+  views[0].options.change("first");
+  await vi.advanceTimersByTimeAsync(1000);
+  await controller.save();
+  expect(ports.saveDocument).toHaveBeenCalledTimes(2);
+  expect(ports.manualSync).toHaveBeenCalledOnce();
+  vi.mocked(ports.saveDocument).mockRejectedValueOnce("Storage");
+  views[0].options.change("second");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(3);
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(3);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(4);
+  await controller.dispose();
+});
+
+test("new input can retry after an in-flight automatic checkpoint fails", async () => {
+  vi.useFakeTimers();
+  const { controller, ports, views } = fixture();
+  await controller.open("a");
+  const response = deferred<{ edit_session_id: string; generation: string }>();
+  vi.mocked(ports.saveDocument).mockReturnValueOnce(response.promise);
+  views[0].options.change("first");
+  await vi.advanceTimersByTimeAsync(1000);
+  views[0].options.change("later input");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(1);
+  response.reject("Storage");
+  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(2);
+  expect(ports.saveDocument).toHaveBeenLastCalledWith({ document_id: "a", edit_session_id: "session-a", generation: "2", bytes_base64: btoa("later input") });
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(2);
+  await controller.dispose();
+});
+
+test("input due during a failed manual checkpoint is retried without another edit", async () => {
+  vi.useFakeTimers();
+  const { controller, ports, views, states } = fixture();
+  await controller.open("a");
+  const response = deferred<{ edit_session_id: string; generation: string }>();
+  vi.mocked(ports.saveDocument).mockReturnValueOnce(response.promise);
+  views[0].options.change("first");
+  const saving = controller.flush();
+  views[0].options.change("later input");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(1);
+  response.reject("Storage");
+  await expect(saving).rejects.toBe("Storage");
+  expect(states.at(-1)?.status).toBe("저장 오류, 입력 유지 중");
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(2);
+  expect(ports.saveDocument).toHaveBeenLastCalledWith({ document_id: "a", edit_session_id: "session-a", generation: "2", bytes_base64: btoa("later input") });
+  await controller.dispose();
+});
+
+test("automatic local checkpoints do not interrupt an active composition", async () => {
+  vi.useFakeTimers();
+  const { controller, ports, views } = fixture();
+  await controller.open("a");
+  views[0].composing = true;
+  views[0].options.composition(true);
+  views[0].options.change("한글");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(ports.saveDocument).toHaveBeenCalledOnce();
+  expect(views[0].composing).toBe(true);
+  expect(views[0].editable).toBe(true);
+  views[0].composing = false;
+  views[0].options.composition(false);
+  await controller.dispose();
+});
+
+test("continuous edits do not repeat the same save status and preserve the latest generation", async () => {
+  const { controller, ports, states, views } = fixture();
+  const edited = vi.fn();
+  ports.edited = edited;
+  await controller.open("a");
+  views[0].options.change("first");
+  const notifications = states.length;
+  views[0].options.change("second");
+  expect(states).toHaveLength(notifications);
+  expect(edited).toHaveBeenLastCalledWith("a", "session-a", "2");
+  await controller.flush();
+  expect(ports.saveDocument).toHaveBeenLastCalledWith({ document_id: "a", edit_session_id: "session-a", generation: "2", bytes_base64: btoa("second") });
   await controller.dispose();
 });
 

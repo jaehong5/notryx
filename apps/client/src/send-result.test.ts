@@ -27,7 +27,7 @@ test("a response from an earlier registration cannot confirm a pending receipt e
   scheduler.edit(scope, "1");
   scheduler.durable(scope, "1");
   await scheduler.flushDocument(scope);
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(attempts).toBe(1);
   await vi.advanceTimersByTimeAsync(1000);
   expect(attempts).toBe(2);
@@ -76,7 +76,7 @@ test.each(["auth_required", "gateway_auth_required"] as const)("%s confirms only
   scheduler.edit(scope, "1");
   scheduler.durable(scope, "1");
   await scheduler.flushDocument(scope);
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(authenticated).toHaveBeenCalledExactlyOnceWith(status);
   expect(confirmed).not.toHaveBeenCalled();
   scheduler.resume();

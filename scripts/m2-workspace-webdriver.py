@@ -352,9 +352,15 @@ def main():
     parser.add_argument("--measure-output", default=".artifacts/m2-performance.json")
     parser.add_argument("--paste-probe", action="store_true")
     parser.add_argument("--recovery-dialogs", action="store_true")
+    parser.add_argument("--boundary-25m", action="store_true")
+    parser.add_argument("--verify-5m", action="store_true")
+    parser.add_argument("--unscoped-recovery", action="store_true")
     args = parser.parse_args()
     require(not (args.measure and args.recovery_dialogs), "performance and dialog verification must run separately")
     require(not args.paste_probe or args.measure, "paste probe requires the release measurement setup")
+    require(not args.boundary_25m or not (args.measure or args.recovery_dialogs), "25 MiB boundary verification must run separately")
+    require(not args.verify_5m or not (args.measure or args.recovery_dialogs or args.boundary_25m), "5 MiB verification must run separately")
+    require(not args.unscoped_recovery or not (args.measure or args.recovery_dialogs or args.boundary_25m or args.verify_5m), "unscoped recovery verification must run separately")
     server_binary = str(Path(args.server).resolve())
     client_binary = str(Path(args.binary).resolve())
     if args.measure:
@@ -396,7 +402,7 @@ def main():
                 raise TestFailure("synthetic server admin response was invalid") from None
 
         def server_request(method, path, *, data=None, headers=None, expected=200):
-            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=90 if args.boundary_25m or args.verify_5m else 20)
             try:
                 connection.request(method, path, data, headers or {})
                 response = connection.getresponse()
@@ -498,6 +504,48 @@ def main():
                 **authorization, "Content-Type": "application/octet-stream", "Content-Digest": f"sha-256=:{target_digest}:",
             })
             create(target_id, folder_id, "Target.md", "file", 5, target_upload["upload_id"])
+            boundary_id = None
+            if args.boundary_25m:
+                boundary_id = operation_id()
+                boundary_size = 25 * 1024 * 1024
+                boundary_line = b"r" * 63 + b"\n"
+                boundary_body_size = boundary_size - 3
+                boundary_body = (boundary_line * (boundary_body_size // len(boundary_line) + 1))[:boundary_body_size]
+                boundary_source = b"\xef\xbb\xbf" + boundary_body
+                require(len(boundary_source) == boundary_size, "25 MiB fixture has the wrong byte length")
+                boundary_hash = hashlib.sha256(boundary_source).digest()
+                boundary_upload = server_request("POST", "/v1/uploads", data=boundary_source, expected=201, headers={
+                    **authorization, "Content-Type": "application/octet-stream", "Content-Digest": "sha-256=:" + base64.b64encode(boundary_hash).decode() + ":",
+                })
+                create(boundary_id, folder_id, "Boundary 25 MiB.md", "file", 6, boundary_upload["upload_id"])
+                boundary_prefix = boundary_body[:63].decode()
+                boundary_last_line = boundary_body.rsplit(b"\n", 1)[-1].decode()
+                del boundary_source, boundary_body
+                boundary_draft_id = operation_id()
+                boundary_draft_source = b"# Synthetic draft base\n"
+                boundary_draft_digest = base64.b64encode(hashlib.sha256(boundary_draft_source).digest()).decode()
+                boundary_draft_upload = server_request("POST", "/v1/uploads", data=boundary_draft_source, expected=201, headers={
+                    **authorization, "Content-Type": "application/octet-stream", "Content-Digest": f"sha-256=:{boundary_draft_digest}:",
+                })
+                create(boundary_draft_id, folder_id, "Boundary Draft.md", "file", 7, boundary_draft_upload["upload_id"])
+            verify_5m_id = None
+            if args.verify_5m:
+                verify_5m_id = operation_id()
+                verify_5m_size = 5 * 1024 * 1024
+                verify_5m_prefix_text = "# 한글 문서😀\n"
+                verify_5m_prefix = b"\xef\xbb\xbf" + verify_5m_prefix_text.encode("utf-8")
+                verify_5m_line = b"x" * 63 + b"\n"
+                verify_5m_body_size = verify_5m_size - len(verify_5m_prefix) - 1
+                verify_5m_body = (verify_5m_line * (verify_5m_body_size // len(verify_5m_line) + 1))[:verify_5m_body_size]
+                verify_5m_source = verify_5m_prefix + verify_5m_body
+                verify_5m_expected = verify_5m_source + b"!"
+                require(len(verify_5m_source) == verify_5m_size - 1 and len(verify_5m_expected) == verify_5m_size, "5 MiB fixture has the wrong byte length")
+                verify_5m_hash = hashlib.sha256(verify_5m_expected).digest()
+                upload_digest = base64.b64encode(hashlib.sha256(verify_5m_source).digest()).decode()
+                verify_5m_upload = server_request("POST", "/v1/uploads", data=verify_5m_source, expected=201, headers={
+                    **authorization, "Content-Type": "application/octet-stream", "Content-Digest": f"sha-256=:{upload_digest}:",
+                })
+                create(verify_5m_id, folder_id, "Boundary 5 MiB.md", "file", 6, verify_5m_upload["upload_id"])
             performance_nodes = {}
             if args.measure:
                 sequence = 5
@@ -530,7 +578,7 @@ def main():
                 request = urllib.request.Request(driver_origin + path, data=data, method=method,
                                                  headers={"Content-Type": "application/json"})
                 try:
-                    with urllib.request.urlopen(request, timeout=180 if args.measure else 35) as response:
+                    with urllib.request.urlopen(request, timeout=180 if args.measure or args.boundary_25m or args.verify_5m else 35) as response:
                         result = json.load(response)
                     value = result["value"]
                     if isinstance(value, dict) and "error" in value:
@@ -552,7 +600,7 @@ def main():
             wait(driver_ready)
             capabilities = {"capabilities": {"alwaysMatch": {"browserName": "wry", "webkitgtk:browserOptions": {"binary": client_binary}}}}
             session_id = wd("POST", "/session", capabilities)["sessionId"]
-            wd("POST", f"/session/{session_id}/timeouts", {"script": 150000 if args.measure else 30000})
+            wd("POST", f"/session/{session_id}/timeouts", {"script": 150000 if args.measure or args.boundary_25m or args.verify_5m else 30000})
 
             def js(script, *values, asynchronous=False):
                 mode = "async" if asynchronous else "sync"
@@ -589,7 +637,7 @@ def main():
                     """, (node_id,)).fetchone()
                 return row[0] if row else 0
 
-            def acknowledged(generation):
+            def acknowledged(generation, node_id=document_id):
                 with sqlite3.connect(f"file:{client_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
                     row = db.execute("""
                         SELECT r.device_stream_id, o.operation_seq, s.ack_through
@@ -599,20 +647,24 @@ def main():
                         WHERE r.status = 'active' AND o.document_id = ? AND o.generation = ?
                           AND o.status = 'committed' AND o.terminal_kind IS NULL
                         ORDER BY o.operation_seq DESC LIMIT 1
-                    """, (document_id, generation)).fetchone()
+                    """, (node_id, generation)).fetchone()
                 if row is None or row[2] < row[1]:
                     return False
                 with sqlite3.connect(f"file:{state / 'state.db'}?mode=ro", uri=True) as db:
                     watermark = db.execute("SELECT last_seq, retired_through FROM operation_streams WHERE stream_id = ?", (row[0],)).fetchone()
                 return watermark is not None and int(watermark[0]) == row[1] and int(watermark[1]) >= row[1]
 
-            def operation_count():
+            def operation_count(node_id=document_id):
                 with sqlite3.connect(f"file:{client_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
                     return db.execute("""
                         SELECT COUNT(*) FROM client_outbox o
                         JOIN client_registrations r ON r.id = o.registration_id
                         WHERE r.status = 'active' AND o.document_id = ?
-                    """, (document_id,)).fetchone()[0]
+                    """, (node_id,)).fetchone()[0]
+
+            def outbox_snapshot():
+                with sqlite3.connect(f"file:{client_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
+                    return db.execute("SELECT * FROM client_outbox ORDER BY operation_id").fetchall()
 
             wait(lambda: js("return !!document.querySelector('.cm-content[contenteditable=true]')"))
             wait(lambda: js("return !document.querySelector('.workspace-connect button').disabled"))
@@ -736,19 +788,24 @@ print(json.dumps({'sha256':hashlib.sha256(data).hexdigest(), 'length':len(data),
             require(not remote_requests and not js("return !!document.querySelector('.markdown-preview img[alt=remote]')"), "preview requested a remote image")
             js("document.querySelector('#preview-toggle').click()")
             before_reload = "편집 입력😀\n"
+            with sqlite3.connect(client_data / "drafts.sqlite3", timeout=10) as db:
+                db.execute("CREATE TRIGGER m2_fail_queue BEFORE INSERT ON client_outbox BEGIN SELECT RAISE(ABORT, 'synthetic queue failure'); END")
+                db.commit()
             js("""
-                const started=performance.now();
-                window.addEventListener('pagehide',()=>sessionStorage.setItem('notryx-m2-reload-probe',JSON.stringify({elapsed:performance.now()-started})),{once:true});
                 const view=document.querySelector('.cm-content').cmTile.root.view;
                 view.dispatch({changes:{from:view.state.doc.length,insert:arguments[0]}});
             """, before_reload)
             saved = wait(lambda: (row if (row := checkpoint()) and before_reload.encode() in row[1] else None))
             require(saved[1] == original.replace(b"\r\n", b"\n") + before_reload.encode(), "edited checkpoint did not preserve source")
-            require(saved[2] == original and operation_count() == 0, "checkpoint-to-reload test reached the queue too late")
+            wait(lambda: js("return [...document.querySelectorAll('[role=alert]')].some(e=>e.textContent.includes('전송을 준비하지 못했습니다'))"), seconds=45)
+            require(saved[2] == original and operation_count() == 0, "failed queue changed the durable checkpoint or created an operation")
+            require((notes / "Test Folder" / "Example.md").read_bytes() == original, "failed queue changed the server source")
             synced_bytes = saved[1]
             wd("POST", f"/session/{session_id}/refresh", {})
-            reload_probe = js("const value=sessionStorage.getItem('notryx-m2-reload-probe'); sessionStorage.removeItem('notryx-m2-reload-probe'); return value ? JSON.parse(value) : null")
-            require(reload_probe is not None and reload_probe["elapsed"] < 750, "checkpoint-to-reload test did not exercise the pre-queue interval")
+            require(checkpoint()[:2] == saved[:2] and operation_count() == 0, "reload changed the unqueued durable checkpoint")
+            with sqlite3.connect(client_data / "drafts.sqlite3", timeout=10) as db:
+                db.execute("DROP TRIGGER m2_fail_queue")
+                db.commit()
             wait(lambda: js("return !!document.querySelector('[data-document=\"' + arguments[0] + '\"]:not(:disabled)')", document_id))
             js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", document_id)
             wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", document_id))
@@ -759,6 +816,160 @@ print(json.dumps({'sha256':hashlib.sha256(data).hexdigest(), 'length':len(data),
             time.sleep(5.5)
             require(operation_count() == 1 and acknowledged(saved[0]), "reload produced duplicate or unacknowledged operations")
             saved = checkpoint()
+            if args.unscoped_recovery:
+                db_path = client_data / "drafts.sqlite3"
+                with sqlite3.connect(db_path, timeout=10) as db:
+                    old_registration, recovery_storage = db.execute("""
+                        SELECT r.id, d.storage_id FROM registered_documents d
+                        JOIN client_registrations r ON r.id = d.registration_id
+                        WHERE r.status = 'active' AND d.document_id = ?
+                    """, (document_id,)).fetchone()
+                recovery_grant = admin("issue-pairing", admin_status["owner_principal_id"])
+                js("""
+                    const form=document.querySelector('.workspace-connect');
+                    form.elements.namedItem('origin').value=arguments[0];
+                    form.elements.namedItem('workspace_id').value=arguments[1];
+                    form.elements.namedItem('pairing_secret').value=arguments[2];
+                    form.requestSubmit();
+                """, f"http://127.0.0.1:{port}", recovery_grant["workspace_id"], recovery_grant["pairing_secret"])
+
+                def active_registration():
+                    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
+                        row = db.execute("SELECT id FROM client_registrations WHERE status = 'active'").fetchone()
+                    return row[0] if row and row[0] != old_registration else None
+
+                current_registration = wait(active_registration, seconds=45)
+                wait(lambda: js("return !!document.querySelector('[data-draft-document=\"' + arguments[0] + '\"]:not(:disabled)') && !!document.querySelector('[data-document=\"' + arguments[1] + '\"]:not(:disabled)')", document_id, target_id), seconds=45)
+                with sqlite3.connect(db_path, timeout=10) as db:
+                    require(db.execute("SELECT status FROM client_registrations WHERE id = ?", (old_registration,)).fetchone()[0] == "frozen", "old registration was not frozen")
+                    db.execute(f"CREATE TRIGGER m2_hold_send BEFORE UPDATE OF status ON client_outbox WHEN OLD.registration_id = {current_registration} AND NEW.status = 'sent' BEGIN SELECT RAISE(ABORT, 'synthetic send preparation failure'); END")
+                    db.commit()
+                js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", target_id)
+                wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", target_id))
+                pending_text = "queued current registration\n"
+                js("const view=document.querySelector('.cm-content').cmTile.root.view; view.dispatch({changes:{from:view.state.doc.length,insert:arguments[0]},userEvent:'input.type'})", pending_text)
+                pending = wait(lambda: (row if (row := checkpoint(target_id)) and pending_text.encode() in row[1] else None), seconds=45)
+
+                def current_outbox():
+                    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
+                        return db.execute("SELECT operation_id, generation, status FROM client_outbox WHERE registration_id = ? AND document_id = ?", (current_registration, target_id)).fetchall()
+
+                wait(lambda: current_outbox() and js("return [...document.querySelectorAll('[role=alert]')].some(e=>e.textContent.includes('Storage'))"), seconds=45)
+                queued = current_outbox()
+                require(len(queued) == 1 and queued[0][1:] == (pending[0], "queued"), "current registration operation was not held before sending")
+                require((notes / "Test Folder" / "Target.md").read_bytes() == target_source, "held operation reached the server")
+                js("document.querySelector('[data-draft-document=\"' + arguments[0] + '\"]').click()", document_id)
+                wait(lambda: js("return document.querySelector('[data-draft-document=\"' + arguments[0] + '\"]')?.getAttribute('aria-current') === 'page' && !!document.querySelector('.cm-content[contenteditable=true]')", document_id), seconds=45)
+                with sqlite3.connect(db_path, timeout=10) as db:
+                    quoted_storage = db.execute("SELECT quote(?)", (recovery_storage,)).fetchone()[0]
+                    db.execute(f"CREATE TRIGGER m2_fail_recovery BEFORE INSERT ON draft_checkpoints WHEN NEW.document_id = {quoted_storage} BEGIN SELECT RAISE(ABORT, 'synthetic recovery checkpoint failure'); END")
+                    db.commit()
+
+                def recovery_checkpoint():
+                    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as db:
+                        return db.execute("SELECT generation, bytes FROM draft_checkpoints WHERE document_id = ?", (recovery_storage,)).fetchone()
+
+                recovery_before = recovery_checkpoint()
+                require(recovery_before == saved[:2], "frozen recovery draft did not preserve its checkpoint")
+                recovery_text = "recovery edit pending\n"
+                js("const view=document.querySelector('.cm-content').cmTile.root.view; view.dispatch({changes:{from:view.state.doc.length,insert:arguments[0]},userEvent:'input.type'})", recovery_text)
+                wait(lambda: js("return document.querySelector('#save-status')?.textContent.includes('저장 오류')"), seconds=45)
+                require(recovery_checkpoint() == recovery_before and current_outbox() == queued, "failure injection did not preserve the expected pending state")
+                with sqlite3.connect(db_path, timeout=10) as db:
+                    db.execute("DROP TRIGGER m2_hold_send")
+                    db.commit()
+                previous_observation = time.monotonic()
+                previous_renderer = js("return performance.now()")
+                require(time.monotonic() - previous_observation < 5, "renderer did not respond before the retry observation")
+                previous_observation = time.monotonic()
+                deadline = previous_observation + 32
+                while time.monotonic() < deadline:
+                    require(recovery_checkpoint() == recovery_before and current_outbox() == queued, "pending recovery checkpoint did not block the existing outbox")
+                    require((notes / "Test Folder" / "Target.md").read_bytes() == target_source, "server changed while recovery checkpoint was pending")
+                    renderer_now = js("return performance.now()")
+                    observation_now = time.monotonic()
+                    require(renderer_now > previous_renderer and observation_now - previous_observation < 5, "renderer did not advance during the retry observation")
+                    previous_renderer, previous_observation = renderer_now, observation_now
+                    time.sleep(0.25)
+                with sqlite3.connect(db_path, timeout=10) as db:
+                    db.execute("DROP TRIGGER m2_fail_recovery")
+                    db.commit()
+                js("document.querySelector('#save').click()")
+                restored = wait(lambda: (row if (row := recovery_checkpoint()) and row[0] > recovery_before[0] and recovery_text.encode() in row[1] else None), seconds=45)
+                require(restored[1] == recovery_before[1] + recovery_text.encode(), "recovery checkpoint did not contain the edited bytes")
+                wait(lambda: acknowledged(pending[0], target_id) and (notes / "Test Folder" / "Target.md").read_bytes() == pending[1], seconds=45)
+                print("Unscoped recovery passed: failed checkpoint blocked the existing outbox until the recovery draft became durable.", flush=True)
+                return
+            if not (args.measure or args.recovery_dialogs or args.boundary_25m or args.verify_5m):
+                def type_edit(value):
+                    return js("const view=document.querySelector('.cm-content').cmTile.root.view; view.dispatch({changes:{from:view.state.doc.length,insert:arguments[0]},userEvent:'input.type'}); return Date.now()", value)
+
+                def type_continuously(result, failures):
+                    try:
+                        result.append(js("""
+                            const done=arguments[arguments.length-1];
+                            const view=document.querySelector('.cm-content').cmTile.root.view;
+                            let count=0, previous=performance.now(), maxGap=0, firstWall=0;
+                            const timer=setInterval(()=>{
+                                const now=performance.now(); maxGap=Math.max(maxGap,now-previous); previous=now;
+                                if (count===0) firstWall=Date.now();
+                                view.dispatch({changes:{from:0,to:1,insert:count%2?'b':'a'},userEvent:'input.type'});
+                                if (++count===100) { clearInterval(timer); done({count,maxGap,firstWall}); }
+                            },100);
+                        """, asynchronous=True))
+                    except Exception as error:
+                        failures.append(error)
+
+                first_edit_ms = type_edit("policy-a\n")
+                time.sleep(0.4)
+                last_edit_ms = type_edit("policy-b\n")
+                time.sleep(0.35)
+                before_continuous = checkpoint()
+                operations_before_continuous = operation_count()
+                source_before_continuous = (notes / "Test Folder" / "Example.md").read_bytes()
+                require(last_edit_ms - first_edit_ms < 900 and time.time() * 1000 - last_edit_ms < 900, "idle timer test could not sample before the deadline")
+                require(before_continuous == saved and operations_before_continuous == 1, "automatic save or transmission started before one second of inactivity")
+                require(source_before_continuous == synced_bytes, "server changed before one second of inactivity")
+                continuous_result, continuous_failures = [], []
+                worker = threading.Thread(target=type_continuously, args=(continuous_result, continuous_failures), daemon=True)
+                worker.start()
+                saved_while_typing = False
+                sent_while_typing = False
+                while worker.is_alive():
+                    row = checkpoint()
+                    if row is not None and row[0] > saved[0]:
+                        saved_while_typing = True
+                    if operation_count() != 1 or (notes / "Test Folder" / "Example.md").read_bytes() != synced_bytes:
+                        sent_while_typing = True
+                    time.sleep(0.1)
+                worker.join()
+                require(not continuous_failures and len(continuous_result) == 1, "continuous typing did not finish")
+                require(continuous_result[0]["firstWall"] - last_edit_ms < 1000, "continuous typing started after an idle interval")
+                require(continuous_result[0]["count"] == 100 and continuous_result[0]["maxGap"] < 1000, "continuous typing was interrupted by an idle interval")
+                require(saved_while_typing, "continuous typing was not checkpointed before it stopped")
+                require(not sent_while_typing, "continuous typing caused automatic server transmission")
+                final_generation = saved[0] + 102
+                saved = wait(lambda: (row if (row := checkpoint()) and row[0] == final_generation else None), seconds=45)
+                wait(lambda: acknowledged(final_generation) and (notes / "Test Folder" / "Example.md").read_bytes() == saved[1], seconds=45)
+                saved = wait(lambda: (row if (row := checkpoint()) and row[0] == final_generation and row[2] == row[1] else None), seconds=45)
+                require(operation_count() == 2, "one idle interval did not produce exactly one server operation")
+                synced_bytes = saved[1]
+                handled = js("""
+                    const view=document.querySelector('.cm-content').cmTile.root.view;
+                    view.dispatch({changes:{from:view.state.doc.length,insert:'manual-save\\n'},userEvent:'input.type'});
+                    view.contentDOM.focus();
+                    const key=new KeyboardEvent('keydown',{key:'s',code:'KeyS',ctrlKey:true,bubbles:true,cancelable:true});
+                    view.contentDOM.dispatchEvent(key);
+                    return key.defaultPrevented;
+                """)
+                require(handled, "Ctrl+S was not handled by the editor")
+                final_generation += 1
+                saved = wait(lambda: (row if (row := checkpoint()) and row[0] == final_generation else None), seconds=45)
+                wait(lambda: acknowledged(final_generation) and (notes / "Test Folder" / "Example.md").read_bytes() == saved[1], seconds=45)
+                saved = wait(lambda: (row if (row := checkpoint()) and row[0] == final_generation and row[2] == row[1] else None), seconds=45)
+                require(operation_count() == 3, "Ctrl+S did not preserve and send one operation")
+                synced_bytes = saved[1]
+                print("Autosave policy passed: one-second idle, continuous local checkpoint, deferred transmission and Ctrl+S.", flush=True)
             js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", readonly_id)
             wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=false]')", readonly_id), seconds=45)
             readonly_result = js("""
@@ -775,6 +986,82 @@ print(json.dumps({'sha256':hashlib.sha256(data).hexdigest(), 'length':len(data),
             js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", document_id)
             wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", document_id))
             require(checkpoint() == saved, "returning from read-only document changed the draft")
+            if verify_5m_id is not None:
+                js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", verify_5m_id)
+                wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", verify_5m_id), seconds=120)
+                require(checkpoint(verify_5m_id) is None and operation_count(verify_5m_id) == 0, "5 MiB fixture already has local edits")
+                js("const view=document.querySelector('.cm-content').cmTile.root.view; view.dispatch({changes:{from:view.state.doc.length,insert:'!'},userEvent:'input.type'})")
+                wait(lambda: durable_generation(verify_5m_id) >= 1, seconds=120)
+                verify_5m_saved = checkpoint(verify_5m_id)
+                require(verify_5m_saved is not None and verify_5m_saved[0] == 1 and verify_5m_saved[1] == verify_5m_expected and verify_5m_saved[2] in (verify_5m_source, verify_5m_expected), "5 MiB checkpoint or base differs from the expected bytes")
+                js("document.querySelector('#save').click()")
+                verify_5m_path = notes / "Test Folder" / "Boundary 5 MiB.md"
+                wait(lambda: verify_5m_path.stat().st_size == verify_5m_size and acknowledged(verify_5m_saved[0], verify_5m_id), seconds=120)
+                with verify_5m_path.open("rb") as source:
+                    require(hashlib.file_digest(source, "sha256").digest() == verify_5m_hash, "5 MiB server source differs from the saved checkpoint")
+                require(operation_count(verify_5m_id) == 1 and checkpoint(verify_5m_id)[1:] == (verify_5m_expected, verify_5m_expected), "5 MiB acknowledgement changed the checkpoint or base")
+                wd("POST", f"/session/{session_id}/refresh", {})
+                wait(lambda: js("return !!document.querySelector('[data-document=\"' + arguments[0] + '\"]:not(:disabled)')", verify_5m_id), seconds=120)
+                js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", verify_5m_id)
+                wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", verify_5m_id), seconds=120)
+                require(js("""
+                    const view=document.querySelector('.cm-content').cmTile.root.view;
+                    const size=arguments[1];
+                    const line='x'.repeat(63)+'\\n';
+                    const expected=arguments[0]+line.repeat(Math.floor(size/64))+line.slice(0,size%64)+'!';
+                    return view.state.doc.toString() === expected;
+                """, verify_5m_prefix_text, verify_5m_body_size), "5 MiB document did not reopen with the saved text")
+                require(checkpoint(verify_5m_id)[1:] == (verify_5m_expected, verify_5m_expected) and operation_count(verify_5m_id) == 1, "5 MiB reload changed the saved checkpoint, base or outbox")
+                js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", document_id)
+                wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", document_id), seconds=120)
+                require(checkpoint() == saved, "5 MiB verification changed the existing document draft")
+                print("5 MiB WebView checkpoint passed: BOM, Korean and emoji bytes persisted, reached the server and reopened.", flush=True)
+            if boundary_id is not None:
+                before_outbox = outbox_snapshot()
+                require(checkpoint(boundary_id) is None and operation_count(boundary_id) == 0, "25 MiB fixture already has local edits")
+                js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", boundary_id)
+                wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=false]')", boundary_id), seconds=120)
+                boundary_result = js("""
+                    const content=document.querySelector('.cm-content');
+                    const view=content.cmTile.root.view;
+                    const doc=view.state.doc;
+                    const beforeLength=doc.length;
+                    const prefix=doc.sliceString(0,63);
+                    const firstLine=content.querySelector('.cm-line')?.textContent;
+                    content.focus();
+                    document.execCommand('insertText',false,'unexpected-edit');
+                    return {beforeLength,prefix,firstLine,afterLength:view.state.doc.length,unchanged:doc.eq(view.state.doc)};
+                """)
+                require(boundary_result == {"beforeLength": boundary_body_size, "prefix": boundary_prefix,
+                                             "firstLine": boundary_prefix, "afterLength": boundary_body_size, "unchanged": True},
+                        "25 MiB Markdown was not displayed read-only with the expected source")
+                shown_digest = js("""
+                    const done=arguments[arguments.length-1];
+                    const view=document.querySelector('.cm-content').cmTile.root.view;
+                    const source=view.state.doc.toString();
+                    const expected=('r'.repeat(63)+'\\n').repeat(Math.floor(arguments[0]/64))+'r'.repeat(arguments[0]%64);
+                    if (source !== expected) { done({exact:false,hash:null}); return; }
+                    if (!globalThis.crypto?.subtle) { done({exact:true,hash:null}); return; }
+                    const bytes=new TextEncoder().encode('\ufeff' + source);
+                    crypto.subtle.digest('SHA-256',bytes).then(hash=>done({exact:true,hash:[...new Uint8Array(hash)].map(byte=>byte.toString(16).padStart(2,'0')).join('')})).catch(()=>done({exact:true,hash:'digest_failed'}));
+                """, boundary_body_size, asynchronous=True)
+                require(shown_digest["exact"] and shown_digest["hash"] in (None, boundary_hash.hex()), "25 MiB displayed document differs from the source")
+                js("const view=document.querySelector('.cm-content').cmTile.root.view; view.dispatch({selection:{anchor:view.state.doc.length},scrollIntoView:true})")
+                wait(lambda: js("""
+                    const content=document.querySelector('.cm-content');
+                    const view=content.cmTile.root.view;
+                    const lines=content.querySelectorAll('.cm-line');
+                    return view.viewport.to === view.state.doc.length && lines.length > 0 && lines[lines.length-1].textContent === arguments[0];
+                """, boundary_last_line), seconds=120)
+                js("document.querySelector('#save').click()")
+                time.sleep(0.35)
+                require(checkpoint(boundary_id) is None and operation_count(boundary_id) == 0, "25 MiB read-only document created a draft or operation")
+                with (notes / "Test Folder" / "Boundary 25 MiB.md").open("rb") as source:
+                    require(hashlib.file_digest(source, "sha256").digest() == boundary_hash, "25 MiB read-only source changed")
+                js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", document_id)
+                wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", document_id), seconds=120)
+                require(checkpoint() == saved and outbox_snapshot() == before_outbox, "25 MiB read-only document changed an existing draft or outbox")
+                print("25 MiB Markdown WebView boundary passed: read-only source, existing draft and outbox preserved.", flush=True)
             owner = js("const done=arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke('m0_renderer_session').then(done)", asynchronous=True)
             js("document.querySelector('#isolation-open').click()")
             handles = wait(lambda: (items if len(items := wd("GET", f"/session/{session_id}/window/handles")) == 2 else None))
@@ -997,6 +1284,45 @@ print(json.dumps({'sha256':hashlib.sha256(data).hexdigest(), 'length':len(data),
                 finally:
                     destination.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 open_measurement(document_id)
+            if boundary_id is not None:
+                js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", boundary_draft_id)
+                wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", boundary_draft_id), seconds=120)
+                with sqlite3.connect(f"file:{client_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
+                    ui_device_id = db.execute("SELECT device_id FROM client_registrations WHERE status = 'active'").fetchone()[0]
+                admin("revoke-device", ui_device_id)
+                js("const view=document.querySelector('.cm-content').cmTile.root.view; view.dispatch({changes:{from:view.state.doc.length,insert:'unsent local draft\\n'}})")
+                retained_draft = wait(lambda: (row if (row := checkpoint(boundary_draft_id)) and b'unsent local draft' in row[1] else None), seconds=45)
+                wait(lambda: js("return [...document.querySelectorAll('[role=alert]')].some(e=>e.textContent.includes('기기 인증이'))"), seconds=45)
+                js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", document_id)
+                wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", document_id), seconds=45)
+                retained_outbox = outbox_snapshot()
+                require(operation_count(boundary_draft_id) == 1, "unsent boundary draft was not queued")
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=90)
+                try:
+                    connection.request("GET", f"/v1/nodes/{boundary_draft_id}/content", headers=authorization)
+                    response = connection.getresponse()
+                    current_source = response.read()
+                    current_etag = response.getheader("ETag")
+                    require(response.status == 200 and current_source == boundary_draft_source and current_etag, "boundary draft server source changed unexpectedly")
+                finally:
+                    connection.close()
+                boundary_source = (notes / "Test Folder" / "Boundary 25 MiB.md").read_bytes()
+                server_request("PUT", f"/v1/nodes/{boundary_draft_id}/content", data=boundary_source, headers={
+                    **authorization, "Content-Type": "application/octet-stream", "Content-Digest": "sha-256=:" + base64.b64encode(boundary_hash).decode() + ":",
+                    "If-Match": current_etag, "X-Workspace-Epoch": info["workspace_epoch"],
+                    "X-Device-Stream": pair["device_stream_id"], "X-Operation-Seq": "8", "Idempotency-Key": operation_id(),
+                })
+                del boundary_source
+                js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", boundary_draft_id)
+                wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", boundary_draft_id), seconds=45)
+                draft_text = js("return document.querySelector('.cm-content').cmTile.root.view.state.doc.toString()")
+                require(draft_text == retained_draft[1].decode("utf-8") and checkpoint(boundary_draft_id) == retained_draft, "25 MiB server source replaced the existing local draft")
+                with (notes / "Test Folder" / "Boundary Draft.md").open("rb") as source:
+                    require(hashlib.file_digest(source, "sha256").digest() == boundary_hash, "reopening an existing draft changed the 25 MiB server source")
+                js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", document_id)
+                wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", document_id), seconds=45)
+                require(checkpoint(boundary_draft_id) == retained_draft and outbox_snapshot() == retained_outbox, "reopening the draft changed its checkpoint, base or outbox")
+                print("25 MiB existing-draft boundary passed: unsent draft, base, outbox and server source preserved.", flush=True)
             stop(server)
             server = None
             offline = "오프라인 편집\n"

@@ -22,6 +22,48 @@ test("a late local reply cannot mark newer input durable", async () => {
   expect(draft.durable).toBe(2n);
 });
 
+test("a single automatic checkpoint preserves newer input for a later checkpoint", async () => {
+  const saved: string[] = [];
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const draft = new Draft(source(), "session", "0", async (generation, bytes) => {
+    saved.push(new TextDecoder().decode(bytes));
+    if (generation === "1") await blocked;
+    return { edit_session_id: "session", generation };
+  });
+  draft.change("first");
+  const checkpoint = draft.flushOnce();
+  draft.change("latest");
+  release();
+  await checkpoint;
+  expect(saved).toEqual(["first"]);
+  expect(draft.durable).toBe(1n);
+  expect(draft.dirty).toBe(true);
+  await draft.flushOnce();
+  expect(saved).toEqual(["first", "latest"]);
+  expect(draft.durable).toBe(2n);
+});
+
+test("an explicit flush waits for an automatic checkpoint and saves newer input", async () => {
+  const saved: string[] = [];
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const draft = new Draft(source(), "session", "0", async (generation, bytes) => {
+    saved.push(new TextDecoder().decode(bytes));
+    if (generation === "1") await blocked;
+    return { edit_session_id: "session", generation };
+  });
+  draft.change("first");
+  const checkpoint = draft.flushOnce();
+  draft.change("latest");
+  const flush = draft.flush();
+  release();
+  await Promise.all([checkpoint, flush]);
+  expect(saved).toEqual(["first", "latest"]);
+  expect(draft.durable).toBe(2n);
+  expect(draft.dirty).toBe(false);
+});
+
 test("failed persistence keeps input dirty and can retry", async () => {
   let fail = true;
   const draft = new Draft(source(), "session", "5", async (generation) => {

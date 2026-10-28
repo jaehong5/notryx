@@ -46,11 +46,18 @@ type ActiveDocument = {
   draft: Draft;
   view: EditorViewHandle;
   closing?: Promise<void>;
+  failedAttempt?: number;
+  retryBlocked?: boolean;
 };
 
 export class EditorController {
   private current?: ActiveDocument;
   private timer?: ReturnType<typeof setTimeout>;
+  private firstPendingAt?: number;
+  private lastEditAt?: number;
+  private automaticSave?: Promise<void>;
+  private retryAt?: number;
+  private retryDelay = 1000;
   private busy?: "opening" | "closing";
   private closeRequested = false;
   private disposed = false;
@@ -112,7 +119,7 @@ export class EditorController {
           draft.change(text);
           this.ports.edited?.(id, session, draft.generation.toString());
           this.ports.sourceChanged?.(text, false);
-          this.publish({ status: "저장 대기 중" });
+          if (!prepared?.retryBlocked && this.state.status !== "저장 대기 중") this.publish({ status: "저장 대기 중" });
           this.schedule();
         },
         inputRejected: () => {
@@ -174,11 +181,16 @@ export class EditorController {
     try {
       await document.draft.flush();
       if (this.current === document) {
+        document.retryBlocked = false;
+        this.resetRetry();
+        this.clearTimer();
         this.publish({ status: document.draft.source.readonly ? "읽기 전용, 원본 보존" : document.draft.generation === 0n ? "수정 없음" : "이 기기에 저장됨", error: "" });
       }
     } catch (cause) {
-      if (this.current === document) this.publish({ status: "저장 오류, 입력 유지 중", error: String(cause) });
+      this.recordSaveFailure(document, cause);
       throw cause;
+    } finally {
+      if (!this.disposed && this.current === document && document.draft.dirty) this.scheduleTimer();
     }
   }
 
@@ -271,16 +283,77 @@ export class EditorController {
   }
 
   private schedule() {
-    if (this.timer !== undefined) return;
+    const now = performance.now();
+    this.firstPendingAt ??= now;
+    this.lastEditAt = now;
+    this.scheduleTimer();
+  }
+
+  private scheduleTimer() {
+    if (this.firstPendingAt === undefined || this.lastEditAt === undefined || this.disposed || this.current?.retryBlocked) return;
+    clearTimeout(this.timer);
+    const deadline = Math.max(Math.min(this.lastEditAt + 1000, this.firstPendingAt + 5000), this.retryAt ?? 0);
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      void this.flush().catch(() => {});
-    }, 250);
+      this.automaticCheckpoint();
+    }, Math.max(0, deadline - performance.now()));
+  }
+
+  private automaticCheckpoint() {
+    const document = this.current;
+    if (this.disposed || !document || !document.draft.dirty) {
+      this.clearTimer();
+      return;
+    }
+    if (this.automaticSave || document.draft.saving) return;
+    this.clearTimer();
+    this.publish({ status: "이 기기에 저장 중" });
+    const saving = document.draft.flushOnce();
+    this.automaticSave = saving;
+    void saving.then(() => {
+      if (this.disposed || this.current !== document) return;
+      document.retryBlocked = false;
+      this.resetRetry();
+      if (document.draft.dirty) this.publish({ status: "저장 대기 중", error: "" });
+      else {
+        this.clearTimer();
+        this.publish({ status: "이 기기에 저장됨", error: "" });
+      }
+    }, (cause: unknown) => this.recordSaveFailure(document, cause)).finally(() => {
+      if (this.automaticSave === saving) this.automaticSave = undefined;
+      if (!this.disposed && this.current === document && document.draft.dirty) this.scheduleTimer();
+    });
   }
 
   private clearTimer() {
     clearTimeout(this.timer);
     this.timer = undefined;
+    this.firstPendingAt = undefined;
+    this.lastEditAt = undefined;
+  }
+
+  private resetRetry() {
+    this.retryAt = undefined;
+    this.retryDelay = 1000;
+  }
+
+  private recordSaveFailure(document: ActiveDocument, cause: unknown) {
+    if (this.disposed || this.current !== document) return;
+    if (document.failedAttempt === document.draft.saveAttempt) return;
+    document.failedAttempt = document.draft.saveAttempt;
+    this.publish({ status: "저장 오류, 입력 유지 중", error: String(cause) });
+    if (cause !== "Storage") {
+      document.retryBlocked = true;
+      this.clearTimer();
+      return;
+    }
+    document.retryBlocked = false;
+    const now = performance.now();
+    this.firstPendingAt ??= now;
+    this.lastEditAt ??= now;
+    this.retryAt = now + this.retryDelay;
+    this.retryDelay = Math.min(this.retryDelay * 2, 30_000);
+    this.scheduleTimer();
   }
 
   private release(document: ActiveDocument): Promise<void> {

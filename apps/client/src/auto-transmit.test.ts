@@ -22,7 +22,178 @@ function setup() {
 
 afterEach(() => vi.useRealTimers());
 
-test("queues only a durable generation after 750 ms of inactivity", async () => {
+test("automatic transmission waits for one second of inactivity", async () => {
+  const { ports, scheduler } = setup();
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.queue).not.toHaveBeenCalled();
+  expect(ports.transmit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.queue).toHaveBeenCalledExactlyOnceWith(a, "1");
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await scheduler.dispose();
+});
+
+test("continuous typing never causes automatic server transmission at five seconds", async () => {
+  const { ports, scheduler } = setup();
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  for (let generation = 2; generation <= 40; generation++) {
+    await vi.advanceTimersByTimeAsync(200);
+    scheduler.edit(a, String(generation)); scheduler.durable(a, String(generation));
+  }
+  expect(ports.queue).not.toHaveBeenCalled();
+  expect(ports.transmit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.transmit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.queue).toHaveBeenCalledExactlyOnceWith(a, "40");
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await scheduler.dispose();
+});
+
+test("closing persists the operation without transmitting before the idle deadline", async () => {
+  const { ports, scheduler } = setup();
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await vi.advanceTimersByTimeAsync(400);
+  await scheduler.deactivate(a);
+  expect(ports.queue).toHaveBeenCalledExactlyOnceWith(a, "1");
+  expect(ports.transmit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(599);
+  expect(ports.transmit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await scheduler.dispose();
+});
+
+test("a newer uncommitted edit holds an already queued operation until the latest checkpoint", async () => {
+  const { ports, scheduler } = setup();
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await scheduler.flushDocument(a);
+  scheduler.edit(a, "2");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(ports.transmit).not.toHaveBeenCalled();
+  scheduler.durable(a, "2");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.queue).toHaveBeenLastCalledWith(a, "2");
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await scheduler.dispose();
+});
+
+test("a newer edit during queue preparation prevents an early server request", async () => {
+  const { ports, scheduler } = setup();
+  let resolve!: (value: { operationId: string; documentId: string; generation: string }) => void;
+  vi.mocked(ports.queue).mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  const preparing = scheduler.flushDocument(a);
+  await Promise.resolve();
+  await vi.advanceTimersByTimeAsync(400);
+  scheduler.edit(a, "2"); scheduler.durable(a, "2");
+  resolve({ operationId: "op-a-1", documentId: "a", generation: "1" });
+  await preparing;
+  expect(ports.queue).toHaveBeenLastCalledWith(a, "2");
+  expect(ports.transmit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.transmit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await scheduler.dispose();
+});
+
+test("an in-flight response cannot start the next operation while editing resumes", async () => {
+  const { ports, scheduler } = setup();
+  let resolve!: (value: { status: "committed"; operationId: string }) => void;
+  vi.mocked(ports.transmit).mockReturnValueOnce(new Promise((done) => { resolve = done; })).mockResolvedValue({ status: "idle" });
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await scheduler.syncNow(a);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  scheduler.edit(a, "2"); scheduler.durable(a, "2");
+  scheduler.acknowledge(a, { operationId: "op-a-1", documentId: "a", generation: "1" }, true);
+  expect(ports.acknowledged).toHaveBeenCalledExactlyOnceWith(a, "1", false);
+  resolve({ status: "committed", operationId: "op-a-1" });
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.queue).toHaveBeenLastCalledWith(a, "2");
+  expect(ports.transmit).toHaveBeenCalledTimes(2);
+  await scheduler.dispose();
+});
+
+test("restart waits one second before sending an already durable outbox", async () => {
+  const { ports, scheduler } = setup();
+  scheduler.resume();
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.transmit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await scheduler.dispose();
+});
+
+test("a backward wall-clock adjustment does not permanently block a pending outbox", async () => {
+  const { ports, scheduler } = setup();
+  scheduler.resume();
+  vi.setSystemTime(-60_000);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await scheduler.dispose();
+});
+
+test("scope-less input and composition also pause automatic server requests", async () => {
+  const { ports, scheduler } = setup();
+  scheduler.resume();
+  scheduler.input();
+  scheduler.inputComposition(true);
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(ports.transmit).not.toHaveBeenCalled();
+  scheduler.inputComposition(false);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  scheduler.input();
+  scheduler.kick();
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.transmit).toHaveBeenCalledTimes(2);
+  await scheduler.dispose();
+});
+
+test("scope-less edits hold the outbox until their latest checkpoint is durable", async () => {
+  const { ports, scheduler } = setup();
+  scheduler.resume();
+  scheduler.unscopedEdit("recovery-session", "1");
+  scheduler.unscopedEdit("recovery-session", "2");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(ports.transmit).not.toHaveBeenCalled();
+  scheduler.unscopedDurable("recovery-session", "1");
+  scheduler.unscopedDurable("old-session", "2");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.transmit).not.toHaveBeenCalled();
+  scheduler.unscopedDurable("recovery-session", "2");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await scheduler.dispose();
+});
+
+test("new input while explicit sync prepares its operation revokes the immediate send", async () => {
+  const { ports, scheduler } = setup();
+  let resolve!: (value: { operationId: string; documentId: string; generation: string }) => void;
+  vi.mocked(ports.queue).mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  const syncing = scheduler.syncNow(a);
+  await Promise.resolve();
+  await vi.advanceTimersByTimeAsync(400);
+  scheduler.edit(a, "2"); scheduler.durable(a, "2");
+  resolve({ operationId: "op-a-1", documentId: "a", generation: "1" });
+  await syncing;
+  expect(ports.transmit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.transmit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await scheduler.dispose();
+});
+
+test("queues only a durable generation after 1000 ms of inactivity", async () => {
   const { ports, scheduler } = setup();
   scheduler.edit(a, "1");
   await vi.advanceTimersByTimeAsync(1000);
@@ -33,7 +204,7 @@ test("queues only a durable generation after 750 ms of inactivity", async () => 
   expect(ports.transmit).toHaveBeenCalledOnce();
   scheduler.edit(a, "2");
   scheduler.durable(a, "2");
-  await vi.advanceTimersByTimeAsync(749);
+  await vi.advanceTimersByTimeAsync(999);
   expect(ports.queue).toHaveBeenCalledTimes(1);
   await vi.advanceTimersByTimeAsync(1);
   expect(ports.queue).toHaveBeenLastCalledWith(a, "2");
@@ -44,6 +215,8 @@ test("restoring a durable checkpoint queues it without another edit", async () =
   const { ports, scheduler } = setup();
   await scheduler.restore(a, "7");
   expect(ports.queue).toHaveBeenCalledExactlyOnceWith(a, "7");
+  expect(ports.transmit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.transmit).toHaveBeenCalledOnce();
   expect(ports.acknowledged).not.toHaveBeenCalled();
   await scheduler.dispose();
@@ -101,7 +274,7 @@ test("a newer checkpoint during restore is queued after stale_checkpoint", async
   scheduler.edit(a, "8"); scheduler.durable(a, "8");
   reject(new Error("stale_checkpoint"));
   await restoring;
-  await vi.advanceTimersByTimeAsync(750);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.queue).toHaveBeenCalledTimes(2);
   expect(ports.queue).toHaveBeenLastCalledWith(a, "8");
   expect(ports.failed).not.toHaveBeenCalled();
@@ -115,7 +288,7 @@ test("a restored session cannot be initialized twice, including generation zero"
   await scheduler.dispose();
 });
 
-test("continuous durable edits are queued at the five-second limit", async () => {
+test("continuous durable edits are queued only after one second of inactivity", async () => {
   const { ports, scheduler } = setup();
   scheduler.edit(a, "1");
   scheduler.durable(a, "1");
@@ -126,11 +299,13 @@ test("continuous durable edits are queued at the five-second limit", async () =>
   }
   expect(ports.queue).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(200);
+  expect(ports.queue).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(800);
   expect(ports.queue).toHaveBeenCalledExactlyOnceWith(a, "25");
   await scheduler.dispose();
 });
 
-test("continuous input transmits a durable generation at five seconds even while newer input is uncommitted", async () => {
+test("continuous input waits for the latest checkpoint before sending", async () => {
   const { ports, scheduler } = setup();
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
   for (let n = 2; n <= 25; n++) {
@@ -139,11 +314,14 @@ test("continuous input transmits a durable generation at five seconds even while
     if (n < 25) scheduler.durable(a, String(n));
   }
   await vi.advanceTimersByTimeAsync(200);
-  expect(ports.queue).toHaveBeenCalledExactlyOnceWith(a, "24");
-  expect(ports.transmit).toHaveBeenCalledOnce();
-  scheduler.acknowledge(a, { operationId: "op-a-24", documentId: "a", generation: "24" }, true);
-  expect(ports.acknowledged).toHaveBeenCalledExactlyOnceWith(a, "24", false);
+  expect(ports.queue).not.toHaveBeenCalled();
+  expect(ports.transmit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(800);
+  expect(ports.queue).not.toHaveBeenCalled();
   scheduler.durable(a, "25");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.queue).toHaveBeenCalledExactlyOnceWith(a, "25");
+  expect(ports.transmit).toHaveBeenCalledOnce();
   await scheduler.dispose();
 });
 
@@ -273,14 +451,53 @@ test("closing after a queue failure never sends an earlier composition result", 
   expect(() => scheduler.edit(a, "3")).toThrow("stale_session");
   scheduler.resume();
   await vi.advanceTimersByTimeAsync(1000);
-  expect(ports.transmit).toHaveBeenCalledTimes(1);
+  expect(ports.transmit).not.toHaveBeenCalled();
   const reopened = { ...a, editSessionId: "new-session" };
   scheduler.openSession(reopened);
   scheduler.edit(reopened, "2"); scheduler.durable(reopened, "2");
   await scheduler.flushDocument(reopened);
   expect(internal.documents.size).toBe(2);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(ports.transmit).toHaveBeenCalledTimes(1);
+  await scheduler.dispose();
+});
+
+test("queue failure preserves the draft and earlier outbox until the draft is reopened", async () => {
+  const { ports, scheduler } = setup();
+  const pending: string[] = [];
+  const sent: string[] = [];
+  const storageFailed = vi.fn();
+  const recovered = vi.fn();
+  Object.assign(ports, { queueStorageFailed: storageFailed, queueRecovered: recovered });
+  vi.mocked(ports.queue).mockImplementation(async (scope, generation) => {
+    if (generation === "2" && !storageFailed.mock.calls.length) throw "Storage";
+    const operationId = `op-${generation}`;
+    pending.push(operationId);
+    return { operationId, documentId: scope.documentId, generation };
+  });
+  vi.mocked(ports.transmit).mockImplementation(async () => {
+    const operationId = pending.shift();
+    if (!operationId) return { status: "idle" };
+    sent.push(operationId);
+    return { status: "committed", operationId };
+  });
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await scheduler.flushDocument(a);
+  scheduler.edit(a, "2"); scheduler.durable(a, "2");
+  await expect(scheduler.deactivate(a)).rejects.toBeInstanceOf(QueueStorageError);
+  expect(storageFailed).toHaveBeenCalledExactlyOnceWith(a);
+  const preservedDraft = vi.fn(async () => {});
+  await scheduler.deactivatePreservingDraft(a, preservedDraft);
+  expect(preservedDraft).toHaveBeenCalledOnce();
+  expect(sent).toEqual([]);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(sent).toEqual(["op-1"]);
+  const reopened = { ...a, editSessionId: "reopened" };
+  scheduler.openSession(reopened);
+  await scheduler.restore(reopened, "2");
+  expect(recovered).toHaveBeenLastCalledWith(reopened);
   await vi.advanceTimersByTimeAsync(0);
-  expect(ports.transmit).toHaveBeenCalledTimes(2);
+  expect(sent).toEqual(["op-1", "op-2"]);
   await scheduler.dispose();
 });
 
@@ -298,7 +515,7 @@ test("a frozen old binding cannot block a new binding after draft-preserving clo
   scheduler.activateBinding(b.binding);
   scheduler.edit(b, "1"); scheduler.durable(b, "1");
   await scheduler.flushDocument(b);
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(vi.mocked(ports.transmit).mock.calls.length).toBeGreaterThan(before);
   await scheduler.dispose();
 });
@@ -309,10 +526,10 @@ test("changing binding ignores an old authentication response and continues the 
   vi.mocked(ports.transmit).mockReturnValueOnce(new Promise((done) => { resolve = done; })).mockResolvedValueOnce({ status: "idle" });
   scheduler.activateBinding(a.binding);
   scheduler.resume();
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   scheduler.activateBinding(b.binding);
   resolve({ status: "auth_required" });
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.authRequired).not.toHaveBeenCalled();
   expect(ports.transmit).toHaveBeenCalledTimes(2);
   await scheduler.dispose();
@@ -353,7 +570,7 @@ test("closing an unqueued composition draft does not block another document", as
   expect(ports.transmit).not.toHaveBeenCalled();
   scheduler.edit(b, "1"); scheduler.durable(b, "1");
   await scheduler.flushDocument(b);
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.queue).toHaveBeenLastCalledWith(b, "1");
   expect(ports.transmit).toHaveBeenCalledOnce();
   await scheduler.dispose();
@@ -396,7 +613,7 @@ test("stale queue during IME composition retries only after the latest stable ch
   let reject!: (error: Error) => void;
   vi.mocked(ports.queue).mockReturnValueOnce(new Promise((_resolve, fail) => { reject = fail; }));
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
-  await vi.advanceTimersByTimeAsync(750);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.queue).toHaveBeenCalledExactlyOnceWith(a, "1");
   scheduler.composition(a, true);
   scheduler.edit(a, "2"); scheduler.durable(a, "2");
@@ -433,7 +650,7 @@ test("timer-triggered queue failure does not retry in a tight loop", async () =>
   const { ports, scheduler } = setup();
   vi.mocked(ports.queue).mockRejectedValue(new Error("disk"));
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
-  await vi.advanceTimersByTimeAsync(750);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.queue).toHaveBeenCalledOnce();
   await vi.advanceTimersByTimeAsync(10_000);
   expect(ports.queue).toHaveBeenCalledOnce();
@@ -447,7 +664,7 @@ test("a transient queue storage failure retries the durable generation without a
   vi.mocked(ports.queue).mockRejectedValueOnce("Storage");
   scheduler.activateBinding(a.binding);
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
-  await vi.advanceTimersByTimeAsync(750);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.queue).toHaveBeenCalledTimes(1);
   expect(ports.failed).toHaveBeenCalledOnce();
   await vi.advanceTimersByTimeAsync(999);
@@ -464,12 +681,12 @@ test("a transient queue storage failure pauses for composition and resumes after
   vi.mocked(ports.queue).mockRejectedValueOnce("Storage");
   scheduler.activateBinding(a.binding);
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
-  await vi.advanceTimersByTimeAsync(750);
+  await vi.advanceTimersByTimeAsync(1000);
   scheduler.composition(a, true);
   await vi.advanceTimersByTimeAsync(5_000);
   expect(ports.queue).toHaveBeenCalledOnce();
   scheduler.composition(a, false);
-  await vi.advanceTimersByTimeAsync(750);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.queue).toHaveBeenCalledTimes(2);
   await scheduler.dispose();
 });
@@ -479,7 +696,7 @@ test("repeated queue storage failures use bounded backoff rather than a tight lo
   vi.mocked(ports.queue).mockRejectedValueOnce("Storage").mockRejectedValueOnce("Storage");
   scheduler.activateBinding(a.binding);
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
-  await vi.advanceTimersByTimeAsync(750);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.queue).toHaveBeenCalledTimes(1);
   await vi.advanceTimersByTimeAsync(1000);
   expect(ports.queue).toHaveBeenCalledTimes(2);
@@ -495,7 +712,7 @@ test("closing after a transient queue failure cancels its scheduled retry", asyn
   vi.mocked(ports.queue).mockRejectedValueOnce("Storage");
   scheduler.activateBinding(a.binding);
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
-  await vi.advanceTimersByTimeAsync(750);
+  await vi.advanceTimersByTimeAsync(1000);
   await scheduler.deactivatePreservingDraft(a, async () => {});
   await vi.advanceTimersByTimeAsync(60_000);
   expect(ports.queue).toHaveBeenCalledOnce();
@@ -518,7 +735,7 @@ test("explicit sync retries a failed durable queue without waiting for its timer
   vi.mocked(ports.queue).mockRejectedValueOnce("Storage");
   scheduler.activateBinding(a.binding);
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
-  await vi.advanceTimersByTimeAsync(750);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.queue).toHaveBeenCalledOnce();
   await scheduler.syncNow(a);
   expect(ports.queue).toHaveBeenCalledTimes(2);
@@ -535,7 +752,7 @@ test("explicit sync expedites a network retry without clearing an authentication
     .mockResolvedValueOnce({ status: "idle" });
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
   await scheduler.flushDocument(a);
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.transmit).toHaveBeenCalledOnce();
   await scheduler.syncNow(a);
   await vi.advanceTimersByTimeAsync(0);
@@ -553,7 +770,7 @@ test("explicit sync rejects an owner whose binding changes while flushing", asyn
   const syncing = scheduler.syncNow(a);
   scheduler.activateBinding(b.binding);
   await expect(syncing).rejects.toThrow("stale_registration");
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.transmit).toHaveBeenCalledOnce();
   await scheduler.dispose();
 });
@@ -617,7 +834,7 @@ test("successful queue reports its scope after Storage failure and subsequent su
   Object.assign(ports, { queueRecovered: recovered, queueStorageFailed: failed });
   vi.mocked(ports.queue).mockRejectedValueOnce("Storage");
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
-  await vi.advanceTimersByTimeAsync(750);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(failed).toHaveBeenCalledExactlyOnceWith(a);
   expect(vi.mocked(ports.failed).mock.calls[0][0]).toBeInstanceOf(QueueStorageError);
   expect(recovered).not.toHaveBeenCalled();
@@ -635,7 +852,7 @@ test("reopening a failed draft reports queue success for its new session", async
   Object.assign(ports, { queueRecovered: recovered });
   vi.mocked(ports.queue).mockRejectedValueOnce("Storage");
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
-  await vi.advanceTimersByTimeAsync(750);
+  await vi.advanceTimersByTimeAsync(1000);
   await scheduler.deactivatePreservingDraft(a, async () => {});
   const reopened = { ...a, editSessionId: "reopened" };
   scheduler.openSession(reopened);
@@ -652,7 +869,7 @@ test("idle after ack_pending retires only the identified receipt without assumin
   scheduler.activateBinding(a.binding);
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
   await scheduler.flushDocument(a);
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   const internal = scheduler as unknown as { operations: Map<string, unknown> };
   expect(internal.operations.size).toBe(1);
   expect(retired).not.toHaveBeenCalled();
@@ -679,6 +896,7 @@ test("unidentified ack_pending and authentication failure do not retire an opera
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
   await scheduler.flushDocument(a);
   await vi.advanceTimersByTimeAsync(1000);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(retired).not.toHaveBeenCalled();
   expect(ports.authRequired).toHaveBeenCalledExactlyOnceWith("auth_required");
   scheduler.acknowledge(a, { operationId: "op-a-1", documentId: "a", generation: "1" }, true);
@@ -694,7 +912,7 @@ test.each(["auth_required", "gateway_auth_required"] as const)("%s with an opera
   scheduler.activateBinding(a.binding);
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
   await scheduler.flushDocument(a);
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.authRequired).toHaveBeenCalledExactlyOnceWith(status);
   expect(retired).not.toHaveBeenCalled();
   scheduler.resume();
@@ -795,7 +1013,7 @@ test("terminal non-commit results release only their resolved operation", async 
   vi.mocked(ports.transmit).mockResolvedValueOnce({ status: "conflict", operationId: "op-a-1" });
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
   await scheduler.flushDocument(a);
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(internal.operations.size).toBe(0);
   await scheduler.dispose();
 });
@@ -807,7 +1025,7 @@ test("composition that begins before a scheduled network call prevents the call"
   await vi.advanceTimersByTimeAsync(0);
   expect(ports.transmit).not.toHaveBeenCalled();
   scheduler.composition(a, false);
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.transmit).toHaveBeenCalledOnce();
   await scheduler.dispose();
 });
@@ -820,11 +1038,11 @@ test("composition end waits for the latest checkpoint and refreshes the queued g
   scheduler.edit(a, "2");
   scheduler.composition(a, false);
   await vi.advanceTimersByTimeAsync(1000);
-  expect(ports.transmit).toHaveBeenCalledTimes(1);
+  expect(ports.transmit).not.toHaveBeenCalled();
   scheduler.durable(a, "2");
   await vi.advanceTimersByTimeAsync(0);
   expect(ports.queue).toHaveBeenLastCalledWith(a, "2");
-  expect(ports.transmit).toHaveBeenCalledTimes(2);
+  expect(ports.transmit).toHaveBeenCalledTimes(1);
   await scheduler.dispose();
 });
 
@@ -835,7 +1053,7 @@ test("resuming drains terminal operations until the outbox is idle", async () =>
     .mockResolvedValueOnce({ status: "abandoned", operationId: "op-2" })
     .mockResolvedValueOnce({ status: "idle" });
   scheduler.resume();
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.transmit).toHaveBeenCalledTimes(3);
   await scheduler.dispose();
 });
@@ -844,6 +1062,7 @@ test.each(["pending", "offline", "ack_pending"] as const)("%s retries with backo
   const { ports, scheduler } = setup();
   vi.mocked(ports.transmit).mockResolvedValueOnce({ status }).mockResolvedValueOnce({ status: "idle" });
   scheduler.resume();
+  await vi.advanceTimersByTimeAsync(1000);
   await vi.advanceTimersByTimeAsync(999);
   expect(ports.transmit).toHaveBeenCalledOnce();
   await vi.advanceTimersByTimeAsync(1);
@@ -859,6 +1078,7 @@ test("repeated pending results use increasing backoff and manual retry is immedi
     .mockResolvedValueOnce({ status: "pending" })
     .mockResolvedValueOnce({ status: "idle" });
   scheduler.resume();
+  await vi.advanceTimersByTimeAsync(1000);
   await vi.advanceTimersByTimeAsync(1000);
   expect(ports.transmit).toHaveBeenCalledTimes(2);
   await vi.advanceTimersByTimeAsync(1999);
@@ -899,7 +1119,7 @@ test.each(["needs_review", "auth_required", "gateway_auth_required"] as const)("
   const { ports, scheduler } = setup();
   vi.mocked(ports.transmit).mockResolvedValueOnce({ status }).mockResolvedValueOnce({ status: "idle" });
   scheduler.resume();
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.transmit).toHaveBeenCalledOnce();
   scheduler.kick();
   await vi.advanceTimersByTimeAsync(60_000);
@@ -913,7 +1133,7 @@ test.each(["needs_review", "auth_required", "gateway_auth_required"] as const)("
 test("kick requests a worker pass when no stop or retry is pending", async () => {
   const { ports, scheduler } = setup();
   scheduler.kick();
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.transmit).toHaveBeenCalledOnce();
   await scheduler.dispose();
 });
@@ -922,7 +1142,7 @@ test("kick does not bypass a pending retry backoff", async () => {
   const { ports, scheduler } = setup();
   vi.mocked(ports.transmit).mockResolvedValueOnce({ status: "ack_pending" }).mockResolvedValueOnce({ status: "idle" });
   scheduler.resume();
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   scheduler.kick();
   await vi.advanceTimersByTimeAsync(999);
   expect(ports.transmit).toHaveBeenCalledOnce();
@@ -954,7 +1174,7 @@ test("an authentication result arriving after scheduler disposal is ignored", as
   let resolve!: (result: { status: "auth_required" }) => void;
   vi.mocked(ports.transmit).mockReturnValueOnce(new Promise((done) => { resolve = done; }));
   scheduler.resume();
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(1000);
   await scheduler.dispose();
   resolve({ status: "auth_required" });
   await vi.advanceTimersByTimeAsync(0);
@@ -979,12 +1199,14 @@ test("transmission is single flight and a later queued generation triggers anoth
   let finish!: () => void;
   vi.mocked(ports.transmit).mockReturnValueOnce(new Promise<{ status: "idle" }>((resolve) => { finish = () => resolve({ status: "idle" }); }));
   scheduler.edit(a, "1"); scheduler.durable(a, "1");
-  await scheduler.flushDocument(a);
+  await scheduler.syncNow(a);
   scheduler.edit(b, "1"); scheduler.durable(b, "1");
   await scheduler.flushDocument(b);
   expect(ports.transmit).toHaveBeenCalledTimes(1);
   finish();
-  await vi.advanceTimersByTimeAsync(0);
+  await vi.advanceTimersByTimeAsync(999);
+  expect(ports.transmit).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(1);
   expect(ports.transmit).toHaveBeenCalledTimes(2);
   await scheduler.dispose();
 });
@@ -997,7 +1219,7 @@ test("composition prevents queuing even when a checkpoint is durable", async () 
   expect(ports.queue).not.toHaveBeenCalled();
   expect(ports.transmit).not.toHaveBeenCalled();
   scheduler.composition(a, false);
-  await vi.advanceTimersByTimeAsync(750);
+  await vi.advanceTimersByTimeAsync(1000);
   expect(ports.queue).toHaveBeenCalledExactlyOnceWith(a, "1");
   expect(ports.transmit).toHaveBeenCalledOnce();
   await scheduler.dispose();

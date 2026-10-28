@@ -282,10 +282,10 @@ function App() {
         const original = { ...request, document_id: session.documentId };
         const saved = session.mode === "fixture" ? await saveDocument(original) : await saveWorkspaceDocument(original);
         if (saved.edit_session_id !== request.edit_session_id || saved.generation !== request.generation) throw new Error("저장 응답이 현재 편집 요청과 일치하지 않습니다.");
-        if (session.scope) {
-          try { scheduler.durable(session.scope, saved.generation); }
-          catch (cause) { setConnectionError(String(cause)); }
-        }
+        try {
+          if (session.scope) scheduler.durable(session.scope, saved.generation);
+          else scheduler.unscopedDurable(saved.edit_session_id, saved.generation);
+        } catch (cause) { setConnectionError(String(cause)); }
         return saved;
       },
       closeDocument: async (request) => {
@@ -338,17 +338,17 @@ function App() {
       },
       edited: (_id, sessionId, generation) => {
         const scope = sessionModes.current.get(sessionId)?.scope;
-        if (scope) {
-          try { scheduler.edit(scope, generation); syncRevision.current++; setSyncStatus("서버 반영 대기"); }
-          catch (cause) { setConnectionError(String(cause)); }
-        }
+        try {
+          if (scope) { scheduler.edit(scope, generation); syncRevision.current++; setSyncStatus("서버 반영 대기"); }
+          else scheduler.unscopedEdit(sessionId, generation);
+        } catch (cause) { setConnectionError(String(cause)); }
       },
       compositionChanged: (_id, sessionId, active) => {
         const scope = sessionModes.current.get(sessionId)?.scope;
-        if (scope) {
-          try { scheduler.composition(scope, active); }
-          catch (cause) { setConnectionError(String(cause)); }
-        }
+        try {
+          if (scope) scheduler.composition(scope, active);
+          else scheduler.inputComposition(active);
+        } catch (cause) { setConnectionError(String(cause)); }
       },
       opened: (_id, sessionId, generation, localDraft) => {
         const scope = sessionModes.current.get(sessionId)?.scope;

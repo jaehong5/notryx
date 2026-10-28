@@ -137,6 +137,18 @@ def main():
         evidence["tests"].append("actual editor input saves LF and retains BOM, Korean, emoji, combining marks and unknown syntax")
         evidence["input_scope"] = "WebKit send_keys dropped non-BMP emoji; Korean/combining keys and emoji insertText were tested separately. Physical IME remains untested."
 
+        before_idle = checkpoint("unicode")
+        idle_text = "\nidle save 합성 입력"
+        idle_started = time.monotonic()
+        js("const view=document.querySelector('.cm-content').cmTile.root.view; view.dispatch({changes:{from:view.state.doc.length,insert:arguments[0]}})", idle_text)
+        time.sleep(0.4)
+        idle_sample = checkpoint("unicode")
+        assert time.monotonic() - idle_started < 1.0, "environment could not inspect the idle checkpoint within one second"
+        assert idle_sample == before_idle, "idle checkpoint was committed before the one-second delay"
+        idle_saved = wait(lambda: (row if (row := checkpoint("unicode")) and row[0] == before_idle[0] + 1 else None), seconds=30)
+        assert idle_saved[1] == before_idle[1] + idle_text.encode()
+        evidence["tests"].append("an idle edit is not checkpointed at 400ms and its exact bytes become durable after the one-second delay")
+
         open_document("mixed")
         js("const view=document.querySelector('.cm-content').cmTile.root.view; view.dispatch({changes:{from:view.state.doc.length,insert:'혼합 입력😀'}})")
         wait(lambda: checkpoint("mixed") is not None)
@@ -145,16 +157,27 @@ def main():
 
         open_document("welcome")
         with ThreadPoolExecutor(max_workers=1) as executor:
+            continuous_started = time.monotonic()
+            js("const view=document.querySelector('.cm-content').cmTile.root.view; window.__notryxContinuousFirst=performance.now(); view.dispatch({changes:{from:0,to:1,insert:'b'}})")
             continuous = executor.submit(js, """
               const done=arguments[arguments.length-1];
               const view=document.querySelector('.cm-content').cmTile.root.view;
-              let n=0;
+              let n=1;
+              let last=window.__notryxContinuousFirst, maxGap=0;
+              delete window.__notryxContinuousFirst;
               const timer=setInterval(() => {
+                const now=performance.now();
+                maxGap=Math.max(maxGap,now-last);
+                last=now;
                 view.dispatch({changes:{from:0,to:1,insert:n%2?'a':'b'}});
-                if(++n===40){clearInterval(timer);done(n);}
-              },50);
+                if(++n===80){clearInterval(timer);done({edits:n,maxGap});}
+              },200);
             """, asynchronous=True)
-            deadline = time.monotonic() + 1.8
+            time.sleep(0.4)
+            early_checkpoint = checkpoint("welcome")
+            assert time.monotonic() - continuous_started < 1.0, "environment could not inspect the early checkpoint within one second"
+            assert early_checkpoint is None, "continuous edits were checkpointed before the one-second idle delay"
+            deadline = time.monotonic() + 14.5
             during_typing = None
             while time.monotonic() < deadline and not continuous.done():
                 during_typing = checkpoint("welcome")
@@ -162,9 +185,10 @@ def main():
                     break
                 time.sleep(0.02)
             assert during_typing and not continuous.done(), "continuous input delayed persistence until typing stopped"
-            assert continuous.result() == 40
-        wait(lambda: checkpoint("welcome")[0] == 40)
-        evidence["tests"].append("continuous 50ms edits commit while typing; final generation 40 becomes durable")
+            result = continuous.result()
+            assert result["edits"] == 80 and result["maxGap"] < 1000, "continuous input had a one-second pause"
+        wait(lambda: (row := checkpoint("welcome")) and row[0] == 80)
+        evidence["tests"].append("continuous 200ms edits commit while typing; final generation 80 becomes durable")
 
         durable_before_reload = checkpoint("welcome")
         previous_owner = native("m0_renderer_session")
@@ -193,9 +217,9 @@ def main():
 
         resumed_text = "재로드 후 편집\n"
         js("const view=document.querySelector('.cm-content').cmTile.root.view; view.dispatch({changes:{from:view.state.doc.length,insert:arguments[0]}})", resumed_text)
-        wait(lambda: checkpoint("welcome")[0] == 41)
+        wait(lambda: checkpoint("welcome")[0] == 81)
         assert checkpoint("welcome")[1] == durable_before_reload[1] + resumed_text.encode()
-        evidence["tests"].append("reload restores generation 40 bytes, changes the renderer owner, rejects old open/save/close requests and resumes editing at generation 41")
+        evidence["tests"].append("reload restores generation 80 bytes, changes the renderer owner, rejects old open/save/close requests and resumes editing at generation 81")
 
         validation_session = native("m0_open", {"request": {"document_id": "100k-b", "renderer_session_id": current_owner}})
         evidence["source_rejections"] = []

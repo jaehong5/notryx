@@ -85,8 +85,14 @@ export class AutoTransmit {
   private requiresReview = false;
   private stopped = false;
   private activeBinding?: string;
+  private quietUntil = 0;
+  private quietTimer?: ReturnType<typeof setTimeout>;
+  private inputComposing = false;
+  private unscopedPending?: { sessionId: string; generation: bigint };
+  private inputRevision = 0;
+  private manualTransmission = false;
 
-  constructor(private ports: AutoTransmitPorts) {}
+  constructor(private ports: AutoTransmitPorts) { this.input(); }
 
   openSession(scope: TransmitScope): void {
     if (this.stopped) throw new Error("scheduler_stopped");
@@ -103,6 +109,8 @@ export class AutoTransmit {
     const previous = this.activeBinding;
     this.activeBinding = binding;
     if (previous !== undefined) {
+      this.inputComposing = false;
+      this.input();
       for (const [identity, state] of this.documents) {
         if (!state.active && state.scope.binding === previous) this.documents.delete(identity);
       }
@@ -126,8 +134,8 @@ export class AutoTransmit {
     state.latest = restored;
     state.durable = restored;
     if (restored === 0n) return;
-    state.firstPendingAt = Date.now();
-    state.lastEditAt = Date.now();
+    state.firstPendingAt = performance.now();
+    state.lastEditAt = performance.now();
     try {
       await this.enqueue(state);
     } catch (error) {
@@ -139,10 +147,40 @@ export class AutoTransmit {
     const state = this.document(scope);
     const next = number(generation);
     if (next <= state.latest) throw new Error("stale_generation");
+    this.input();
     state.latest = next;
-    state.firstPendingAt ??= Date.now();
-    state.lastEditAt = Date.now();
+    state.firstPendingAt ??= performance.now();
+    state.lastEditAt = performance.now();
     this.schedule(state);
+  }
+
+  input(): void {
+    if (this.stopped) return;
+    this.inputRevision++;
+    this.manualTransmission = false;
+    this.quietUntil = performance.now() + 1000;
+    clearTimeout(this.quietTimer);
+    this.quietTimer = setTimeout(() => {
+      this.quietTimer = undefined;
+      this.startTransmission();
+    }, 1000);
+  }
+
+  unscopedEdit(sessionId: string, generation: string): void {
+    this.input();
+    this.unscopedPending = { sessionId, generation: number(generation) };
+  }
+
+  unscopedDurable(sessionId: string, generation: string): void {
+    if (this.unscopedPending?.sessionId !== sessionId || this.unscopedPending.generation !== number(generation)) return;
+    this.unscopedPending = undefined;
+    this.startTransmission();
+  }
+
+  inputComposition(active: boolean): void {
+    if (this.stopped) return;
+    this.inputComposing = active;
+    if (!active) this.startTransmission();
   }
 
   durable(scope: TransmitScope, generation: string): void {
@@ -236,14 +274,17 @@ export class AutoTransmit {
     if (this.activeBinding !== undefined && scope.binding !== this.activeBinding) throw new Error("stale_registration");
     const state = this.documents.get(key(scope));
     const previousQueued = state?.queued;
+    const revision = this.inputRevision;
     await this.flushDocument(scope);
     if (this.activeBinding !== undefined && scope.binding !== this.activeBinding) throw new Error("stale_registration");
     if (state && !state.active) throw new Error("stale_session");
     if (this.requiresReview || this.stopped) return;
+    if (revision !== this.inputRevision) return;
     clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
     this.retryDelay = 1000;
     if (!this.transmitting && !this.transmitPending && state && previousQueued !== undefined && state.queued > previousQueued) return;
+    this.manualTransmission = true;
     if (!this.transmitting) {
       this.transmitPending = true;
       this.startTransmission();
@@ -255,6 +296,7 @@ export class AutoTransmit {
     for (const state of this.documents.values()) if (state.active) await this.flushDocument(state.scope);
     this.stopped = true;
     clearTimeout(this.retryTimer);
+    clearTimeout(this.quietTimer);
     for (const state of this.documents.values()) clearTimeout(state.timer);
   }
 
@@ -289,13 +331,13 @@ export class AutoTransmit {
   private schedule(state: DocumentState): void {
     clearTimeout(state.timer);
     state.timer = undefined;
-    if (!state.active || state.composing || (this.activeBinding !== undefined && state.scope.binding !== this.activeBinding) || state.durable <= state.queued || state.firstPendingAt === undefined || state.lastEditAt === undefined) return;
-    const deadline = Math.max(Math.min(state.lastEditAt + 750, state.firstPendingAt + 5000), state.queueRetryAt ?? 0);
+    if (!state.active || state.composing || (this.activeBinding !== undefined && state.scope.binding !== this.activeBinding) || state.latest !== state.durable || state.durable <= state.queued || state.firstPendingAt === undefined || state.lastEditAt === undefined) return;
+    const deadline = Math.max(state.lastEditAt + 1000, state.queueRetryAt ?? 0);
     state.timer = setTimeout(() => {
       state.timer = undefined;
       if (this.activeBinding !== undefined && state.scope.binding !== this.activeBinding) return;
       void this.enqueue(state).catch((error) => { if (!staleCheckpoint(error)) this.ports.failed(error); });
-    }, Math.max(0, deadline - Date.now()));
+    }, Math.max(0, deadline - performance.now()));
   }
 
   private enqueue(state: DocumentState): Promise<void> {
@@ -348,7 +390,7 @@ export class AutoTransmit {
       state.pending = undefined;
       state.pendingTarget = undefined;
       if (retryable) {
-        state.queueRetryAt = Date.now() + state.queueRetryDelay;
+        state.queueRetryAt = performance.now() + state.queueRetryDelay;
         state.queueRetryDelay = Math.min(state.queueRetryDelay * 2, 30_000);
       }
       if ((success || retryable || (stale && state.durable > target)) && state.durable > state.queued) this.schedule(state);
@@ -372,9 +414,11 @@ export class AutoTransmit {
   }
 
   private blocked(): boolean {
+    if (this.inputComposing || this.unscopedPending || (!this.manualTransmission && performance.now() < this.quietUntil)) return true;
     return [...this.documents.values()].some((state) => {
       if (this.activeBinding !== undefined && state.scope.binding !== this.activeBinding) return false;
       if (state.active && state.composing) return true;
+      if (state.active && (state.latest !== state.durable || state.latest > state.queued)) return true;
       if (state.awaitingComposition && state.latest === state.durable && state.durable === state.queued) {
         state.awaitingComposition = false;
         if (!state.active) this.documents.delete(key(state.scope));
@@ -403,6 +447,7 @@ export class AutoTransmit {
       if (binding !== this.activeBinding) { this.transmitPending = true; return; }
       if (result.status === "idle") {
         this.retryDelay = 1000;
+        this.manualTransmission = false;
         for (const [id, operation] of this.operations) {
           if (operation.binding === binding && operation.awaitingIdle) {
             this.operations.delete(id);
@@ -412,11 +457,13 @@ export class AutoTransmit {
         return;
       }
       if (result.status === "needs_review") {
+        this.manualTransmission = false;
         this.requiresReview = true;
         this.transmitPending = false;
         return;
       }
       if (result.status === "auth_required" || result.status === "gateway_auth_required") {
+        this.manualTransmission = false;
         if (result.operationId) {
           const operation = this.operations.get(result.operationId);
           if (operation && operation.binding === binding) operation.awaitingIdle = true;
@@ -427,6 +474,7 @@ export class AutoTransmit {
         return;
       }
       if (result.status === "pending" || result.status === "offline" || result.status === "ack_pending") {
+        this.manualTransmission = false;
         if (result.status === "ack_pending" && result.operationId) {
           const operation = this.operations.get(result.operationId);
           if (operation && operation.binding === binding) operation.awaitingIdle = true;

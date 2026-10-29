@@ -6,6 +6,35 @@ use notryx_server_storage::{FolderStamp, ObservedEntry, StorageError};
 use uuid::Uuid;
 
 impl Workspace {
+    pub(crate) fn destination_parent_identity(
+        &self,
+        path: &str,
+    ) -> Result<notryx_server_storage::FolderIdentity, Error> {
+        let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+        self.files
+            .open_watch_folder(parent)
+            .map(|(_, identity)| identity)
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn verify_destination_parent(
+        &self,
+        path: &str,
+        expected: Option<notryx_server_storage::FolderIdentity>,
+    ) -> Result<(), Error> {
+        let expected = expected.ok_or(Error::ExternalChange)?;
+        let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+        if self
+            .files
+            .watch_folder_matches(parent, expected)
+            .map_err(|_| Error::ExternalChange)?
+        {
+            Ok(())
+        } else {
+            Err(Error::ExternalChange)
+        }
+    }
+
     pub async fn create_node(&mut self, request: CreateNode) -> Result<Receipt, Error> {
         self.create_node_authorized(request, None).await
     }
@@ -65,7 +94,7 @@ impl Workspace {
         self.state
             .validate_admission(request.stream_id, request.operation_seq)
             .await?;
-        if !self.ready {
+        if !self.ready() {
             return Err(Error::RecoveryRequired);
         }
         if self.state.node(request.node_id).await?.is_some() {
@@ -129,6 +158,7 @@ impl Workspace {
         } else {
             (None, None, None)
         };
+        let destination_parent = Some(self.destination_parent_identity(&path)?);
         let intent = CreateIntent {
             operation_id: request.operation_id,
             upload_id: request.upload_id,
@@ -147,6 +177,7 @@ impl Workspace {
                 deleted: false,
             },
             path,
+            destination_parent,
         };
         self.point(Phase::BeforeAdmission)?;
         self.authorize_admission(token, request.stream_id).await?;
@@ -158,8 +189,18 @@ impl Workspace {
             .admit_create(&request, &fingerprint, &Outcome::Pending, Some(&intent))
             .await?;
         self.point(Phase::AfterAdmission)?;
-        self.publish_node(&intent.path, &intent.created)?;
+        self.verify_mutation_root()?;
+        self.verify_destination_parent(&intent.path, intent.destination_parent)?;
+        #[cfg(test)]
+        self.point(Phase::BeforeDestinationOpen)?;
+        self.publish_node(
+            &intent.path,
+            &intent.created,
+            intent.destination_parent.ok_or(Error::ExternalChange)?,
+        )?;
         self.point(Phase::BeforeFinish)?;
+        self.verify_mutation_root()?;
+        self.verify_destination_parent(&intent.path, intent.destination_parent)?;
         let receipt = self.state.finish_create(&intent, true).await?;
         self.point(Phase::AfterFinish)?;
         self.ready = true;
@@ -254,6 +295,14 @@ impl Workspace {
         if self.state.is_quarantined(intent.operation_id).await? {
             return Ok(false);
         }
+        self.verify_mutation_root()?;
+        if self
+            .verify_destination_parent(&intent.path, intent.destination_parent)
+            .is_err()
+        {
+            self.state.quarantine(intent.operation_id, None).await?;
+            return Ok(false);
+        }
         if let Some(hash) = &intent.created.content_hash {
             let bytes = self.files.read_object(hash)?;
             self.put_object(&bytes)?;
@@ -270,6 +319,7 @@ impl Workspace {
                     || intent.created.content_hash.as_deref() != Some(observed.stamp.hash.as_str())
                 {
                     let hash = self.put_object(&observed.bytes)?;
+                    self.verify_mutation_root()?;
                     self.state
                         .quarantine(intent.operation_id, Some(&hash))
                         .await?;
@@ -280,6 +330,7 @@ impl Workspace {
             ObservedEntry::Folder { stamp, empty } => {
                 self.sync_folder(&intent.path, &stamp)?;
                 if intent.created.kind != NodeKind::Folder || !empty {
+                    self.verify_mutation_root()?;
                     self.state.quarantine(intent.operation_id, None).await?;
                     return Ok(false);
                 }
@@ -287,12 +338,25 @@ impl Workspace {
             }
         };
         self.point(Phase::BeforeRecoveryFinish)?;
+        self.verify_mutation_root()?;
+        if self
+            .verify_destination_parent(&intent.path, intent.destination_parent)
+            .is_err()
+        {
+            self.state.quarantine(intent.operation_id, None).await?;
+            return Ok(false);
+        }
         self.state.finish_create(intent, applied).await?;
         self.point(Phase::AfterRecoveryFinish)?;
         Ok(true)
     }
 
-    pub(crate) fn publish_node(&mut self, path: &str, node: &NodeSnapshot) -> Result<(), Error> {
+    pub(crate) fn publish_node(
+        &mut self,
+        path: &str,
+        node: &NodeSnapshot,
+        parent: notryx_server_storage::FolderIdentity,
+    ) -> Result<(), Error> {
         #[cfg(test)]
         {
             let hook = &mut self.hook;
@@ -305,16 +369,17 @@ impl Workspace {
             match node.kind {
                 NodeKind::File => self
                     .files
-                    .create_file_with_hook(
+                    .create_file_guarded_with_hook(
                         path,
                         node.content_hash.as_deref().ok_or(Error::InvalidFormat)?,
+                        parent,
                         &mut point,
                     )
                     .map(|_| ())
                     .map_err(Into::into),
                 NodeKind::Folder => self
                     .files
-                    .create_folder_with_hook(path, &mut point)
+                    .create_folder_guarded_with_hook(path, parent, &mut point)
                     .map(|_| ())
                     .map_err(Into::into),
             }
@@ -323,15 +388,16 @@ impl Workspace {
         match node.kind {
             NodeKind::File => self
                 .files
-                .create_file(
+                .create_file_guarded(
                     path,
                     node.content_hash.as_deref().ok_or(Error::InvalidFormat)?,
+                    parent,
                 )
                 .map(|_| ())
                 .map_err(Into::into),
             NodeKind::Folder => self
                 .files
-                .create_folder(path)
+                .create_folder_guarded(path, parent)
                 .map(|_| ())
                 .map_err(Into::into),
         }

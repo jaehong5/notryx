@@ -450,3 +450,46 @@ async fn startup_rejects_a_pending_operation_followed_by_a_later_receipt() {
         before
     );
 }
+
+#[tokio::test]
+async fn root_blocked_rejects_new_abandon_but_allows_prior_receipt_retry() {
+    let mut rig = Rig::new().await;
+    let request = rig.command(b"existing receipt\n");
+    let receipt = rig.workspace.save(request.clone()).await.unwrap();
+    let head = rig.workspace.state.head_seq().await.unwrap();
+    let notes = rig.dir.path().join("notes");
+    let old_notes = rig.dir.path().join("notes-before-replacement");
+    fs::rename(&notes, &old_notes).unwrap();
+    fs::create_dir(&notes).unwrap();
+    fs::copy(
+        old_notes.join(".mdw-workspace.json"),
+        notes.join(".mdw-workspace.json"),
+    )
+    .unwrap();
+    assert!(rig.workspace.verify_mutation_root().is_err());
+    let new_operation = abandon(&rig, 2, op_id());
+    assert!(
+        rig.workspace
+            .abandon_operation(new_operation)
+            .await
+            .is_err()
+    );
+    assert_eq!(rig.workspace.save(request).await.unwrap(), receipt);
+    assert_eq!(rig.workspace.state.head_seq().await.unwrap(), head);
+    assert_eq!(
+        fs::read(old_notes.join("Document.md")).unwrap(),
+        b"existing receipt\n"
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operation_receipts")
+        .fetch_one(&mut rig.workspace.state.connection)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let last: String =
+        sqlx::query_scalar("SELECT last_seq FROM operation_streams WHERE stream_id=?")
+            .bind(rig.stream.to_string())
+            .fetch_one(&mut rig.workspace.state.connection)
+            .await
+            .unwrap();
+    assert_eq!(last, "1");
+}

@@ -2,7 +2,7 @@ use super::*;
 use notryx_protocol::NodeKind;
 use notryx_server_storage::StorageStage;
 
-async fn conflict(bytes: Option<&[u8]>) -> (Rig, SaveContent) {
+pub(super) async fn conflict(bytes: Option<&[u8]>) -> (Rig, SaveContent) {
     let mut rig = Rig::new().await;
     let request = rig.command(b"proposed bytes\r\n");
     rig.workspace.hook = Some(Box::new(|phase| {
@@ -333,6 +333,7 @@ async fn unresolved_move_adopts_both_paths_without_guessing_identity() {
 #[tokio::test]
 async fn recovery_schema_requires_explicit_migration_and_preserves_legacy_conflict() {
     let (mut rig, request) = conflict(Some(b"external")).await;
+    super::legacy::before_retention(&mut rig.workspace.state.connection).await;
     sqlx::raw_sql("DROP TABLE IF EXISTS uploads; DROP TABLE IF EXISTS recovery_objects; DROP TABLE IF EXISTS recovery_cases; PRAGMA user_version=7;")
         .execute(&mut rig.workspace.state.connection).await.unwrap();
     rig.workspace.close().await.unwrap();
@@ -364,6 +365,7 @@ async fn recovery_schema_requires_explicit_migration_and_preserves_legacy_confli
 #[tokio::test]
 async fn recovery_migration_collision_rolls_back_and_preserves_the_existing_table() {
     let mut rig = Rig::new().await;
+    super::legacy::before_retention(&mut rig.workspace.state.connection).await;
     sqlx::raw_sql("DROP TABLE IF EXISTS uploads; DROP TABLE IF EXISTS recovery_objects; DROP TABLE IF EXISTS recovery_cases; CREATE TABLE recovery_cases(evidence TEXT); INSERT INTO recovery_cases VALUES('preserve'); PRAGMA user_version=7;")
         .execute(&mut rig.workspace.state.connection).await.unwrap();
     rig.workspace.close().await.unwrap();
@@ -817,6 +819,7 @@ async fn startup_rejects_corrupt_retained_objects_even_after_ack() {
 #[tokio::test]
 async fn migration_checks_legacy_observed_objects_before_changing_schema() {
     let (mut rig, _) = conflict(Some(b"external")).await;
+    super::legacy::before_retention(&mut rig.workspace.state.connection).await;
     sqlx::raw_sql("DROP TABLE uploads; DROP TABLE recovery_objects; DROP TABLE recovery_cases; PRAGMA user_version=7;")
         .execute(&mut rig.workspace.state.connection)
         .await
@@ -949,5 +952,436 @@ async fn save_recovery_quarantines_a_replaced_directory_before_admin_resolution(
     assert_eq!(
         rig.workspace.read(current.node_id).await.unwrap().1,
         b"current child"
+    );
+}
+
+#[tokio::test]
+async fn root_blocked_recovery_resolution_keeps_journal_and_evidence() {
+    let (mut rig, request) = conflict(Some(b"external conflicting bytes\n")).await;
+    let detail = rig
+        .workspace
+        .inspect_recovery(request.operation_id)
+        .await
+        .unwrap();
+    let objects: Vec<_> = detail
+        .objects
+        .iter()
+        .map(|hash| (hash.clone(), rig.workspace.files.read_object(hash).unwrap()))
+        .collect();
+    let head = rig.workspace.state.head_seq().await.unwrap();
+    let nodes = rig.workspace.state.all_nodes().await.unwrap();
+    let notes = rig.dir.path().join("notes");
+    let old_notes = rig.dir.path().join("notes-before-replacement");
+    fs::rename(&notes, &old_notes).unwrap();
+    fs::create_dir(&notes).unwrap();
+    fs::copy(
+        old_notes.join(".mdw-workspace.json"),
+        notes.join(".mdw-workspace.json"),
+    )
+    .unwrap();
+    fs::write(notes.join("Document.md"), b"replacement root bytes\n").unwrap();
+    assert!(rig.workspace.verify_mutation_root().is_err());
+    assert!(
+        rig.workspace
+            .resolve_recovery(request.operation_id)
+            .await
+            .is_err()
+    );
+    assert_eq!(rig.workspace.state.head_seq().await.unwrap(), head);
+    assert_eq!(rig.workspace.state.all_nodes().await.unwrap(), nodes);
+    assert_eq!(
+        rig.workspace
+            .inspect_recovery(request.operation_id)
+            .await
+            .unwrap(),
+        detail
+    );
+    assert_eq!(
+        rig.workspace.save(request).await.unwrap().outcome,
+        Outcome::Pending
+    );
+    for (hash, bytes) in objects {
+        assert_eq!(rig.workspace.files.read_object(&hash).unwrap(), bytes);
+    }
+    assert_eq!(
+        fs::read(old_notes.join("Document.md")).unwrap(),
+        b"external conflicting bytes\n"
+    );
+    assert_eq!(
+        fs::read(notes.join("Document.md")).unwrap(),
+        b"replacement root bytes\n"
+    );
+}
+
+#[tokio::test]
+async fn notes_root_replacement_before_recovery_commit_preserves_pending_evidence() {
+    let (mut rig, request) = conflict(Some(b"external conflicting bytes\n")).await;
+    let detail = rig
+        .workspace
+        .inspect_recovery(request.operation_id)
+        .await
+        .unwrap();
+    let head = rig.workspace.state.head_seq().await.unwrap();
+    let nodes = rig.workspace.state.all_nodes().await.unwrap();
+    let notes = rig.dir.path().join("notes");
+    let old_notes = rig.dir.path().join("notes-before-replacement");
+    let hook_notes = notes.clone();
+    let hook_old_notes = old_notes.clone();
+    rig.workspace.hook = Some(Box::new(move |phase| {
+        if phase == Phase::BeforeResolveFinish {
+            fs::rename(&hook_notes, &hook_old_notes).unwrap();
+            fs::create_dir(&hook_notes).unwrap();
+            fs::copy(
+                hook_old_notes.join(".mdw-workspace.json"),
+                hook_notes.join(".mdw-workspace.json"),
+            )
+            .unwrap();
+            fs::write(hook_notes.join("Document.md"), b"replacement root bytes\n").unwrap();
+        }
+        Ok(())
+    }));
+    assert!(
+        rig.workspace
+            .resolve_recovery(request.operation_id)
+            .await
+            .is_err()
+    );
+    assert_eq!(rig.workspace.state.head_seq().await.unwrap(), head);
+    assert_eq!(rig.workspace.state.all_nodes().await.unwrap(), nodes);
+    assert_eq!(
+        rig.workspace
+            .inspect_recovery(request.operation_id)
+            .await
+            .unwrap(),
+        detail
+    );
+    assert_eq!(
+        rig.workspace.save(request.clone()).await.unwrap().outcome,
+        Outcome::Pending
+    );
+    for hash in detail.objects {
+        assert!(rig.workspace.files.read_object(&hash).is_ok());
+    }
+    assert_eq!(
+        fs::read(old_notes.join("Document.md")).unwrap(),
+        b"external conflicting bytes\n"
+    );
+    assert_eq!(
+        fs::read(notes.join("Document.md")).unwrap(),
+        b"replacement root bytes\n"
+    );
+}
+
+#[tokio::test]
+async fn resolved_recovery_retry_does_not_clean_detached_root() {
+    let (mut rig, request) = conflict(Some(b"external conflicting bytes\n")).await;
+    let receipt = rig
+        .workspace
+        .resolve_recovery(request.operation_id)
+        .await
+        .unwrap();
+    let head = rig.workspace.state.head_seq().await.unwrap();
+    let observed = rig.workspace.files.observe("Document.md").unwrap();
+    let object = rig
+        .workspace
+        .files
+        .put_object(b"temporary payload\n")
+        .unwrap();
+    assert!(
+        rig.workspace
+            .files
+            .replace_with_hook("Document.md", &observed.stamp, &object, |stage| {
+                if stage == StorageStage::AfterTemporaryLink {
+                    Err(notryx_server_storage::StorageError::Io)
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+    );
+    let notes = rig.dir.path().join("notes");
+    let old_notes = rig.dir.path().join("notes-before-replacement");
+    let names: Vec<_> = fs::read_dir(&notes)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().starts_with(".mdw-tmp-"))
+        .collect();
+    assert_eq!(names.len(), 1);
+    let records: Vec<_> = fs::read_dir(rig.dir.path().join("state/temporary"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(records.len(), 1);
+    fs::rename(&notes, &old_notes).unwrap();
+    fs::create_dir(&notes).unwrap();
+    fs::copy(
+        old_notes.join(".mdw-workspace.json"),
+        notes.join(".mdw-workspace.json"),
+    )
+    .unwrap();
+    fs::write(notes.join("Document.md"), b"replacement root bytes\n").unwrap();
+    assert_eq!(
+        rig.workspace
+            .resolve_recovery(request.operation_id)
+            .await
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(rig.workspace.state.head_seq().await.unwrap(), head);
+    assert_eq!(
+        fs::read(old_notes.join(&names[0])).unwrap(),
+        b"temporary payload\n"
+    );
+    assert!(
+        rig.dir
+            .path()
+            .join("state/temporary")
+            .join(&records[0])
+            .is_file()
+    );
+    assert_eq!(
+        fs::read(old_notes.join("Document.md")).unwrap(),
+        b"external conflicting bytes\n"
+    );
+    assert_eq!(
+        fs::read(notes.join("Document.md")).unwrap(),
+        b"replacement root bytes\n"
+    );
+}
+
+#[tokio::test]
+async fn resolved_recovery_retry_finishes_post_commit_cleanup_on_valid_root() {
+    let (mut rig, request) = conflict(Some(b"external conflicting bytes\n")).await;
+    let original_head = rig.workspace.state.head_seq().await.unwrap();
+    rig.workspace.hook = Some(Box::new(|phase| {
+        if phase == Phase::AfterResolveFinish {
+            Err(Error::Storage)
+        } else {
+            Ok(())
+        }
+    }));
+    assert_eq!(
+        rig.workspace.resolve_recovery(request.operation_id).await,
+        Err(Error::Storage)
+    );
+    assert!(!rig.workspace.ready());
+    let detail = rig
+        .workspace
+        .inspect_recovery(request.operation_id)
+        .await
+        .unwrap();
+    assert!(detail.summary.resolved);
+    let head = rig.workspace.state.head_seq().await.unwrap();
+    assert!(head.get() > original_head.get());
+    let prior_receipt = rig.workspace.save(request.clone()).await.unwrap();
+    assert_eq!(prior_receipt.outcome, Outcome::RecoveryConflict);
+    rig.workspace.hook = None;
+    let receipt = rig
+        .workspace
+        .resolve_recovery(request.operation_id)
+        .await
+        .unwrap();
+    assert_eq!(receipt, prior_receipt);
+    assert!(rig.workspace.ready());
+    assert_eq!(rig.workspace.state.head_seq().await.unwrap(), head);
+    assert_eq!(
+        rig.workspace
+            .inspect_recovery(request.operation_id)
+            .await
+            .unwrap(),
+        detail
+    );
+    assert_eq!(
+        fs::read(rig.dir.path().join("notes/Document.md")).unwrap(),
+        b"external conflicting bytes\n"
+    );
+}
+
+#[tokio::test]
+async fn startup_recovery_rejects_root_replacement_before_pending_commit() {
+    let mut rig = Rig::new().await;
+    let request = rig.command(b"proposed during startup\n");
+    let initial_bytes = fs::read(rig.dir.path().join("notes/Document.md")).unwrap();
+    let head = rig.workspace.state.head_seq().await.unwrap();
+    rig.workspace.hook = Some(Box::new(|phase| {
+        if phase == Phase::AfterAdmission {
+            Err(Error::Storage)
+        } else {
+            Ok(())
+        }
+    }));
+    assert_eq!(
+        rig.workspace.save(request.clone()).await,
+        Err(Error::Storage)
+    );
+    rig.workspace.close().await.unwrap();
+    let notes = rig.dir.path().join("notes");
+    let old_notes = rig.dir.path().join("notes-before-replacement");
+    let mut startup = Workspace::load(&notes, &rig.dir.path().join("state"))
+        .await
+        .unwrap();
+    let hook_notes = notes.clone();
+    let hook_old_notes = old_notes.clone();
+    startup.hook = Some(Box::new(move |phase| {
+        if phase == Phase::BeforeRecoveryFinish {
+            fs::rename(&hook_notes, &hook_old_notes).unwrap();
+            fs::create_dir(&hook_notes).unwrap();
+            fs::copy(
+                hook_old_notes.join(".mdw-workspace.json"),
+                hook_notes.join(".mdw-workspace.json"),
+            )
+            .unwrap();
+            fs::write(hook_notes.join("Document.md"), b"replacement root bytes\n").unwrap();
+        }
+        Ok(())
+    }));
+    assert!(startup.recover().await.is_err());
+    assert!(!startup.ready());
+    assert_eq!(startup.state.head_seq().await.unwrap(), head);
+    assert_eq!(
+        startup.save(request.clone()).await.unwrap().outcome,
+        Outcome::Pending
+    );
+    assert_eq!(
+        startup.files.read_object(&request.content_hash).unwrap(),
+        request.bytes
+    );
+    assert_eq!(
+        fs::read(old_notes.join("Document.md")).unwrap(),
+        initial_bytes
+    );
+    assert_eq!(
+        fs::read(notes.join("Document.md")).unwrap(),
+        b"replacement root bytes\n"
+    );
+    startup.hook = None;
+    startup.close().await.unwrap();
+    fs::rename(&notes, rig.dir.path().join("replacement-preserved")).unwrap();
+    fs::rename(&old_notes, &notes).unwrap();
+    let mut reopened = Workspace::open(&notes, &rig.dir.path().join("state"))
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened.save(request).await.unwrap().outcome,
+        Outcome::NotApplied
+    );
+    assert_eq!(reopened.state.head_seq().await.unwrap(), head);
+}
+
+#[tokio::test]
+async fn startup_recovery_rejects_root_replacement_without_pending_intent() {
+    let mut rig = Rig::new().await;
+    let head = rig.workspace.state.head_seq().await.unwrap();
+    rig.workspace.close().await.unwrap();
+    let notes = rig.dir.path().join("notes");
+    let old_notes = rig.dir.path().join("notes-before-replacement");
+    let mut startup = Workspace::load(&notes, &rig.dir.path().join("state"))
+        .await
+        .unwrap();
+    fs::rename(&notes, &old_notes).unwrap();
+    fs::create_dir(&notes).unwrap();
+    fs::copy(
+        old_notes.join(".mdw-workspace.json"),
+        notes.join(".mdw-workspace.json"),
+    )
+    .unwrap();
+    fs::write(notes.join("Document.md"), b"replacement root bytes\n").unwrap();
+    assert!(startup.recover().await.is_err());
+    assert!(!startup.ready());
+    assert_eq!(startup.state.head_seq().await.unwrap(), head);
+    assert_eq!(
+        fs::read(old_notes.join("Document.md")).unwrap(),
+        b"\xef\xbb\xbf# Original\r\n\r\n<!-- untouched -->\r\n"
+    );
+    assert_eq!(
+        fs::read(notes.join("Document.md")).unwrap(),
+        b"replacement root bytes\n"
+    );
+}
+
+#[tokio::test]
+async fn root_replacement_before_recovery_cleanup_keeps_receipt_and_blocks_ready() {
+    let (mut rig, request) = conflict(Some(b"external conflicting bytes\n")).await;
+    let head = rig.workspace.state.head_seq().await.unwrap();
+    let observed = rig.workspace.files.observe("Document.md").unwrap();
+    let object = rig
+        .workspace
+        .files
+        .put_object(b"temporary payload\n")
+        .unwrap();
+    assert!(
+        rig.workspace
+            .files
+            .replace_with_hook("Document.md", &observed.stamp, &object, |stage| {
+                if stage == StorageStage::AfterTemporaryLink {
+                    Err(notryx_server_storage::StorageError::Io)
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+    );
+    let notes = rig.dir.path().join("notes");
+    let old_notes = rig.dir.path().join("notes-before-replacement");
+    let names: Vec<_> = fs::read_dir(&notes)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().starts_with(".mdw-tmp-"))
+        .collect();
+    assert_eq!(names.len(), 1);
+    let hook_notes = notes.clone();
+    let hook_old_notes = old_notes.clone();
+    rig.workspace.hook = Some(Box::new(move |phase| {
+        if phase == Phase::BeforeRecoveryCleanup {
+            fs::rename(&hook_notes, &hook_old_notes).unwrap();
+            fs::create_dir(&hook_notes).unwrap();
+            fs::copy(
+                hook_old_notes.join(".mdw-workspace.json"),
+                hook_notes.join(".mdw-workspace.json"),
+            )
+            .unwrap();
+            fs::write(hook_notes.join("Document.md"), b"replacement root bytes\n").unwrap();
+        }
+        Ok(())
+    }));
+    assert!(
+        rig.workspace
+            .resolve_recovery(request.operation_id)
+            .await
+            .is_err()
+    );
+    assert!(!rig.workspace.ready());
+    let resolved_head = rig.workspace.state.head_seq().await.unwrap();
+    assert!(resolved_head.get() > head.get());
+    let detail = rig
+        .workspace
+        .inspect_recovery(request.operation_id)
+        .await
+        .unwrap();
+    assert!(detail.summary.resolved);
+    let receipt = rig.workspace.save(request.clone()).await.unwrap();
+    assert_eq!(receipt.outcome, Outcome::RecoveryConflict);
+    assert_eq!(
+        rig.workspace
+            .resolve_recovery(request.operation_id)
+            .await
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(rig.workspace.state.head_seq().await.unwrap(), resolved_head);
+    for hash in detail.objects {
+        assert!(rig.workspace.files.read_object(&hash).is_ok());
+    }
+    assert_eq!(
+        fs::read(old_notes.join(&names[0])).unwrap(),
+        b"temporary payload\n"
+    );
+    assert_eq!(
+        fs::read(old_notes.join("Document.md")).unwrap(),
+        b"external conflicting bytes\n"
+    );
+    assert_eq!(
+        fs::read(notes.join("Document.md")).unwrap(),
+        b"replacement root bytes\n"
     );
 }

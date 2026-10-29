@@ -16,6 +16,36 @@ pub struct FolderStamp {
     pub changed_nanoseconds: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FolderIdentity {
+    pub device: u64,
+    pub inode: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchUnsupportedReason {
+    Symlink,
+    HardLink,
+    SpecialFile,
+    InvalidName,
+}
+
+pub enum WatchChild<'a> {
+    Candidate {
+        name: &'a str,
+        is_directory: bool,
+    },
+    Unsupported {
+        name: &'a [u8],
+        reason: WatchUnsupportedReason,
+    },
+}
+
+pub struct WatchChildrenScan {
+    pub has_unsupported: bool,
+    pub coverage_complete: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObservedEntry {
     Absent,
@@ -30,12 +60,46 @@ pub(super) struct NoteParent {
 }
 
 impl NoteParent {
+    pub(super) fn verify_identity(
+        &self,
+        expected: Option<FolderIdentity>,
+    ) -> Result<(), StorageError> {
+        if let Some(expected) = expected
+            && folder_identity(&self.directory)? != expected
+        {
+            return Err(StorageError::Changed);
+        }
+        Ok(())
+    }
+
     pub fn revalidate(&self, store: &FileStore) -> Result<(), StorageError> {
         let current = store.open_note_folder(&self.path)?;
         if identity(&current)? != identity(&self.directory)? {
             return Err(StorageError::Changed);
         }
         Ok(())
+    }
+
+    pub(super) fn unique_name_stamp(&self, store: &FileStore) -> Result<FolderStamp, StorageError> {
+        let before = folder_stamp(&self.directory)?;
+        let expected = notryx_domain::mutation::normalized_name_key(&self.name);
+        let mut count = 0;
+        for entry in Dir::read_from(&self.directory).map_err(errno)? {
+            let entry = entry.map_err(errno)?;
+            if let Ok(name) = entry.file_name().to_str()
+                && notryx_domain::mutation::normalized_name_key(name) == expected
+            {
+                count += 1;
+            }
+        }
+        if count != 1 {
+            return Err(StorageError::Changed);
+        }
+        if folder_stamp(&self.directory)? != before {
+            return Err(StorageError::Changed);
+        }
+        self.revalidate(store)?;
+        Ok(before)
     }
 
     fn ensure_available(&self) -> Result<(), StorageError> {
@@ -118,7 +182,76 @@ fn child_names(directory: &File) -> Result<Vec<String>, StorageError> {
     Ok(names)
 }
 
+fn validate_watch_folder_path(path: &str) -> Result<(), StorageError> {
+    if path.len() > 1024 {
+        return Err(StorageError::InvalidName);
+    }
+    if !path.is_empty() {
+        for segment in path.split('/') {
+            let key = notryx_domain::mutation::normalized_name_key(segment);
+            if matches!(key.as_str(), ".git" | ".obsidian" | "node_modules")
+                || key.starts_with(".mdw-")
+            {
+                return Err(StorageError::InvalidName);
+            }
+            validate_name(segment)?;
+        }
+    }
+    Ok(())
+}
+
+fn folder_identity(file: &File) -> Result<FolderIdentity, StorageError> {
+    let stamp = folder_stamp(file)?;
+    Ok(FolderIdentity {
+        device: stamp.device,
+        inode: stamp.inode,
+    })
+}
+
 impl FileStore {
+    pub fn verify_watch_child_folder(
+        &self,
+        path: &str,
+        expected_parent: FolderIdentity,
+        expected_child: FolderIdentity,
+    ) -> Result<(), StorageError> {
+        self.verify_workspace_marker()?;
+        let parent = self.note_parent(path)?;
+        parent.verify_identity(Some(expected_parent))?;
+        parent.unique_name_stamp(self)?;
+        let (_, child) = self.open_watch_folder(path)?;
+        if child != expected_child {
+            return Err(StorageError::Changed);
+        }
+        parent.revalidate(self)?;
+        self.verify_workspace_marker()?;
+        Ok(())
+    }
+
+    pub fn open_watch_folder(&self, path: &str) -> Result<(File, FolderIdentity), StorageError> {
+        validate_watch_folder_path(path)?;
+        self.verify_workspace_marker()?;
+        let folder = self.open_note_folder(path)?;
+        let expected = folder_identity(&folder)?;
+        if !self.watch_folder_matches(path, expected)? {
+            return Err(StorageError::Changed);
+        }
+        Ok((folder, expected))
+    }
+
+    pub fn watch_folder_matches(
+        &self,
+        path: &str,
+        expected: FolderIdentity,
+    ) -> Result<bool, StorageError> {
+        validate_watch_folder_path(path)?;
+        self.verify_workspace_marker()?;
+        let current = self.open_note_folder(path)?;
+        let matches = folder_identity(&current)? == expected;
+        self.verify_workspace_marker()?;
+        Ok(matches)
+    }
+
     pub fn list_children(&self, path: &str) -> Result<Vec<String>, StorageError> {
         self.list_children_inner(path, &mut |_| Ok(()))
     }
@@ -185,16 +318,27 @@ impl FileStore {
     }
 
     pub fn create_file(&self, path: &str, hash: &str) -> Result<FileStamp, StorageError> {
-        self.create_file_inner(path, hash, &mut |_| Ok(()))
+        self.create_file_inner(path, hash, None, &mut |_| Ok(()))
+    }
+
+    pub fn create_file_guarded(
+        &self,
+        path: &str,
+        hash: &str,
+        parent: FolderIdentity,
+    ) -> Result<FileStamp, StorageError> {
+        self.create_file_inner(path, hash, Some(parent), &mut |_| Ok(()))
     }
 
     fn create_file_inner(
         &self,
         path: &str,
         hash: &str,
+        expected_parent: Option<FolderIdentity>,
         hook: &mut impl FnMut(StorageStage) -> Result<(), StorageError>,
     ) -> Result<FileStamp, StorageError> {
         let parent = self.note_parent(path)?;
+        parent.verify_identity(expected_parent)?;
         parent.ensure_available()?;
         let (object, _) = self.verified_object(hash)?;
         let mut temporary = AnonymousFile::new(&parent.directory)?;
@@ -227,15 +371,25 @@ impl FileStore {
     }
 
     pub fn create_folder(&self, path: &str) -> Result<FolderStamp, StorageError> {
-        self.create_folder_inner(path, &mut |_| Ok(()))
+        self.create_folder_inner(path, None, &mut |_| Ok(()))
+    }
+
+    pub fn create_folder_guarded(
+        &self,
+        path: &str,
+        parent: FolderIdentity,
+    ) -> Result<FolderStamp, StorageError> {
+        self.create_folder_inner(path, Some(parent), &mut |_| Ok(()))
     }
 
     fn create_folder_inner(
         &self,
         path: &str,
+        expected_parent: Option<FolderIdentity>,
         hook: &mut impl FnMut(StorageStage) -> Result<(), StorageError>,
     ) -> Result<FolderStamp, StorageError> {
         let parent = self.note_parent(path)?;
+        parent.verify_identity(expected_parent)?;
         parent.ensure_available()?;
         hook(StorageStage::BeforeTargetRevalidation)?;
         parent.revalidate(self)?;
@@ -313,15 +467,36 @@ impl FileStore {
     }
 
     pub fn sync_absent(&self, path: &str) -> Result<(), StorageError> {
-        self.sync_absent_inner(path, &mut |_| Ok(()))
+        self.sync_absent_inner(path, None, &mut |_| Ok(()))
+    }
+
+    pub fn verify_absent_guarded(
+        &self,
+        path: &str,
+        expected: FolderIdentity,
+    ) -> Result<(), StorageError> {
+        self.verify_workspace_marker()?;
+        let parent = self.note_parent(path)?;
+        parent.verify_identity(Some(expected))?;
+        if !parent.absent()? {
+            return Err(StorageError::Changed);
+        }
+        parent.revalidate(self)?;
+        if !parent.absent()? {
+            return Err(StorageError::Changed);
+        }
+        self.verify_workspace_marker()?;
+        Ok(())
     }
 
     fn sync_absent_inner(
         &self,
         path: &str,
+        expected: Option<FolderIdentity>,
         hook: &mut impl FnMut(StorageStage) -> Result<(), StorageError>,
     ) -> Result<(), StorageError> {
         let parent = self.note_parent(path)?;
+        parent.verify_identity(expected)?;
         if !parent.absent()? {
             return Err(StorageError::Changed);
         }
@@ -384,7 +559,18 @@ impl FileStore {
         hash: &str,
         mut hook: impl FnMut(StorageStage) -> Result<(), StorageError>,
     ) -> Result<FileStamp, StorageError> {
-        self.create_file_inner(path, hash, &mut hook)
+        self.create_file_inner(path, hash, None, &mut hook)
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn create_file_guarded_with_hook(
+        &self,
+        path: &str,
+        hash: &str,
+        parent: FolderIdentity,
+        mut hook: impl FnMut(StorageStage) -> Result<(), StorageError>,
+    ) -> Result<FileStamp, StorageError> {
+        self.create_file_inner(path, hash, Some(parent), &mut hook)
     }
 
     #[cfg(feature = "test-hooks")]
@@ -393,7 +579,17 @@ impl FileStore {
         path: &str,
         mut hook: impl FnMut(StorageStage) -> Result<(), StorageError>,
     ) -> Result<FolderStamp, StorageError> {
-        self.create_folder_inner(path, &mut hook)
+        self.create_folder_inner(path, None, &mut hook)
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn create_folder_guarded_with_hook(
+        &self,
+        path: &str,
+        parent: FolderIdentity,
+        mut hook: impl FnMut(StorageStage) -> Result<(), StorageError>,
+    ) -> Result<FolderStamp, StorageError> {
+        self.create_folder_inner(path, Some(parent), &mut hook)
     }
 
     #[cfg(feature = "test-hooks")]
@@ -402,7 +598,7 @@ impl FileStore {
         path: &str,
         mut hook: impl FnMut(StorageStage) -> Result<(), StorageError>,
     ) -> Result<(), StorageError> {
-        self.sync_absent_inner(path, &mut hook)
+        self.sync_absent_inner(path, None, &mut hook)
     }
 
     #[cfg(feature = "test-hooks")]
@@ -413,5 +609,141 @@ impl FileStore {
         mut hook: impl FnMut(StorageStage) -> Result<(), StorageError>,
     ) -> Result<(), StorageError> {
         self.sync_folder_inner(path, expected, &mut hook)
+    }
+}
+
+impl super::ObservationReader {
+    pub fn observe_watch_child_folder(
+        &self,
+        path: &str,
+        expected_parent: FolderIdentity,
+    ) -> Result<FolderIdentity, StorageError> {
+        self.files.verify_workspace_marker()?;
+        let parent = self.files.note_parent(path)?;
+        parent.verify_identity(Some(expected_parent))?;
+        parent.unique_name_stamp(&self.files)?;
+        let folder = open_at(
+            &parent.directory,
+            &parent.name,
+            OFlags::RDONLY | OFlags::DIRECTORY,
+            Mode::empty(),
+        )?;
+        let stamp = folder_stamp(&folder)?;
+        folder.sync_all().map_err(io)?;
+        parent.directory.sync_all().map_err(io)?;
+        if folder_stamp(&folder)? != stamp {
+            return Err(StorageError::Changed);
+        }
+        let child = FolderIdentity {
+            device: stamp.device,
+            inode: stamp.inode,
+        };
+        self.files
+            .verify_watch_child_folder(path, expected_parent, child)?;
+        parent.revalidate(&self.files)?;
+        Ok(child)
+    }
+
+    pub fn sync_absent_guarded(
+        &self,
+        path: &str,
+        expected: FolderIdentity,
+    ) -> Result<(), StorageError> {
+        self.files.verify_workspace_marker()?;
+        self.files
+            .sync_absent_inner(path, Some(expected), &mut |_| Ok(()))?;
+        self.files.verify_workspace_marker()?;
+        Ok(())
+    }
+    pub fn stream_watch_children(
+        &self,
+        path: &str,
+        expected: FolderIdentity,
+        mut visit: impl FnMut(WatchChild<'_>) -> Result<(), StorageError>,
+    ) -> Result<WatchChildrenScan, StorageError> {
+        let (directory, identity) = self.files.open_watch_folder(path)?;
+        if identity != expected {
+            return Err(StorageError::Changed);
+        }
+        let before = folder_stamp(&directory)?;
+        let mut has_unsupported = false;
+        let mut coverage_complete = true;
+        for entry in Dir::read_from(&directory).map_err(errno)? {
+            let entry = entry.map_err(errno)?;
+            let bytes = entry.file_name().to_bytes();
+            if matches!(bytes, b"." | b"..") {
+                continue;
+            }
+            let name = match std::str::from_utf8(bytes) {
+                Ok(name) => name,
+                Err(_) => {
+                    has_unsupported = true;
+                    visit(WatchChild::Unsupported {
+                        name: bytes,
+                        reason: WatchUnsupportedReason::InvalidName,
+                    })?;
+                    continue;
+                }
+            };
+            let key = notryx_domain::mutation::normalized_name_key(name);
+            if matches!(key.as_str(), ".git" | ".obsidian" | "node_modules")
+                || key.starts_with(".mdw-")
+            {
+                continue;
+            }
+            if validate_name(name).is_err() {
+                has_unsupported = true;
+                visit(WatchChild::Unsupported {
+                    name: bytes,
+                    reason: WatchUnsupportedReason::InvalidName,
+                })?;
+                continue;
+            }
+            let stat =
+                match fs::statat(&directory, entry.file_name(), fs::AtFlags::SYMLINK_NOFOLLOW) {
+                    Ok(stat) => stat,
+                    Err(_) => {
+                        coverage_complete = false;
+                        continue;
+                    }
+                };
+            let kind = fs::FileType::from_raw_mode(stat.st_mode);
+            let is_directory = kind == fs::FileType::Directory;
+            if !is_directory && (kind != fs::FileType::RegularFile || stat.st_nlink != 1) {
+                has_unsupported = true;
+                let reason = if kind == fs::FileType::Symlink {
+                    WatchUnsupportedReason::Symlink
+                } else if kind == fs::FileType::RegularFile {
+                    WatchUnsupportedReason::HardLink
+                } else {
+                    WatchUnsupportedReason::SpecialFile
+                };
+                visit(WatchChild::Unsupported {
+                    name: bytes,
+                    reason,
+                })?;
+                continue;
+            }
+            match visit(WatchChild::Candidate { name, is_directory }) {
+                Ok(()) => {}
+                Err(StorageError::InvalidName) => {
+                    has_unsupported = true;
+                    visit(WatchChild::Unsupported {
+                        name: bytes,
+                        reason: WatchUnsupportedReason::InvalidName,
+                    })?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if folder_stamp(&directory)? != before
+            || !self.files.watch_folder_matches(path, expected)?
+        {
+            return Err(StorageError::Changed);
+        }
+        Ok(WatchChildrenScan {
+            has_unsupported,
+            coverage_complete,
+        })
     }
 }

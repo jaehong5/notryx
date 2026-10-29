@@ -18,7 +18,10 @@ pub const MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
 
 mod file_metadata;
 mod tree;
-pub use tree::{FolderStamp, ObservedEntry};
+pub use tree::{
+    FolderIdentity, FolderStamp, ObservedEntry, WatchChild, WatchChildrenScan,
+    WatchUnsupportedReason,
+};
 mod move_entry;
 pub use move_entry::EntryStamp;
 mod remove_entry;
@@ -73,6 +76,8 @@ pub struct ObservedFile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageStage {
+    #[cfg(feature = "test-hooks")]
+    BeforeExternalObjectVerify,
     BeforeUploadPublish,
     AfterUploadPublish,
     BeforeUploadFileSync,
@@ -133,11 +138,251 @@ struct Marker {
 }
 
 pub struct FileStore {
+    notes_path: PathBuf,
     notes: File,
     state: File,
     objects: File,
     lease: Arc<StoreLease>,
     workspace_id: WorkspaceId,
+}
+
+pub struct ObservationReader {
+    files: FileStore,
+}
+
+pub struct PreparedObservation {
+    stamp: FileStamp,
+    parent_stamp: Option<FolderStamp>,
+    object: Option<PreparedObject>,
+    lease: Arc<StoreLease>,
+}
+
+impl PreparedObservation {
+    pub fn object_was_missing(&self) -> bool {
+        matches!(
+            &self.object,
+            Some(PreparedObject {
+                source: PreparedObjectSource::Unlinked(_),
+                ..
+            })
+        )
+    }
+}
+
+pub struct PublishedObservation {
+    stamp: FileStamp,
+    _object: Option<File>,
+    _lease: Arc<StoreLease>,
+}
+
+impl PublishedObservation {
+    pub fn stamp(&self) -> &FileStamp {
+        &self.stamp
+    }
+}
+
+struct PreparedObject {
+    hash: String,
+    source: PreparedObjectSource,
+}
+
+enum PreparedObjectSource {
+    Existing(FileStamp),
+    Unlinked(AnonymousFile),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationPreparationError {
+    Previous(StorageError),
+    Proposed(StorageError),
+    Source(StorageError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObservationPreparationFailure {
+    pub error: ObservationPreparationError,
+    pub proposed_object_missing: bool,
+}
+
+impl From<ObservationPreparationError> for ObservationPreparationFailure {
+    fn from(error: ObservationPreparationError) -> Self {
+        Self {
+            error,
+            proposed_object_missing: false,
+        }
+    }
+}
+
+impl ObservationReader {
+    pub fn observe(&self, path: &str) -> Result<ObservedFile, StorageError> {
+        self.files.observe(path)
+    }
+
+    pub fn observe_object(&self, hash: &str) -> Result<FileStamp, StorageError> {
+        validate_hash(hash)?;
+        hash_observed(&open_regular(&self.files.objects, hash)?)
+    }
+
+    pub fn prepare(
+        &self,
+        path: &str,
+        observed: ObservedFile,
+        previous_hash: &str,
+        previous_size: u64,
+    ) -> Result<PreparedObservation, ObservationPreparationFailure> {
+        self.prepare_inner(
+            path,
+            observed,
+            Some((previous_hash, previous_size)),
+            &mut |_| Ok(()),
+        )
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn prepare_with_hook(
+        &self,
+        path: &str,
+        observed: ObservedFile,
+        previous_hash: &str,
+        previous_size: u64,
+        mut hook: impl FnMut(StorageStage) -> Result<(), StorageError>,
+    ) -> Result<PreparedObservation, ObservationPreparationFailure> {
+        self.prepare_inner(
+            path,
+            observed,
+            Some((previous_hash, previous_size)),
+            &mut hook,
+        )
+    }
+
+    pub fn prepare_new(
+        &self,
+        path: &str,
+        observed: ObservedFile,
+    ) -> Result<PreparedObservation, ObservationPreparationFailure> {
+        self.prepare_new_inner(path, observed, &mut |_| Ok(()))
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn prepare_new_with_hook(
+        &self,
+        path: &str,
+        observed: ObservedFile,
+        mut hook: impl FnMut(StorageStage) -> Result<(), StorageError>,
+    ) -> Result<PreparedObservation, ObservationPreparationFailure> {
+        self.prepare_new_inner(path, observed, &mut hook)
+    }
+
+    fn prepare_new_inner(
+        &self,
+        path: &str,
+        observed: ObservedFile,
+        hook: &mut impl FnMut(StorageStage) -> Result<(), StorageError>,
+    ) -> Result<PreparedObservation, ObservationPreparationFailure> {
+        let parent = self
+            .files
+            .note_parent(path)
+            .map_err(ObservationPreparationError::Source)?;
+        let parent_stamp = parent
+            .unique_name_stamp(&self.files)
+            .map_err(ObservationPreparationError::Source)?;
+        let mut prepared = self.prepare_inner(path, observed, None, hook)?;
+        prepared.parent_stamp = Some(parent_stamp);
+        Ok(prepared)
+    }
+
+    fn prepare_inner(
+        &self,
+        path: &str,
+        observed: ObservedFile,
+        previous: Option<(&str, u64)>,
+        hook: &mut impl FnMut(StorageStage) -> Result<(), StorageError>,
+    ) -> Result<PreparedObservation, ObservationPreparationFailure> {
+        let mut proposed_object_missing = false;
+        self.prepare_inner_tracked(path, observed, previous, hook, &mut proposed_object_missing)
+            .map_err(|error| ObservationPreparationFailure {
+                error,
+                proposed_object_missing,
+            })
+    }
+
+    fn prepare_inner_tracked(
+        &self,
+        path: &str,
+        observed: ObservedFile,
+        previous: Option<(&str, u64)>,
+        hook: &mut impl FnMut(StorageStage) -> Result<(), StorageError>,
+        proposed_object_missing: &mut bool,
+    ) -> Result<PreparedObservation, ObservationPreparationError> {
+        use ObservationPreparationError::{Previous, Proposed, Source};
+        let stamp = observed.stamp;
+        if observed.bytes.len() as u64 != stamp.size || content_hash(&observed.bytes) != stamp.hash
+        {
+            return Err(Source(StorageError::Changed));
+        }
+        let object =
+            if previous.is_some_and(|(hash, size)| stamp.hash == hash && stamp.size == size) {
+                None
+            } else {
+                if let Some((previous_hash, previous_size)) = previous {
+                    #[cfg(feature = "test-hooks")]
+                    hook(StorageStage::BeforeExternalObjectVerify).map_err(Previous)?;
+                    let (_, old) = self
+                        .files
+                        .verified_object(previous_hash)
+                        .map_err(Previous)?;
+                    if old.size != previous_size {
+                        return Err(Previous(StorageError::ChecksumMismatch));
+                    }
+                }
+                #[cfg(feature = "test-hooks")]
+                if previous.is_none() {
+                    hook(StorageStage::BeforeExternalObjectVerify).map_err(Proposed)?;
+                }
+                let source = match self.files.verified_object(&stamp.hash) {
+                    Ok((file, old)) => {
+                        file.sync_all().map_err(|error| Proposed(io(error)))?;
+                        self.files
+                            .objects
+                            .sync_all()
+                            .map_err(|error| Proposed(io(error)))?;
+                        PreparedObjectSource::Existing(old)
+                    }
+                    Err(StorageError::NotFound) => {
+                        *proposed_object_missing = true;
+                        let mut temporary =
+                            AnonymousFile::new(&self.files.objects).map_err(Proposed)?;
+                        temporary
+                            .file
+                            .write_all(&observed.bytes)
+                            .map_err(|error| Proposed(io(error)))?;
+                        fs::fchmod(&temporary.file, Mode::RUSR)
+                            .map_err(|error| Proposed(errno(error)))?;
+                        hook(StorageStage::BeforeObjectFileSync).map_err(Proposed)?;
+                        temporary
+                            .file
+                            .sync_all()
+                            .map_err(|error| Proposed(io(error)))?;
+                        hook(StorageStage::AfterObjectFileSync).map_err(Proposed)?;
+                        PreparedObjectSource::Unlinked(temporary)
+                    }
+                    Err(error) => return Err(Proposed(error)),
+                };
+                self.files
+                    .sync_observed_inner(path, &stamp, hook)
+                    .map_err(Source)?;
+                Some(PreparedObject {
+                    hash: stamp.hash.clone(),
+                    source,
+                })
+            };
+        Ok(PreparedObservation {
+            stamp,
+            parent_stamp: None,
+            object,
+            lease: Arc::clone(&self.files.lease),
+        })
+    }
 }
 
 struct StoreLease {
@@ -189,12 +434,16 @@ fn open_at(
         .map_err(errno)
 }
 
-fn open_root(path: &Path) -> Result<File, StorageError> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
+fn absolute_root(path: &Path) -> Result<PathBuf, StorageError> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
     } else {
-        std::env::current_dir().map_err(io)?.join(path)
-    };
+        Ok(std::env::current_dir().map_err(io)?.join(path))
+    }
+}
+
+fn open_root(path: &Path) -> Result<File, StorageError> {
+    let absolute = absolute_root(path)?;
     let root = File::open("/").map_err(io)?;
     open_at(
         &root,
@@ -396,7 +645,8 @@ impl FileStore {
         state: impl AsRef<Path>,
         workspace_id: WorkspaceId,
     ) -> Result<Self, StorageError> {
-        let notes = open_root(notes.as_ref())?;
+        let notes_path = absolute_root(notes.as_ref())?;
+        let notes = open_root(&notes_path)?;
         let state = open_root(state.as_ref())?;
         distinct_roots(&notes, &state)?;
         ensure_entries(&notes, &[])?;
@@ -433,6 +683,7 @@ impl FileStore {
         file.sync_all().map_err(io)?;
         notes.sync_all().map_err(io)?;
         let store = Self {
+            notes_path,
             notes,
             state,
             objects,
@@ -447,7 +698,8 @@ impl FileStore {
     }
 
     pub fn open(notes: impl AsRef<Path>, state: impl AsRef<Path>) -> Result<Self, StorageError> {
-        let notes = open_root(notes.as_ref())?;
+        let notes_path = absolute_root(notes.as_ref())?;
+        let notes = open_root(&notes_path)?;
         let state = open_root(state.as_ref())?;
         distinct_roots(&notes, &state)?;
         private_state(&state)?;
@@ -471,6 +723,7 @@ impl FileStore {
             Mode::empty(),
         )?;
         let result = Self {
+            notes_path,
             notes,
             state,
             objects,
@@ -486,6 +739,137 @@ impl FileStore {
 
     pub fn workspace_id(&self) -> WorkspaceId {
         self.workspace_id
+    }
+
+    pub fn verify_workspace_marker(&self) -> Result<(), StorageError> {
+        let current = open_root(&self.notes_path)?;
+        if tree::identity(&current)? != tree::identity(&self.notes)? {
+            return Err(StorageError::Changed);
+        }
+        let file = open_regular(&current, ".mdw-workspace.json")?;
+        let mut bytes = Vec::new();
+        file.take(4097).read_to_end(&mut bytes).map_err(io)?;
+        if bytes.len() > 4096 {
+            return Err(StorageError::InvalidMarker);
+        }
+        let marker: Marker =
+            serde_json::from_slice(&bytes).map_err(|_| StorageError::InvalidMarker)?;
+        if marker.format_version != 1 || marker.workspace_id != self.workspace_id {
+            return Err(StorageError::InvalidMarker);
+        }
+        Ok(())
+    }
+
+    pub fn backup_root_handles(&self) -> Result<(File, File), StorageError> {
+        Ok((
+            self.notes.try_clone().map_err(io)?,
+            self.state.try_clone().map_err(io)?,
+        ))
+    }
+
+    pub fn observation_reader(&self) -> Result<ObservationReader, StorageError> {
+        Ok(ObservationReader {
+            files: Self {
+                notes_path: self.notes_path.clone(),
+                notes: self.notes.try_clone().map_err(io)?,
+                state: self.state.try_clone().map_err(io)?,
+                objects: self.objects.try_clone().map_err(io)?,
+                lease: Arc::clone(&self.lease),
+                workspace_id: self.workspace_id,
+            },
+        })
+    }
+
+    pub fn publish_observation(
+        &self,
+        path: &str,
+        prepared: PreparedObservation,
+    ) -> Result<PublishedObservation, StorageError> {
+        self.publish_observation_inner(path, prepared, &mut |_| Ok(()))
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn publish_observation_with_hook(
+        &self,
+        path: &str,
+        prepared: PreparedObservation,
+        mut hook: impl FnMut(StorageStage) -> Result<(), StorageError>,
+    ) -> Result<PublishedObservation, StorageError> {
+        self.publish_observation_inner(path, prepared, &mut hook)
+    }
+
+    fn verify_observation_metadata(
+        &self,
+        path: &str,
+        stamp: &FileStamp,
+    ) -> Result<(), StorageError> {
+        let parent = self.note_parent(path)?;
+        let source = open_regular(&parent.directory, &parent.name)?;
+        if metadata_stamp(&checked_regular(&source)?, stamp.hash.clone()) != *stamp {
+            return Err(StorageError::Changed);
+        }
+        parent.revalidate(self)
+    }
+
+    fn publish_observation_inner(
+        &self,
+        path: &str,
+        prepared: PreparedObservation,
+        hook: &mut impl FnMut(StorageStage) -> Result<(), StorageError>,
+    ) -> Result<PublishedObservation, StorageError> {
+        if !Arc::ptr_eq(&self.lease, &prepared.lease) {
+            return Err(StorageError::Changed);
+        }
+        self.verify_observation_metadata(path, &prepared.stamp)?;
+        if let Some(expected) = &prepared.parent_stamp {
+            let parent = self.note_parent(path)?;
+            if tree::folder_stamp(&parent.directory)? != *expected {
+                return Err(StorageError::Changed);
+            }
+            parent.revalidate(self)?;
+        }
+        let object = match prepared.object {
+            None => None,
+            Some(PreparedObject {
+                hash,
+                source: PreparedObjectSource::Existing(expected),
+            }) => {
+                let file = open_regular(&self.objects, &hash)?;
+                if metadata_stamp(&checked_regular(&file)?, expected.hash.clone()) != expected {
+                    return Err(StorageError::Changed);
+                }
+                Some(file)
+            }
+            Some(PreparedObject {
+                hash,
+                source: PreparedObjectSource::Unlinked(file),
+            }) => {
+                hook(StorageStage::BeforeObjectPublish)?;
+                match file.publish(&self.objects, &hash) {
+                    Ok(()) => {}
+                    Err(StorageError::AlreadyExists) => return Err(StorageError::Changed),
+                    Err(error) => return Err(error),
+                }
+                hook(StorageStage::AfterObjectPublish)?;
+                hook(StorageStage::BeforeObjectDirectorySync)?;
+                self.objects.sync_all().map_err(io)?;
+                hook(StorageStage::AfterObjectDirectorySync)?;
+                Some(file.file)
+            }
+        };
+        self.verify_observation_metadata(path, &prepared.stamp)?;
+        if let Some(expected) = &prepared.parent_stamp {
+            let parent = self.note_parent(path)?;
+            if tree::folder_stamp(&parent.directory)? != *expected {
+                return Err(StorageError::Changed);
+            }
+            parent.revalidate(self)?;
+        }
+        Ok(PublishedObservation {
+            stamp: prepared.stamp,
+            _object: object,
+            _lease: prepared.lease,
+        })
     }
 
     pub fn observe(&self, name: &str) -> Result<ObservedFile, StorageError> {
@@ -566,6 +950,25 @@ impl FileStore {
 
     pub fn sync_state_dir(&self) -> Result<(), StorageError> {
         self.state.sync_all().map_err(io)
+    }
+
+    pub fn object_file_present(&self, hash: &str) -> Result<bool, StorageError> {
+        validate_hash(hash)?;
+        match open_regular(&self.objects, hash) {
+            Ok(_) => Ok(true),
+            Err(StorageError::NotFound) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn object_matches_observation(
+        &self,
+        hash: &str,
+        expected: &FileStamp,
+    ) -> Result<bool, StorageError> {
+        validate_hash(hash)?;
+        let file = open_regular(&self.objects, hash)?;
+        Ok(metadata_stamp(&checked_regular(&file)?, expected.hash.clone()) == *expected)
     }
 
     fn verified_object(&self, hash: &str) -> Result<(File, FileStamp), StorageError> {

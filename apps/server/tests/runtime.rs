@@ -26,6 +26,7 @@ async fn initialized() -> (tempfile::TempDir, Config) {
         .await
         .unwrap();
     let config = Config {
+        sync: Default::default(),
         server: ServerConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
             admin_socket: directory.path().join("admin.sock"),
@@ -112,6 +113,7 @@ async fn serving_workspace_keeps_health_public_protects_api_and_releases_locks()
 async fn missing_or_corrupt_stores_fail_startup_without_initializing_or_overwriting_files() {
     let directory = tempfile::tempdir().unwrap();
     let config = Config {
+        sync: Default::default(),
         server: ServerConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
             admin_socket: directory.path().join("admin.sock"),

@@ -45,7 +45,15 @@ impl Workspace {
 
     pub async fn resolve_recovery(&mut self, id: OperationId) -> Result<Receipt, Error> {
         let detail = self.state.recovery_detail(id).await?;
-        if !detail.summary.resolved {
+        if detail.summary.resolved {
+            if self.verify_mutation_root().is_err() {
+                return Ok(Receipt {
+                    operation_id: id,
+                    outcome: Outcome::RecoveryConflict,
+                });
+            }
+        } else {
+            self.verify_mutation_root()?;
             self.ready = false;
             if !self.state.is_quarantined(id).await? {
                 return Err(Error::InvalidFormat);
@@ -118,6 +126,7 @@ impl Workspace {
             }
             self.validate_recovery_objects().await?;
             self.point(Phase::BeforeResolveFinish)?;
+            self.verify_mutation_root()?;
             // Directory timestamps can stay unchanged when names change on coarse filesystems.
             for (path, names) in &listings {
                 if self.recovery_listing(path)? != *names {
@@ -129,13 +138,19 @@ impl Workspace {
                     return Err(Error::ExternalChange);
                 }
             }
+            self.verify_mutation_root()?;
             self.state.finish_resolution(id, &changes).await?;
             self.point(Phase::AfterResolveFinish)?;
         }
         self.state.validate_current().await?;
         self.validate_documents().await?;
+        #[cfg(test)]
+        self.point(Phase::BeforeRecoveryCleanup)?;
+        self.verify_mutation_root()?;
         self.cleanup_temporary_files()?;
-        self.ready = self.state.pending().await?.is_empty();
+        let ready = self.state.pending().await?.is_empty();
+        self.verify_mutation_root()?;
+        self.ready = ready;
         Ok(Receipt {
             operation_id: id,
             outcome: Outcome::RecoveryConflict,
@@ -143,6 +158,9 @@ impl Workspace {
     }
 
     pub async fn release_recovery(&mut self, id: OperationId) -> Result<(), Error> {
+        if self.journal_integrity_failed {
+            return Err(Error::RecoveryRequired);
+        }
         self.state.release_recovery(id).await
     }
 

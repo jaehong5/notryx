@@ -56,7 +56,7 @@ impl Workspace {
         self.state
             .validate_admission(request.stream_id, request.operation_seq)
             .await?;
-        if !self.ready {
+        if !self.ready() {
             return Err(Error::RecoveryRequired);
         }
         let Some(before) = self.state.node(request.node_id).await? else {
@@ -166,6 +166,7 @@ impl Workspace {
         proposed.name = request.name.clone();
         proposed.meta_rev = MetaRevision::new(Uuid::new_v4().to_string()).expect("generated UUID");
         proposed.last_change_seq = self.state.next_change_seq().await?;
+        let destination_parent = Some(self.destination_parent_identity(&new_path)?);
         let intent = MoveIntent {
             operation_id: request.operation_id,
             before,
@@ -173,6 +174,7 @@ impl Workspace {
             parents_before,
             old_path,
             new_path,
+            destination_parent,
             source_stamp,
             observed_hashes: Vec::new(),
         };
@@ -183,8 +185,14 @@ impl Workspace {
             .admit_move(&request, &fingerprint, &Outcome::Pending, Some(&intent))
             .await?;
         self.point(Phase::AfterAdmission)?;
+        self.verify_mutation_root()?;
+        self.verify_destination_parent(&intent.new_path, intent.destination_parent)?;
+        #[cfg(test)]
+        self.point(Phase::BeforeDestinationOpen)?;
         self.publish_move(&intent)?;
         self.point(Phase::BeforeFinish)?;
+        self.verify_mutation_root()?;
+        self.verify_destination_parent(&intent.new_path, intent.destination_parent)?;
         let receipt = self.state.finish_move(&intent, true).await?;
         self.point(Phase::AfterFinish)?;
         self.ready = true;
@@ -371,6 +379,14 @@ impl Workspace {
         if self.state.is_quarantined(intent.operation_id).await? {
             return Ok(false);
         }
+        self.verify_mutation_root()?;
+        if self
+            .verify_destination_parent(&intent.new_path, intent.destination_parent)
+            .is_err()
+        {
+            self.state.quarantine_move(intent, Vec::new()).await?;
+            return Ok(false);
+        }
         if let Some(hash) = &intent.before.content_hash {
             let bytes = self.files.read_object(hash)?;
             self.put_object(&bytes)?;
@@ -395,6 +411,14 @@ impl Workspace {
         if let Some(applied) = applied {
             self.sync_move_observed(intent, applied)?;
             self.point(Phase::BeforeRecoveryFinish)?;
+            self.verify_mutation_root()?;
+            if self
+                .verify_destination_parent(&intent.new_path, intent.destination_parent)
+                .is_err()
+            {
+                self.state.quarantine_move(intent, Vec::new()).await?;
+                return Ok(false);
+            }
             self.state.finish_move(intent, applied).await?;
             self.point(Phase::AfterRecoveryFinish)?;
             return Ok(true);
@@ -413,6 +437,7 @@ impl Workspace {
                 ObservedEntry::Absent => {}
             }
         }
+        self.verify_mutation_root()?;
         self.state.quarantine_move(intent, hashes).await?;
         Ok(false)
     }
@@ -421,10 +446,11 @@ impl Workspace {
         #[cfg(test)]
         return self
             .files
-            .move_entry_with_hook(
+            .move_entry_guarded_with_hook(
                 &intent.old_path,
                 &intent.new_path,
                 &intent.source_stamp,
+                intent.destination_parent.ok_or(Error::ExternalChange)?,
                 |stage| {
                     if let Some(hook) = &mut self.hook {
                         hook(Phase::Storage(stage)).map_err(|_| StorageError::Io)?;
@@ -436,7 +462,12 @@ impl Workspace {
             .map_err(Into::into);
         #[cfg(not(test))]
         self.files
-            .move_entry(&intent.old_path, &intent.new_path, &intent.source_stamp)
+            .move_entry_guarded(
+                &intent.old_path,
+                &intent.new_path,
+                &intent.source_stamp,
+                intent.destination_parent.ok_or(Error::ExternalChange)?,
+            )
             .map(|_| ())
             .map_err(Into::into)
     }

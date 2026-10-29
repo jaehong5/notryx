@@ -598,6 +598,7 @@ async fn explicit_schema_eight_migration_preserves_pending_create_and_old_finger
         .await
         .unwrap();
     assert!(!intent.contains("upload_id"));
+    super::legacy::before_retention(&mut rig.workspace.state.connection).await;
     sqlx::raw_sql("DROP TABLE uploads; PRAGMA user_version=8;")
         .execute(&mut rig.workspace.state.connection)
         .await
@@ -621,7 +622,7 @@ async fn explicit_schema_eight_migration_preserves_pending_create_and_old_finger
         .fetch_one(&mut rig.workspace.state.connection)
         .await
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
 }
 
 #[tokio::test]
@@ -639,6 +640,7 @@ async fn schema_nine_migration_failure_keeps_schema_eight_and_pending_intent() {
         rig.workspace.save(request.clone()).await,
         Err(Error::Storage)
     );
+    super::legacy::before_retention(&mut rig.workspace.state.connection).await;
     sqlx::raw_sql("DROP TABLE uploads; CREATE TABLE uploads(evidence TEXT); INSERT INTO uploads VALUES('preserve'); PRAGMA user_version=8;").execute(&mut rig.workspace.state.connection).await.unwrap();
     rig.workspace.close().await.unwrap();
     assert_eq!(
@@ -1074,4 +1076,162 @@ async fn missing_ready_staging_is_storage_failure_without_admission_or_consumpti
         0
     );
     assert!(!rig.dir.path().join("notes/Attachment.bin").exists());
+}
+
+fn replace_notes_root_and_block(rig: &mut Rig) -> std::path::PathBuf {
+    let notes = rig.dir.path().join("notes");
+    let old_notes = rig.dir.path().join("notes-before-replacement");
+    fs::rename(&notes, &old_notes).unwrap();
+    fs::create_dir(&notes).unwrap();
+    fs::copy(
+        old_notes.join(".mdw-workspace.json"),
+        notes.join(".mdw-workspace.json"),
+    )
+    .unwrap();
+    assert!(rig.workspace.verify_mutation_root().is_err());
+    old_notes
+}
+
+#[tokio::test]
+async fn root_blocked_rejects_new_upload_without_creating_reservation() {
+    let mut rig = Rig::new().await;
+    let time = now();
+    let device = device(&mut rig.workspace, time).await;
+    let head = rig.workspace.state.head_seq().await.unwrap();
+    let old_notes = replace_notes_root_and_block(&mut rig);
+    assert!(
+        rig.workspace
+            .begin_upload(&device.device_token, digest(b"upload"), Some(6), time)
+            .await
+            .is_err()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM uploads")
+        .fetch_one(&mut rig.workspace.state.connection)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(rig.workspace.state.head_seq().await.unwrap(), head);
+    assert_eq!(
+        fs::read(old_notes.join("Document.md")).unwrap(),
+        b"\xef\xbb\xbf# Original\r\n\r\n<!-- untouched -->\r\n"
+    );
+}
+
+#[tokio::test]
+async fn root_blocked_rejects_upload_completion_without_advancing_head() {
+    let mut rig = Rig::new().await;
+    let time = now();
+    let device = device(&mut rig.workspace, time).await;
+    let mut grant = rig
+        .workspace
+        .begin_upload(&device.device_token, digest(b"upload"), Some(6), time)
+        .await
+        .unwrap();
+    grant.writer.write_chunk(b"upload").unwrap();
+    let sealed = grant.writer.seal().unwrap();
+    let head = rig.workspace.state.head_seq().await.unwrap();
+    let old_notes = replace_notes_root_and_block(&mut rig);
+    assert!(
+        rig.workspace
+            .finish_upload(&device.device_token, grant.upload_id, sealed, time)
+            .await
+            .is_err()
+    );
+    assert_eq!(rig.workspace.state.head_seq().await.unwrap(), head);
+    assert_eq!(
+        fs::read(old_notes.join("Document.md")).unwrap(),
+        b"\xef\xbb\xbf# Original\r\n\r\n<!-- untouched -->\r\n"
+    );
+    let ready: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM uploads WHERE status='ready'")
+        .fetch_one(&mut rig.workspace.state.connection)
+        .await
+        .unwrap();
+    assert_eq!(ready, 0);
+}
+
+#[tokio::test]
+async fn upload_create_not_applied_survives_two_restarts_and_can_be_reused() {
+    let mut rig = Rig::new().await;
+    let time = now();
+    let device = device(&mut rig.workspace, time).await;
+    let bytes = b"durable upload source\n";
+    let upload = uploaded(&mut rig.workspace, &device.device_token, bytes, time).await;
+    let request = create(&rig, &device, upload.upload_id);
+    let head = rig.workspace.state.head_seq().await.unwrap();
+    rig.workspace.hook = Some(Box::new(|phase| {
+        if phase == Phase::AfterAdmission {
+            Err(Error::Storage)
+        } else {
+            Ok(())
+        }
+    }));
+    assert_eq!(
+        rig.workspace
+            .create_node_authorized(request.clone(), Some(&device.device_token))
+            .await,
+        Err(Error::Storage)
+    );
+    assert!(!rig.dir.path().join("notes/Attachment.bin").exists());
+    rig.workspace.close().await.unwrap();
+
+    let notes = rig.dir.path().join("notes");
+    let state = rig.dir.path().join("state");
+    let mut first_restart = Workspace::open(&notes, &state).await.unwrap();
+    let result = first_restart
+        .create_node_authorized(request.clone(), Some(&device.device_token))
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, Outcome::NotApplied);
+    let retained = first_restart
+        .state
+        .upload(upload.upload_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.status, "ready");
+    assert_eq!(retained.pending_operation_id, None);
+    first_restart
+        .files
+        .validate_upload(&retained.stored().unwrap())
+        .unwrap();
+    assert_eq!(first_restart.state.head_seq().await.unwrap(), head);
+    first_restart.close().await.unwrap();
+
+    let mut second_restart = Workspace::open(&notes, &state).await.unwrap();
+    assert_eq!(
+        second_restart
+            .create_node_authorized(request.clone(), Some(&device.device_token))
+            .await
+            .unwrap(),
+        result
+    );
+    let retained = second_restart
+        .state
+        .upload(upload.upload_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.status, "ready");
+    assert_eq!(retained.pending_operation_id, None);
+    second_restart
+        .files
+        .validate_upload(&retained.stored().unwrap())
+        .unwrap();
+    let mut retry = request;
+    retry.operation_seq = 2;
+    retry.operation_id = op_id();
+    retry.node_id = node_id();
+    assert!(matches!(
+        second_restart
+            .create_node_authorized(retry, Some(&device.device_token))
+            .await
+            .unwrap()
+            .outcome,
+        Outcome::Created(_)
+    ));
+    assert_eq!(fs::read(notes.join("Attachment.bin")).unwrap(), bytes);
+    assert_eq!(
+        fs::read(notes.join("Document.md")).unwrap(),
+        b"\xef\xbb\xbf# Original\r\n\r\n<!-- untouched -->\r\n"
+    );
 }

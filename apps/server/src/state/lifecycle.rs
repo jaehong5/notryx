@@ -20,10 +20,105 @@ pub(crate) struct LifecycleIntent {
     pub proposed: NodeSnapshot,
     pub parent_before: NodeSnapshot,
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_parent: Option<notryx_server_storage::FolderIdentity>,
     pub action: LifecycleAction,
 }
 
 impl State {
+    pub async fn finish_external_delete(
+        &mut self,
+        before: &NodeSnapshot,
+        proposed: &NodeSnapshot,
+        parent_before: &NodeSnapshot,
+        watch_generation: &std::sync::atomic::AtomicU64,
+        expected_watch_generation: u64,
+        #[cfg(test)] pause: Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    ) -> Result<(), Error> {
+        let mut parent = parent_before.clone();
+        parent.children_generation = parent
+            .children_generation
+            .checked_add(1)
+            .ok_or(Error::InvalidFormat)?;
+        parent.last_change_seq = proposed.last_change_seq;
+        let seq = proposed.last_change_seq.get();
+        let mut tx = self.connection.begin().await.map_err(db_error)?;
+        if expected_watch_generation & 1 != 0
+            || watch_generation.load(std::sync::atomic::Ordering::Acquire)
+                != expected_watch_generation
+        {
+            tx.rollback().await.map_err(db_error)?;
+            return Err(Error::ExternalChange);
+        }
+        let changed = if before.kind == notryx_protocol::NodeKind::Folder {
+            sqlx::query("UPDATE nodes SET meta_rev=?,last_change_seq=?,deleted=1 WHERE node_id=? AND kind='folder' AND deleted=0 AND parent_id=? AND name=? AND meta_rev=? AND content_rev IS NULL AND content_hash IS NULL AND size IS NULL AND children_generation=? AND last_change_seq=? AND NOT EXISTS(SELECT 1 FROM nodes child WHERE child.parent_id=nodes.node_id AND child.deleted=0)")
+                .bind(proposed.meta_rev.as_str()).bind(seq.to_string()).bind(before.node_id.to_string())
+                .bind(before.parent_id.map(|id| id.to_string())).bind(&before.name).bind(before.meta_rev.as_str())
+                .bind(before.children_generation.to_string()).bind(before.last_change_seq.get().to_string())
+                .execute(&mut *tx).await.map_err(db_error)?.rows_affected()
+        } else {
+            sqlx::query("UPDATE nodes SET content_rev=?,meta_rev=?,last_change_seq=?,deleted=1 WHERE node_id=? AND kind='file' AND deleted=0 AND parent_id=? AND name=? AND meta_rev=? AND content_rev=? AND content_hash=? AND size=? AND last_change_seq=?")
+                .bind(proposed.content_rev.as_ref().map(|value| value.as_str()))
+                .bind(proposed.meta_rev.as_str()).bind(seq.to_string()).bind(before.node_id.to_string())
+                .bind(before.parent_id.map(|id| id.to_string())).bind(&before.name).bind(before.meta_rev.as_str())
+                .bind(before.content_rev.as_ref().map(|value| value.as_str())).bind(&before.content_hash)
+                .bind(before.size.map(|size| size.to_string())).bind(before.last_change_seq.get().to_string())
+                .execute(&mut *tx).await.map_err(db_error)?.rows_affected()
+        };
+        if changed != 1 {
+            tx.rollback().await.map_err(db_error)?;
+            return Err(Error::ExternalChange);
+        }
+        let changed = sqlx::query("UPDATE nodes SET children_generation=?,last_change_seq=? WHERE node_id=? AND deleted=0 AND kind='folder' AND meta_rev=? AND children_generation=? AND last_change_seq=?")
+            .bind(parent.children_generation.to_string()).bind(seq.to_string()).bind(parent.node_id.to_string())
+            .bind(parent_before.meta_rev.as_str()).bind(parent_before.children_generation.to_string()).bind(parent_before.last_change_seq.get().to_string())
+            .execute(&mut *tx).await.map_err(db_error)?.rows_affected();
+        if changed != 1 {
+            tx.rollback().await.map_err(db_error)?;
+            return Err(Error::ExternalChange);
+        }
+        sqlx::query("INSERT INTO change_sets(seq,operation_id,committed_at) VALUES(?,NULL,NULL)")
+            .bind(seq.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error)?;
+        for entry in [proposed, &parent] {
+            sqlx::query("INSERT INTO node_changes VALUES(?,?,?)")
+                .bind(seq.to_string())
+                .bind(entry.node_id.to_string())
+                .bind(encode(&node_post_state(entry))?)
+                .execute(&mut *tx)
+                .await
+                .map_err(db_error)?;
+        }
+        let changed =
+            sqlx::query("UPDATE workspaces SET head_seq=? WHERE singleton=1 AND head_seq=?")
+                .bind(seq.to_string())
+                .bind(seq.checked_sub(1).ok_or(Error::InvalidFormat)?.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(db_error)?
+                .rows_affected();
+        if changed != 1 {
+            tx.rollback().await.map_err(db_error)?;
+            return Err(Error::ExternalChange);
+        }
+        #[cfg(test)]
+        if let Some((entered, release)) = pause {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
+        if watch_generation.load(std::sync::atomic::Ordering::Acquire) != expected_watch_generation
+        {
+            tx.rollback().await.map_err(db_error)?;
+            return Err(Error::ExternalChange);
+        }
+        tx.commit().await.map_err(db_error)
+    }
+
     pub async fn admit_lifecycle(
         &mut self,
         stream_id: Uuid,
@@ -86,7 +181,7 @@ impl State {
             if changed != 1 {
                 return Err(Error::InvalidFormat);
             }
-            sqlx::query("INSERT INTO change_sets VALUES(?,?)")
+            sqlx::query("INSERT INTO change_sets(seq,operation_id,committed_at) VALUES(?,?,NULL)")
                 .bind(&seq)
                 .bind(intent.operation_id.to_string())
                 .execute(&mut *tx)

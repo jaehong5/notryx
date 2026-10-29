@@ -210,7 +210,7 @@ async fn new_store_requires_schema_seven_for_tombstones() {
         .fetch_one(&mut rig.workspace.state.connection)
         .await
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
 }
 
 #[tokio::test]

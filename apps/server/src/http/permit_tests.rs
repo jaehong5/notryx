@@ -71,13 +71,20 @@ async fn cancelled_http_writes_retain_body_permits_until_coordinator_drops_queue
             write::put_content(State(handle), Path(id), request).await
         }));
     }
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while handle.pending_commands() != 2 {
+    let queued = tokio::time::timeout(Duration::from_secs(5), async {
+        while handle.test_save_enqueued() < 2 {
             tokio::task::yield_now().await;
         }
     })
-    .await
-    .unwrap();
+    .await;
+    assert!(
+        queued.is_ok(),
+        "timed out waiting for writes: enqueued={}, queued_commands={}, finished_tasks={}, available_permits={}",
+        handle.test_save_enqueued(),
+        handle.pending_commands(),
+        tasks.iter().filter(|task| task.is_finished()).count(),
+        permits.available_permits(),
+    );
     for task in tasks {
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());

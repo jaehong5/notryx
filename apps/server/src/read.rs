@@ -3,6 +3,21 @@ use notryx_domain::{ChangeSeq, NodeId};
 use notryx_protocol::{CONTRACT, NodeMetadata, ServerInfo, StrongEtag};
 
 impl Workspace {
+    pub async fn changes(
+        &mut self,
+        after: ChangeSeq,
+        through: Option<ChangeSeq>,
+    ) -> Result<notryx_protocol::ChangesPage, Error> {
+        if self.journal_integrity_failed {
+            return Err(Error::RecoveryRequired);
+        }
+        let result = self.state.changes(after, through).await;
+        if matches!(&result, Err(Error::InvalidFormat)) {
+            self.journal_integrity_failed = true;
+        }
+        result
+    }
+
     pub async fn node_state(
         &mut self,
         node_id: NodeId,
@@ -42,15 +57,19 @@ impl Workspace {
     }
 
     pub async fn server_info(&mut self) -> Result<ServerInfo, Error> {
+        let position = self.state.journal_position().await;
+        if matches!(&position, Err(Error::InvalidFormat)) {
+            self.journal_integrity_failed = true;
+        }
+        let (head_seq, journal_floor_seq) = position?;
         Ok(ServerInfo {
             protocol: CONTRACT.into(),
             workspace_id: self.state.workspace_id,
             workspace_epoch: self.state.epoch,
             root_id: self.state.root_id,
-            head_seq: self.state.head_seq().await?,
-            // Retention has not been introduced; all committed ChangeSets remain available.
-            journal_floor_seq: ChangeSeq::new(0),
-            ready: self.ready,
+            head_seq,
+            journal_floor_seq,
+            ready: self.ready(),
             max_document_bytes: notryx_server_storage::MAX_DOCUMENT_BYTES as u64,
             max_attachment_bytes: notryx_server_storage::MAX_FILE_BYTES as u64,
         })

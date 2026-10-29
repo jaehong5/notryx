@@ -201,7 +201,7 @@ async fn fresh_tree_format_requires_schema_seven() {
         .fetch_one(&mut rig.workspace.state.connection)
         .await
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
 }
 
 #[tokio::test]
@@ -393,7 +393,7 @@ async fn v3_migration_preserves_retirement_and_a_pending_legacy_save() {
         .fetch_one(&mut reopened.state.connection)
         .await
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     assert_eq!(
         reopened
             .state

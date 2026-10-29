@@ -978,7 +978,7 @@ async fn real_schema_six_migration_preserves_pending_operations_and_replaces_liv
             .fetch_one(&mut rig.workspace.state.connection)
             .await
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         assert!(
             sqlx::query("PRAGMA foreign_key_check")
                 .fetch_all(&mut rig.workspace.state.connection)

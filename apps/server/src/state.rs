@@ -14,24 +14,26 @@ pub(crate) mod lifecycle;
 pub(crate) mod move_node;
 pub(crate) mod node;
 pub(crate) mod recovery;
+#[cfg(test)]
+mod sqlite_corruption_tests;
 mod stream;
 pub(crate) mod upload;
 use create::CreateIntent;
 
 const APPLICATION_ID: i64 = 0x4e545253;
-pub(crate) const CURRENT_SCHEMA_VERSION: i64 = 9;
+pub(crate) const CURRENT_SCHEMA_VERSION: i64 = 10;
 
 pub(crate) fn db_error(error: sqlx::Error) -> Error {
-    // SQLite exposes extended result codes as decimal strings; preserve the primary FULL code.
-    if error
+    // SQLite extended result codes retain the primary result in their low byte.
+    let primary = error
         .as_database_error()
         .and_then(|error| error.code())
         .and_then(|code| code.parse::<i32>().ok())
-        .is_some_and(|code| code & 255 == 13)
-    {
-        Error::NoSpace
-    } else {
-        Error::Storage
+        .map(|code| code & 0xff);
+    match primary {
+        Some(11 | 26) => Error::InvalidFormat,
+        Some(13) => Error::NoSpace,
+        _ => Error::Storage,
     }
 }
 pub(crate) fn serialization_error(_: serde_json::Error) -> Error {
@@ -149,7 +151,8 @@ impl State {
         stream::migrate_receipt_etags(&mut tx).await?;
         recovery::initialize(&mut tx).await?;
         upload::initialize(&mut tx).await?;
-        sqlx::query("PRAGMA user_version=9")
+        initialize_retention(&mut tx, root_id).await?;
+        sqlx::query("PRAGMA user_version=10")
             .execute(&mut *tx)
             .await
             .map_err(db_error)?;
@@ -306,6 +309,9 @@ impl State {
         if version < 9 {
             upload::initialize(&mut tx).await?;
         }
+        if version < 10 {
+            initialize_retention(&mut tx, self.root_id).await?;
+        }
         if !sqlx::query("PRAGMA foreign_key_check")
             .fetch_all(&mut *tx)
             .await
@@ -316,7 +322,7 @@ impl State {
         }
         auth::validate(&mut tx, self.workspace_id).await?;
         validate_layout(&mut tx, self.root_id, CURRENT_SCHEMA_VERSION).await?;
-        sqlx::query("PRAGMA user_version=9")
+        sqlx::query("PRAGMA user_version=10")
             .execute(&mut *tx)
             .await
             .map_err(db_error)?;
@@ -373,6 +379,15 @@ impl State {
         .transpose()
     }
 
+    pub async fn retained_object_is_referenced(&mut self, hash: &str) -> Result<bool, Error> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM nodes WHERE content_hash=? UNION ALL SELECT 1 FROM recovery_objects WHERE hash=?)")
+            .bind(hash)
+            .bind(hash)
+            .fetch_one(&mut self.connection)
+            .await
+            .map_err(db_error)
+    }
+
     pub async fn documents(&mut self) -> Result<Vec<Document>, Error> {
         let ids: Vec<String> = sqlx::query_scalar("SELECT node_id FROM nodes WHERE kind='file'")
             .fetch_all(&mut self.connection)
@@ -414,7 +429,7 @@ impl State {
             .execute(&mut *tx)
             .await
             .map_err(db_error)?;
-        sqlx::query("INSERT INTO change_sets VALUES(?,NULL)")
+        sqlx::query("INSERT INTO change_sets(seq,operation_id,committed_at) VALUES(?,NULL,NULL)")
             .bind(&seq)
             .execute(&mut *tx)
             .await
@@ -455,6 +470,53 @@ impl State {
             .execute(&mut *tx)
             .await
             .map_err(db_error)?;
+        tx.commit().await.map_err(db_error)
+    }
+
+    pub async fn finish_external_file(
+        &mut self,
+        before: &Document,
+        proposed: &Document,
+        #[cfg(test)] hook: &mut Option<crate::FailureHook>,
+    ) -> Result<(), Error> {
+        let mut tx = self.connection.begin().await.map_err(db_error)?;
+        let seq = proposed.last_change_seq.get();
+        let changed = sqlx::query("UPDATE nodes SET content_rev=?,content_hash=?,size=?,last_change_seq=? WHERE node_id=? AND kind='file' AND deleted=0 AND parent_id=? AND name=? AND content_rev=? AND meta_rev=? AND content_hash=? AND size=? AND last_change_seq=?")
+            .bind(proposed.content_rev.as_str()).bind(&proposed.content_hash).bind(proposed.size.to_string()).bind(seq.to_string())
+            .bind(before.node_id.to_string()).bind(before.parent_id.to_string()).bind(&before.name)
+            .bind(before.content_rev.as_str()).bind(before.meta_rev.as_str()).bind(&before.content_hash)
+            .bind(before.size.to_string()).bind(before.last_change_seq.get().to_string())
+            .execute(&mut *tx).await.map_err(db_error)?.rows_affected();
+        if changed != 1 {
+            return Err(Error::ExternalChange);
+        }
+        #[cfg(test)]
+        if let Some(hook) = hook {
+            hook(crate::Phase::BeforeRecoveryFinish)?;
+        }
+        sqlx::query("INSERT INTO change_sets(seq,operation_id,committed_at) VALUES(?,NULL,NULL)")
+            .bind(seq.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error)?;
+        sqlx::query("INSERT INTO node_changes VALUES(?,?,?)")
+            .bind(seq.to_string())
+            .bind(proposed.node_id.to_string())
+            .bind(document_post_state(proposed)?)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error)?;
+        let changed =
+            sqlx::query("UPDATE workspaces SET head_seq=? WHERE singleton=1 AND head_seq=?")
+                .bind(seq.to_string())
+                .bind(seq.checked_sub(1).ok_or(Error::InvalidFormat)?.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(db_error)?
+                .rows_affected();
+        if changed != 1 {
+            return Err(Error::ExternalChange);
+        }
         tx.commit().await.map_err(db_error)
     }
 
@@ -538,7 +600,7 @@ impl State {
             if changed != 1 {
                 return Err(Error::InvalidFormat);
             }
-            sqlx::query("INSERT INTO change_sets VALUES(?,?)")
+            sqlx::query("INSERT INTO change_sets(seq,operation_id,committed_at) VALUES(?,?,NULL)")
                 .bind(&seq)
                 .bind(intent.operation_id.to_string())
                 .execute(&mut *tx)
@@ -608,8 +670,11 @@ async fn validate_layout(
             return Err(Error::InvalidFormat);
         }
     }
-    let head = validate_journal(connection).await?;
+    let head = validate_journal(connection, version).await?;
     node::validate_tree(connection, root_id, head, version).await?;
+    if version >= 10 {
+        validate_retention(connection, root_id).await?;
+    }
     stream::validate(connection, version).await?;
     if version >= 8 {
         recovery::validate(connection).await?;
@@ -620,12 +685,147 @@ async fn validate_layout(
     Ok(())
 }
 
-async fn validate_journal(connection: &mut SqliteConnection) -> Result<u64, Error> {
+async fn retention_initial_root(
+    connection: &mut SqliteConnection,
+    root_id: NodeId,
+) -> Result<serde_json::Value, Error> {
+    let row = sqlx::query("SELECT node_id,parent_id,name,kind,content_rev,meta_rev,content_hash,size,children_generation,last_change_seq,deleted FROM nodes WHERE node_id=?")
+        .bind(root_id.to_string())
+        .fetch_one(connection)
+        .await
+        .map_err(db_error)?;
+    let mut root = node::snapshot(&row)?;
+    if root.node_id != root_id
+        || root.parent_id.is_some()
+        || !root.name.is_empty()
+        || root.kind != notryx_protocol::NodeKind::Folder
+        || root.deleted
+    {
+        return Err(Error::InvalidFormat);
+    }
+    root.children_generation = 0;
+    root.last_change_seq = ChangeSeq::new(0);
+    Ok(node::node_post_state(&root))
+}
+
+async fn initialize_retention(
+    connection: &mut SqliteConnection,
+    root_id: NodeId,
+) -> Result<(), Error> {
+    sqlx::raw_sql("ALTER TABLE workspaces ADD COLUMN journal_floor_seq TEXT NOT NULL DEFAULT '0';
+        ALTER TABLE workspaces ADD COLUMN journal_baseline_count INTEGER NOT NULL DEFAULT 0 CHECK(typeof(journal_baseline_count)='integer' AND journal_baseline_count>=0);
+        ALTER TABLE workspaces ADD COLUMN journal_baseline_hash TEXT NOT NULL DEFAULT '';
+        ALTER TABLE change_sets ADD COLUMN committed_at INTEGER CHECK(committed_at IS NULL OR (typeof(committed_at)='integer' AND committed_at>=0));
+        CREATE TABLE journal_baseline (node_id TEXT PRIMARY KEY NOT NULL REFERENCES nodes(node_id), seq TEXT NOT NULL, post_state TEXT NOT NULL);")
+        .execute(&mut *connection).await.map_err(db_error)?;
+    let root = retention_initial_root(connection, root_id).await?;
+    sqlx::query("INSERT INTO journal_baseline(node_id,seq,post_state) VALUES (?,'0',?)")
+        .bind(root_id.to_string())
+        .bind(encode(&root)?)
+        .execute(&mut *connection)
+        .await
+        .map_err(db_error)?;
+    let (count, digest) = crate::retention::baseline_digest(connection, 0).await?;
+    sqlx::query(
+        "UPDATE workspaces SET journal_baseline_count=?,journal_baseline_hash=? WHERE singleton=1",
+    )
+    .bind(count)
+    .bind(digest)
+    .execute(connection)
+    .await
+    .map_err(db_error)?;
+    Ok(())
+}
+
+pub(crate) async fn validate_retention(
+    connection: &mut SqliteConnection,
+    root_id: NodeId,
+) -> Result<(), Error> {
+    let floor: String =
+        sqlx::query_scalar("SELECT journal_floor_seq FROM workspaces WHERE singleton=1")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(db_error)?;
+    let floor = canonical_u64(&floor)?;
+    let head: String = sqlx::query_scalar("SELECT head_seq FROM workspaces WHERE singleton=1")
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(db_error)?;
+    if floor > canonical_u64(&head)? {
+        return Err(Error::InvalidFormat);
+    }
+    let expected = sqlx::query(
+        "SELECT journal_baseline_count,journal_baseline_hash FROM workspaces WHERE singleton=1",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(db_error)?;
+    let expected_count: i64 = expected
+        .try_get("journal_baseline_count")
+        .map_err(db_error)?;
+    let expected_hash: String = expected
+        .try_get("journal_baseline_hash")
+        .map_err(db_error)?;
+    let (actual_count, actual_hash) = crate::retention::baseline_digest(connection, floor).await?;
+    if expected_count < 1 || expected_count != actual_count || expected_hash != actual_hash {
+        return Err(Error::InvalidFormat);
+    }
+    let invalid: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM change_sets WHERE committed_at IS NOT NULL AND (typeof(committed_at)<>'integer' OR committed_at<0)")
+        .fetch_one(&mut *connection).await.map_err(db_error)?;
+    if invalid != 0 {
+        return Err(Error::InvalidFormat);
+    }
+    let rows = sqlx::query("SELECT node_id,seq,post_state FROM journal_baseline")
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(db_error)?;
+    if floor == 0 {
+        if rows.len() != 1
+            || rows[0].try_get::<String, _>("node_id").map_err(db_error)? != root_id.to_string()
+            || rows[0].try_get::<String, _>("seq").map_err(db_error)? != "0"
+        {
+            return Err(Error::InvalidFormat);
+        }
+        let actual: String = rows[0].try_get("post_state").map_err(db_error)?;
+        if decode::<serde_json::Value>(&actual)?
+            != retention_initial_root(connection, root_id).await?
+        {
+            return Err(Error::InvalidFormat);
+        }
+    } else if rows.is_empty() {
+        return Err(Error::InvalidFormat);
+    }
+    Ok(())
+}
+
+pub(crate) async fn validate_journal(
+    connection: &mut SqliteConnection,
+    version: i64,
+) -> Result<u64, Error> {
     let head: String = sqlx::query_scalar("SELECT head_seq FROM workspaces WHERE singleton=1")
         .fetch_one(&mut *connection)
         .await
         .map_err(db_error)?;
     let head = canonical_u64(&head)?;
+    let has_floor: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('workspaces') WHERE name='journal_floor_seq'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(db_error)?;
+    let floor = if version >= 10 && has_floor == 1 {
+        let value: String =
+            sqlx::query_scalar("SELECT journal_floor_seq FROM workspaces WHERE singleton=1")
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(db_error)?;
+        canonical_u64(&value)?
+    } else if version < 10 {
+        0
+    } else {
+        return Err(Error::InvalidFormat);
+    };
+    let retained = head.checked_sub(floor).ok_or(Error::InvalidFormat)?;
     let mut sequences: Vec<u64> = sqlx::query_scalar::<_, String>("SELECT seq FROM change_sets")
         .fetch_all(&mut *connection)
         .await
@@ -634,11 +834,11 @@ async fn validate_journal(connection: &mut SqliteConnection) -> Result<u64, Erro
         .map(|s| canonical_u64(s))
         .collect::<Result<_, _>>()?;
     sequences.sort_unstable();
-    if sequences.len() as u64 != head
+    if sequences.len() as u64 != retained
         || sequences
             .iter()
             .enumerate()
-            .any(|(index, seq)| *seq != index as u64 + 1)
+            .any(|(index, seq)| floor.checked_add(index as u64 + 1) != Some(*seq))
     {
         return Err(Error::InvalidFormat);
     }

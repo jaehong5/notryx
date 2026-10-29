@@ -5,11 +5,14 @@ pub mod auth;
 pub mod config;
 mod create;
 pub mod http;
+mod journal_status;
 mod lifecycle;
 mod move_node;
 mod node;
 mod read;
+mod reconcile;
 mod recovery;
+mod retention;
 pub mod runtime;
 mod state;
 mod stream;
@@ -35,6 +38,7 @@ pub enum Error {
     UploadTooLarge,
     UploadUnavailable,
     InvalidFormat,
+    ChangesPageLimit,
     MigrationRequired,
     InvalidRequest,
     DigestMismatch,
@@ -51,6 +55,7 @@ pub enum Error {
     InvalidAck,
     OperationPending,
     NodeDeleted,
+    ResyncRequired,
 }
 
 impl std::fmt::Display for Error {
@@ -59,6 +64,58 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+
+/// Validates an isolated SQLite copy, which may be modified by SQLite during inspection.
+pub async fn validate_backup_state_copy(
+    path: &Path,
+    workspace_id: WorkspaceId,
+) -> Result<(), Error> {
+    let (state, version) = state::State::open_for_migration(path, workspace_id).await?;
+    if version != 9 && version != state::CURRENT_SCHEMA_VERSION {
+        return Err(Error::InvalidFormat);
+    }
+    state.connection.close().await.map_err(state::db_error)
+}
+
+/// Validates an isolated workspace copy without running recovery or upload cleanup.
+pub async fn validate_backup_workspace_copy(notes: &Path, state: &Path) -> Result<(), Error> {
+    Workspace::load_checked(notes, state, true, None)
+        .await?
+        .close()
+        .await
+}
+
+/// Validates a restored copy only if its opened roots match the held directory handles.
+pub async fn validate_pinned_backup_workspace_copy(
+    notes: &Path,
+    state: &Path,
+    expected_notes: &std::fs::File,
+    expected_state: &std::fs::File,
+) -> Result<(), Error> {
+    Workspace::load_checked(notes, state, true, Some((expected_notes, expected_state)))
+        .await?
+        .close()
+        .await
+}
+
+fn verify_restore_roots(
+    files: &FileStore,
+    expected_notes: &std::fs::File,
+    expected_state: &std::fs::File,
+) -> Result<(), Error> {
+    use std::os::unix::fs::MetadataExt;
+
+    let (actual_notes, actual_state) = files.backup_root_handles()?;
+    let same = |left: &std::fs::File, right: &std::fs::File| -> Result<bool, Error> {
+        let left = left.metadata().map_err(|_| Error::Storage)?;
+        let right = right.metadata().map_err(|_| Error::Storage)?;
+        Ok((left.dev(), left.ino()) == (right.dev(), right.ino()))
+    };
+    if !same(&actual_notes, expected_notes)? || !same(&actual_state, expected_state)? {
+        return Err(Error::ExternalChange);
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Document {
@@ -233,8 +290,13 @@ pub struct Workspace {
     state: State,
     files: FileStore,
     ready: bool,
+    journal_integrity_failed: bool,
+    root_blocked: bool,
+    object_rechecks: usize,
     upload_limits: UploadLimits,
     receiving_uploads: std::collections::HashMap<Uuid, std::sync::Weak<()>>,
+    external_generations: std::collections::HashMap<NodeId, std::sync::Weak<()>>,
+    external_create_generations: std::collections::HashMap<(NodeId, String), std::sync::Weak<()>>,
     #[cfg(test)]
     hook: Option<FailureHook>,
 }
@@ -285,6 +347,10 @@ pub(crate) enum Phase {
     BeforeResolveFinish,
     AfterResolveFinish,
     #[cfg(test)]
+    BeforeRecoveryCleanup,
+    #[cfg(test)]
+    BeforeDestinationOpen,
+    #[cfg(test)]
     BeforeAckCommit,
     #[cfg(test)]
     AfterAckCommit,
@@ -295,14 +361,34 @@ pub(crate) enum Phase {
 impl Workspace {
     pub async fn migrate(notes: &Path, state_dir: &Path) -> Result<(), Error> {
         let files = FileStore::open(notes, state_dir)?;
+        Self::migrate_open_store(files).await
+    }
+
+    pub async fn migrate_restored_copy(
+        notes: &Path,
+        state_dir: &Path,
+        expected_notes: &std::fs::File,
+        expected_state: &std::fs::File,
+    ) -> Result<(), Error> {
+        let files = FileStore::open(notes, state_dir)?;
+        verify_restore_roots(&files, expected_notes, expected_state)?;
+        Self::migrate_open_store(files).await
+    }
+
+    async fn migrate_open_store(files: FileStore) -> Result<(), Error> {
         let (state, version) =
             State::open_for_migration(&files.state_db_path(), files.workspace_id()).await?;
         let mut workspace = Self {
             state,
             files,
             ready: false,
+            journal_integrity_failed: false,
+            root_blocked: false,
             upload_limits: UploadLimits::default(),
             receiving_uploads: Default::default(),
+            external_generations: Default::default(),
+            external_create_generations: Default::default(),
+            object_rechecks: 0,
             #[cfg(test)]
             hook: None,
         };
@@ -376,8 +462,13 @@ impl Workspace {
             state,
             files,
             ready: true,
+            journal_integrity_failed: false,
+            root_blocked: false,
             upload_limits: UploadLimits::default(),
             receiving_uploads: Default::default(),
+            external_generations: Default::default(),
+            external_create_generations: Default::default(),
+            object_rechecks: 0,
             #[cfg(test)]
             hook: None,
         })
@@ -386,20 +477,48 @@ impl Workspace {
     pub async fn open(notes: &Path, state_dir: &Path) -> Result<Self, Error> {
         let mut workspace = Self::load(notes, state_dir).await?;
         workspace.recover().await?;
+        workspace.verify_mutation_root()?;
         workspace.cleanup_uploads(upload::now()?).await?;
+        workspace.verify_mutation_root()?;
         Ok(workspace)
     }
 
     async fn load(notes: &Path, state_dir: &Path) -> Result<Self, Error> {
+        Self::load_checked(notes, state_dir, false, None).await
+    }
+
+    async fn load_checked(
+        notes: &Path,
+        state_dir: &Path,
+        allow_backup_v9: bool,
+        expected_roots: Option<(&std::fs::File, &std::fs::File)>,
+    ) -> Result<Self, Error> {
         let files = FileStore::open(notes, state_dir)?;
+        if let Some((expected_notes, expected_state)) = expected_roots {
+            verify_restore_roots(&files, expected_notes, expected_state)?;
+        }
         files.validate_state_database()?;
-        let state = State::open(&files.state_db_path(), files.workspace_id()).await?;
+        let state = if allow_backup_v9 {
+            let (state, version) =
+                State::open_for_migration(&files.state_db_path(), files.workspace_id()).await?;
+            if version != 9 && version != state::CURRENT_SCHEMA_VERSION {
+                return Err(Error::InvalidFormat);
+            }
+            state
+        } else {
+            State::open(&files.state_db_path(), files.workspace_id()).await?
+        };
         let mut workspace = Self {
             state,
             files,
             ready: false,
+            journal_integrity_failed: false,
+            root_blocked: false,
             upload_limits: UploadLimits::default(),
             receiving_uploads: Default::default(),
+            external_generations: Default::default(),
+            external_create_generations: Default::default(),
+            object_rechecks: 0,
             #[cfg(test)]
             hook: None,
         };
@@ -428,6 +547,22 @@ impl Workspace {
     }
     pub fn ready(&self) -> bool {
         self.ready
+            && !self.journal_integrity_failed
+            && !self.root_blocked
+            && self.object_rechecks == 0
+    }
+
+    fn verify_mutation_root(&mut self) -> Result<(), Error> {
+        if self.journal_integrity_failed || self.root_blocked || self.object_rechecks != 0 {
+            return Err(Error::RecoveryRequired);
+        }
+        match self.files.verify_workspace_marker() {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                self.root_blocked = true;
+                Err(Error::Storage)
+            }
+        }
     }
 
     pub async fn read(&mut self, node_id: NodeId) -> Result<(Document, Vec<u8>), Error> {
@@ -462,9 +597,10 @@ impl Workspace {
 
     // This local bootstrap operation must never be exposed as an unauthenticated endpoint.
     pub async fn adopt_root_document(&mut self, name: &str) -> Result<Document, Error> {
-        if !self.ready {
+        if !self.ready() {
             return Err(Error::RecoveryRequired);
         }
+        self.verify_mutation_root()?;
         validate_name(name).map_err(|_| Error::InvalidRequest)?;
         let observed = self.files.observe(name)?;
         self.files.sync_observed(name, &observed.stamp)?;
@@ -485,9 +621,10 @@ impl Workspace {
 
     // Local storage harnesses use unbound streams; device pairing creates authenticated streams.
     pub async fn register_stream(&mut self) -> Result<Uuid, Error> {
-        if !self.ready {
+        if !self.ready() {
             return Err(Error::RecoveryRequired);
         }
+        self.verify_mutation_root()?;
         self.state.register_stream().await
     }
 
@@ -542,9 +679,10 @@ impl Workspace {
         self.state
             .validate_admission(request.stream_id, request.operation_seq)
             .await?;
-        if !self.ready {
+        if !self.ready() {
             return Err(Error::RecoveryRequired);
         }
+        self.verify_mutation_root()?;
         if self
             .state
             .node(request.node_id)
@@ -604,8 +742,10 @@ impl Workspace {
             .admit(&request, fingerprint, &Outcome::Pending, Some(&intent))
             .await?;
         self.point(Phase::AfterAdmission)?;
+        self.verify_mutation_root()?;
         self.replace(&path, &observed.stamp, &intent.proposed.content_hash)?;
         self.point(Phase::BeforeFinish)?;
+        self.verify_mutation_root()?;
         let receipt = self.state.finish(&intent, true).await?;
         self.point(Phase::AfterFinish)?;
         self.ready = true;
@@ -618,7 +758,7 @@ impl Workspace {
         stream_id: Uuid,
     ) -> Result<(), Error> {
         let Some(token) = token else {
-            return Ok(());
+            return self.verify_mutation_root();
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -632,7 +772,7 @@ impl Workspace {
         {
             return Err(Error::Auth(auth::AuthError::Forbidden));
         }
-        Ok(())
+        self.verify_mutation_root()
     }
 
     async fn terminal(
@@ -667,6 +807,7 @@ impl Workspace {
 
     async fn recover(&mut self) -> Result<(), Error> {
         self.ready = false;
+        self.verify_mutation_root()?;
         let pending = self.state.pending().await?;
         // One coordinator can leave at most one unresolved admission.
         if pending.len() > 1 {
@@ -712,6 +853,7 @@ impl Workspace {
                 notryx_server_storage::ObservedEntry::Absent => None,
                 notryx_server_storage::ObservedEntry::Folder { stamp, .. } => {
                     self.sync_folder(&path, &stamp)?;
+                    self.verify_mutation_root()?;
                     self.state.quarantine(intent.operation_id, None).await?;
                     return Ok(());
                 }
@@ -729,6 +871,7 @@ impl Workspace {
                     } else {
                         None
                     };
+                    self.verify_mutation_root()?;
                     self.state
                         .quarantine(intent.operation_id, current_hash.as_deref())
                         .await?;
@@ -738,6 +881,7 @@ impl Workspace {
                     let observed = observed.ok_or(Error::InvalidFormat)?;
                     self.sync_observed(&path, &observed.stamp)?;
                     self.point(Phase::BeforeRecoveryFinish)?;
+                    self.verify_mutation_root()?;
                     self.state
                         .finish(&intent, decision == RecoveryDecision::Applied)
                         .await?;
@@ -745,7 +889,9 @@ impl Workspace {
                 }
             }
         }
+        self.verify_mutation_root()?;
         self.cleanup_temporary_files()?;
+        self.verify_mutation_root()?;
         self.ready = true;
         Ok(())
     }

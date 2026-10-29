@@ -394,11 +394,13 @@ impl State {
                 .ok_or(Error::InvalidFormat)?
                 .last_change_seq
                 .get();
-            sqlx::query("INSERT INTO change_sets(seq,operation_id) VALUES(?,NULL)")
-                .bind(seq.to_string())
-                .execute(&mut *tx)
-                .await
-                .map_err(db_error)?;
+            sqlx::query(
+                "INSERT INTO change_sets(seq,operation_id,committed_at) VALUES(?,NULL,NULL)",
+            )
+            .bind(seq.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error)?;
             for node in posts {
                 if node.last_change_seq.get() != seq {
                     return Err(Error::InvalidFormat);

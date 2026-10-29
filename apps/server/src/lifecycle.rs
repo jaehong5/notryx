@@ -114,6 +114,7 @@ impl Workspace {
             proposed,
             parent_before: parent,
             path,
+            destination_parent: None,
             action: LifecycleAction::Delete { source_stamp },
         };
         self.apply_lifecycle(&operation, &intent, token).await
@@ -232,12 +233,14 @@ impl Workspace {
         proposed.deleted = false;
         proposed.parent_id = Some(parent.node_id);
         proposed.name = request.name;
+        let destination_parent = Some(self.destination_parent_identity(&path)?);
         let intent = LifecycleIntent {
             operation_id: request.operation_id,
             before,
             proposed,
             parent_before: parent,
             path,
+            destination_parent,
             action: LifecycleAction::Restore,
         };
         self.apply_lifecycle(&operation, &intent, token).await
@@ -264,7 +267,7 @@ impl Workspace {
         self.state
             .validate_admission(operation.stream_id, operation.sequence)
             .await?;
-        if !self.ready {
+        if !self.ready() {
             return Err(Error::RecoveryRequired);
         }
         Ok(None)
@@ -330,13 +333,27 @@ impl Workspace {
             )
             .await?;
         self.point(Phase::AfterAdmission)?;
+        self.verify_mutation_root()?;
+        if matches!(intent.action, LifecycleAction::Restore) {
+            self.verify_destination_parent(&intent.path, intent.destination_parent)?;
+            #[cfg(test)]
+            self.point(Phase::BeforeDestinationOpen)?;
+        }
         match &intent.action {
             LifecycleAction::Delete { source_stamp } => {
                 self.publish_deleted(&intent.path, source_stamp)?
             }
-            LifecycleAction::Restore => self.publish_node(&intent.path, &intent.proposed)?,
+            LifecycleAction::Restore => self.publish_node(
+                &intent.path,
+                &intent.proposed,
+                intent.destination_parent.ok_or(Error::ExternalChange)?,
+            )?,
         }
         self.point(Phase::BeforeFinish)?;
+        self.verify_mutation_root()?;
+        if matches!(intent.action, LifecycleAction::Restore) {
+            self.verify_destination_parent(&intent.path, intent.destination_parent)?;
+        }
         let receipt = self.state.finish_lifecycle(intent, true).await?;
         self.point(Phase::AfterFinish)?;
         self.ready = true;
@@ -425,6 +442,16 @@ impl Workspace {
         if self.state.is_quarantined(intent.operation_id).await? {
             return Ok(false);
         }
+        if matches!(intent.action, LifecycleAction::Restore) {
+            self.verify_mutation_root()?;
+            if self
+                .verify_destination_parent(&intent.path, intent.destination_parent)
+                .is_err()
+            {
+                self.state.quarantine(intent.operation_id, None).await?;
+                return Ok(false);
+            }
+        }
         if let Some(hash) = &intent.proposed.content_hash {
             let bytes = self.files.read_object(hash)?;
             self.put_object(&bytes)?;
@@ -464,6 +491,15 @@ impl Workspace {
         };
         if let Some(applied) = applied {
             self.point(Phase::BeforeRecoveryFinish)?;
+            self.verify_mutation_root()?;
+            if matches!(intent.action, LifecycleAction::Restore)
+                && self
+                    .verify_destination_parent(&intent.path, intent.destination_parent)
+                    .is_err()
+            {
+                self.state.quarantine(intent.operation_id, None).await?;
+                return Ok(false);
+            }
             self.state.finish_lifecycle(intent, applied).await?;
             self.point(Phase::AfterRecoveryFinish)?;
             return Ok(true);
@@ -472,6 +508,7 @@ impl Workspace {
             ObservedEntry::File(file) => Some(self.put_object(&file.bytes)?),
             _ => None,
         };
+        self.verify_mutation_root()?;
         self.state
             .quarantine(intent.operation_id, hash.as_deref())
             .await?;

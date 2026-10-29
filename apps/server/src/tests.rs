@@ -2,15 +2,20 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::fs;
 
+mod changes;
+mod changes_size_latch;
 mod create;
+mod external_folder_identity;
 mod inventory;
 #[path = "../tests/support/legacy.rs"]
 mod legacy;
 mod lifecycle;
 mod move_node;
+mod reconcile;
 mod recovery;
 mod stream;
 mod upload;
+mod watcher_folder_retry;
 
 fn digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes)

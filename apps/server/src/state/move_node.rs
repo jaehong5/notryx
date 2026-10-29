@@ -14,6 +14,8 @@ pub(crate) struct MoveIntent {
     pub parents_before: Vec<NodeSnapshot>,
     pub old_path: String,
     pub new_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_parent: Option<notryx_server_storage::FolderIdentity>,
     pub source_stamp: EntryStamp,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observed_hashes: Vec<String>,
@@ -82,7 +84,7 @@ impl State {
             if changed != 1 {
                 return Err(Error::InvalidFormat);
             }
-            sqlx::query("INSERT INTO change_sets VALUES(?,?)")
+            sqlx::query("INSERT INTO change_sets(seq,operation_id,committed_at) VALUES(?,?,NULL)")
                 .bind(&seq)
                 .bind(intent.operation_id.to_string())
                 .execute(&mut *tx)

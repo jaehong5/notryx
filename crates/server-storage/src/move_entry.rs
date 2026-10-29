@@ -1,7 +1,7 @@
 use crate::tree::{NoteParent, folder_stamp, identity};
 use crate::{
-    FileStamp, FileStore, FolderStamp, ObservedEntry, StorageError, StorageStage, errno, io,
-    open_at, open_regular, read_observed,
+    FileStamp, FileStore, FolderIdentity, FolderStamp, ObservedEntry, StorageError, StorageStage,
+    errno, io, open_at, open_regular, read_observed,
 };
 use rustix::fs::{self, Dir, Mode, OFlags};
 use serde::{Deserialize, Serialize};
@@ -119,7 +119,17 @@ impl FileStore {
         new_path: &str,
         expected: &EntryStamp,
     ) -> Result<EntryStamp, StorageError> {
-        self.move_entry_inner(old_path, new_path, expected, &mut |_| Ok(()))
+        self.move_entry_inner(old_path, new_path, expected, None, &mut |_| Ok(()))
+    }
+
+    pub fn move_entry_guarded(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        expected: &EntryStamp,
+        parent: FolderIdentity,
+    ) -> Result<EntryStamp, StorageError> {
+        self.move_entry_inner(old_path, new_path, expected, Some(parent), &mut |_| Ok(()))
     }
 
     fn move_entry_inner(
@@ -127,6 +137,7 @@ impl FileStore {
         old_path: &str,
         new_path: &str,
         expected: &EntryStamp,
+        expected_parent: Option<FolderIdentity>,
         hook: &mut impl FnMut(StorageStage) -> Result<(), StorageError>,
     ) -> Result<EntryStamp, StorageError> {
         if old_path == new_path {
@@ -134,6 +145,7 @@ impl FileStore {
         }
         let source = self.note_parent(old_path)?;
         let destination = self.note_parent(new_path)?;
+        destination.verify_identity(expected_parent)?;
         ensure_destination(&source, &destination)?;
         let entry = EntryHandle::open(&source, expected)?;
         if entry.stamp()? != *expected {
@@ -267,7 +279,19 @@ impl FileStore {
         expected: &EntryStamp,
         mut hook: impl FnMut(StorageStage) -> Result<(), StorageError>,
     ) -> Result<EntryStamp, StorageError> {
-        self.move_entry_inner(old_path, new_path, expected, &mut hook)
+        self.move_entry_inner(old_path, new_path, expected, None, &mut hook)
+    }
+
+    #[cfg(feature = "test-hooks")]
+    pub fn move_entry_guarded_with_hook(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        expected: &EntryStamp,
+        parent: FolderIdentity,
+        mut hook: impl FnMut(StorageStage) -> Result<(), StorageError>,
+    ) -> Result<EntryStamp, StorageError> {
+        self.move_entry_inner(old_path, new_path, expected, Some(parent), &mut hook)
     }
 
     #[cfg(feature = "test-hooks")]

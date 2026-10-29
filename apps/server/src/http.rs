@@ -11,6 +11,7 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use futures_util::StreamExt;
 use hyper::server::conn::http1;
 use hyper_util::{
     rt::{TokioIo, TokioTimer},
@@ -27,6 +28,7 @@ use tokio::sync::{Semaphore, oneshot, watch};
 use tokio::task::JoinSet;
 
 mod create;
+mod events;
 #[cfg(test)]
 mod permit_tests;
 mod read;
@@ -40,8 +42,8 @@ const HTTP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(30);
-// Sixteen buffered 25 MiB downloads leave room for writes within the 1 GiB container limit.
-const MAX_CONNECTIONS: usize = 16;
+const MAX_CONNECTIONS: usize = 40;
+const MAX_CONTENT_READS: usize = 12;
 const MAX_CONTENT_WRITES: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +104,7 @@ fn error_body(code: &str) -> ApiError {
         "cycle_detected" => "폴더를 자기 자신이나 하위 폴더 안으로 이동할 수 없습니다.",
         "root_immutable" => "작업 공간의 루트 폴더는 변경할 수 없습니다.",
         "unsupported_protocol" => "서버와 클라이언트의 프로토콜이 다릅니다.",
+        "resync_required" => "변경 이력의 보존 범위가 지나 다시 동기화해야 합니다.",
         "request_timeout" => "요청 제한 시간을 초과했습니다.",
         "storage_unavailable" => "서버가 요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요.",
         "recovery_pending" => "저장소 복구를 마친 뒤 다시 시도해 주세요.",
@@ -168,9 +171,11 @@ fn runtime_error(error: RuntimeError) -> Response {
             | crate::Error::OperationPending
             | crate::Error::ExternalChange,
         ) => StatusCode::CONFLICT,
-        RuntimeError::Workspace(crate::Error::OperationRetired | crate::Error::NodeDeleted) => {
-            StatusCode::GONE
-        }
+        RuntimeError::Workspace(
+            crate::Error::OperationRetired
+            | crate::Error::NodeDeleted
+            | crate::Error::ResyncRequired,
+        ) => StatusCode::GONE,
         RuntimeError::Workspace(crate::Error::ReceiptLimit) => StatusCode::TOO_MANY_REQUESTS,
         RuntimeError::Busy => StatusCode::TOO_MANY_REQUESTS,
         RuntimeError::Workspace(crate::Error::NoSpace | crate::Error::UploadQuota) => {
@@ -266,6 +271,31 @@ async fn server_info(State(handle): State<WorkspaceHandle>, headers: HeaderMap) 
     }
 }
 
+async fn device_identity(State(handle): State<WorkspaceHandle>, headers: HeaderMap) -> Response {
+    let token = match bearer(&headers) {
+        Ok(token) => token,
+        Err(error) => return runtime_error(error),
+    };
+    match handle.device_identity(token).await {
+        Ok(identity) => ([(header::CACHE_CONTROL, "no-store")], Json(identity)).into_response(),
+        Err(error) => runtime_error(error),
+    }
+}
+
+async fn device_current_role(
+    State(handle): State<WorkspaceHandle>,
+    headers: HeaderMap,
+) -> Response {
+    let token = match bearer(&headers) {
+        Ok(token) => token,
+        Err(error) => return runtime_error(error),
+    };
+    match handle.device_current_role(token).await {
+        Ok(role) => ([(header::CACHE_CONTROL, "no-store")], Json(role)).into_response(),
+        Err(error) => runtime_error(error),
+    }
+}
+
 async fn metadata(
     State(handle): State<WorkspaceHandle>,
     Path(id): Path<String>,
@@ -319,12 +349,17 @@ async fn content(
                 return api_error(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable");
             };
             let digest = format!("sha-256=:{}:", STANDARD.encode(Sha256::digest(&bytes)));
+            let length = bytes.len();
             let mut response = bytes.into_response();
             response.headers_mut().insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/octet-stream"),
             );
             response.headers_mut().insert(header::ETAG, etag);
+            response.headers_mut().insert(
+                header::CONTENT_LENGTH,
+                HeaderValue::from_str(&length.to_string()).unwrap(),
+            );
             response
                 .headers_mut()
                 .insert("content-digest", HeaderValue::from_str(&digest).unwrap());
@@ -398,6 +433,49 @@ async fn bounded_content_write(
     next.run(request).await
 }
 
+async fn bounded_content_read(
+    State((handle, permits)): State<(WorkspaceHandle, Arc<Semaphore>)>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.method() != axum::http::Method::GET && request.method() != axum::http::Method::HEAD {
+        return next.run(request).await;
+    }
+    let token = match bearer(request.headers()) {
+        Ok(token) => token,
+        Err(error) => return runtime_error(error),
+    };
+    if let Err(error) = handle.authenticate(token).await {
+        return runtime_error(error);
+    }
+    let Ok(permit) = permits.try_acquire_owned() else {
+        return api_error(StatusCode::TOO_MANY_REQUESTS, "busy");
+    };
+    let mut response = next.run(request).await;
+    if !response.status().is_success() {
+        return response;
+    }
+    let body = std::mem::replace(response.body_mut(), axum::body::Body::empty());
+    let stream = futures_util::stream::unfold(
+        (body.into_data_stream(), axum::body::Bytes::new(), permit),
+        |(mut source, mut pending, permit)| async move {
+            while pending.is_empty() {
+                match source.next().await {
+                    Some(Ok(bytes)) => pending = bytes,
+                    Some(Err(error)) => return Some((Err(error), (source, pending, permit))),
+                    None => return None,
+                }
+            }
+            let length = pending.len().min(64 * 1024);
+            let chunk = axum::body::Bytes::copy_from_slice(&pending[..length]);
+            let _ = pending.split_to(length);
+            Some((Ok(chunk), (source, pending, permit)))
+        },
+    );
+    *response.body_mut() = axum::body::Body::from_stream(stream);
+    response
+}
+
 async fn serve(
     listener: TcpListener,
     routes: Router,
@@ -427,7 +505,7 @@ async fn serve(
                 let mut closed = closing.subscribe();
                 connections.spawn(async move {
                     let mut http = http1::Builder::new();
-                    http.timer(TokioTimer::new()).header_read_timeout(HEADER_READ_TIMEOUT);
+                    http.timer(TokioTimer::new()).header_read_timeout(HEADER_READ_TIMEOUT).max_buf_size(64 * 1024);
                     // Hyper may finish polling the body before its buffered bytes reach the socket.
                     let stream = write_timeout::WriteTimeout::new(stream, WRITE_STALL_TIMEOUT);
                     let connection = http.serve_connection(TokioIo::new(stream), service);
@@ -467,7 +545,7 @@ async fn serve(
 
 impl RunningServer {
     pub async fn start(config: Config) -> Result<Self, ServerError> {
-        let runtime = WorkspaceRuntime::start(config.workspace)
+        let runtime = WorkspaceRuntime::start_with_policy(config.workspace, config.sync)
             .await
             .map_err(ServerError::Runtime)?;
         let listener = match TcpListener::bind(config.server.listen).await {
@@ -496,6 +574,10 @@ impl RunningServer {
             .route("/health/ready", get(ready))
             .route("/v1/pair", post(pair))
             .route("/v1/server-info", get(server_info))
+            .route("/v1/devices/self", get(device_identity))
+            .route("/v1/devices/self/role", get(device_current_role))
+            .route("/v1/changes", get(read::changes))
+            .route("/v1/events", get(events::events))
             .route("/v1/uploads", post(upload::upload))
             .route("/v1/nodes", get(read::inventory).post(create::create_node))
             .route(
@@ -519,6 +601,13 @@ impl RunningServer {
                             Arc::new(Semaphore::new(MAX_CONTENT_WRITES)),
                         ),
                         bounded_content_write,
+                    ))
+                    .layer(middleware::from_fn_with_state(
+                        (
+                            runtime.handle(),
+                            Arc::new(Semaphore::new(MAX_CONTENT_READS)),
+                        ),
+                        bounded_content_read,
                     )),
             )
             .route("/v1/operations/{id}", get(write::operation))

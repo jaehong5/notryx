@@ -7,7 +7,44 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use notryx_domain::NodeId;
+use notryx_domain::{ChangeSeq, NodeId};
+
+fn changes_query(query: Option<&str>) -> Result<(ChangeSeq, Option<ChangeSeq>), RuntimeError> {
+    let invalid = RuntimeError::Auth(AuthError::InvalidRequest);
+    let mut after = None;
+    let mut through = None;
+    for (name, value) in form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        match name.as_ref() {
+            "after" if after.is_none() => {
+                after = Some(ChangeSeq::try_from(value.into_owned()).map_err(|_| invalid)?)
+            }
+            "through" if through.is_none() => {
+                through = Some(ChangeSeq::try_from(value.into_owned()).map_err(|_| invalid)?)
+            }
+            _ => return Err(invalid),
+        }
+    }
+    Ok((after.ok_or(invalid)?, through))
+}
+
+pub(super) async fn changes(
+    State(handle): State<WorkspaceHandle>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let token = match bearer(&headers) {
+        Ok(token) => token,
+        Err(error) => return runtime_error(error),
+    };
+    let (after, through) = match changes_query(query.as_deref()) {
+        Ok(query) => query,
+        Err(error) => return runtime_error(error),
+    };
+    match handle.changes(token, after, through).await {
+        Ok(page) => Json(page).into_response(),
+        Err(error) => runtime_error(error),
+    }
+}
 
 fn inventory_query(query: Option<&str>) -> Result<(Option<NodeId>, u16), RuntimeError> {
     let invalid = RuntimeError::Auth(AuthError::InvalidRequest);

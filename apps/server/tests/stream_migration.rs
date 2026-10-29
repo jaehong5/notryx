@@ -76,7 +76,7 @@ async fn fresh_schema_records_zero_watermark_for_every_new_stream() {
         .fetch_one(&mut db)
         .await
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let retired: String =
         sqlx::query_scalar("SELECT retired_through FROM operation_streams WHERE stream_id=?")
             .bind(stream.to_string())
@@ -169,7 +169,7 @@ async fn v2_migration_is_explicit_and_preserves_auth_source_and_old_receipts() {
         .fetch_one(&mut db)
         .await
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let retired: String =
         sqlx::query_scalar("SELECT retired_through FROM operation_streams WHERE stream_id=?")
             .bind(identity.stream_id.to_string())

@@ -138,7 +138,7 @@ async fn fresh_init_has_one_credential_free_owner() {
         .fetch_one(&mut db)
         .await
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let owners: Vec<String> =
         sqlx::query_scalar("SELECT principal_id FROM principals WHERE workspace_role='owner'")
             .fetch_all(&mut db)

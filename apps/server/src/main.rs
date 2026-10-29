@@ -6,13 +6,19 @@ use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::PathBuf;
 
+mod cold_backup;
 mod healthcheck;
 
 const HELP: &str = "사용법:
   notryx-server init|serve|migrate --config <설정 파일>
+  notryx-server backup --config <설정 파일> <새 백업 경로>
+  notryx-server backup-verify <백업 경로>
+  notryx-server restore <백업 경로> <새 복원 경로>
   notryx-server healthcheck --address <IP:port>
   notryx-server adopt --config <설정 파일> <루트 파일 이름>
   notryx-server admin --config <설정 파일> status
+  notryx-server admin --config <설정 파일> journal-status
+  notryx-server admin --config <설정 파일> unsupported-items [snapshot UUID와 offset]
   notryx-server admin --config <설정 파일> create-principal <reader|editor>
   notryx-server admin --config <설정 파일> set-role <principal UUID> <reader|editor>
   notryx-server admin --config <설정 파일> transfer-owner <principal UUID> <이전 owner의 reader|editor 역할>
@@ -34,6 +40,7 @@ enum Command {
     Serve,
     Migrate,
     Adopt(String),
+    Backup(PathBuf),
     Admin(AdminRequest),
 }
 
@@ -98,9 +105,33 @@ fn parse(arguments: &[OsString]) -> Result<(PathBuf, Command), &'static str> {
             notryx_domain::mutation::validate_name(name).map_err(|_| "invalid_request")?;
             Command::Adopt(name.to_owned())
         }
+        (Some("backup"), [destination]) => Command::Backup(PathBuf::from(destination)),
         (Some("admin"), [action, values @ ..]) => {
             let request = match (action.to_str(), values) {
                 (Some("status"), []) => AdminRequest::Status {},
+                (Some("journal-status"), []) => AdminRequest::JournalStatus {},
+                (Some("unsupported-items"), []) => AdminRequest::UnsupportedItems {
+                    snapshot_id: None,
+                    offset: 0,
+                    limit: 20,
+                },
+                (Some("unsupported-items"), [snapshot, offset]) => {
+                    let snapshot = snapshot.to_str().ok_or("invalid_request")?;
+                    let parsed = uuid::Uuid::parse_str(snapshot).map_err(|_| "invalid_request")?;
+                    if parsed.get_version_num() != 7 || parsed.to_string() != snapshot {
+                        return Err("invalid_request");
+                    }
+                    let offset = offset
+                        .to_str()
+                        .ok_or("invalid_request")?
+                        .parse::<u16>()
+                        .map_err(|_| "invalid_request")?;
+                    AdminRequest::UnsupportedItems {
+                        snapshot_id: Some(snapshot.to_owned()),
+                        offset,
+                        limit: 20,
+                    }
+                }
                 (Some("recovery-list"), []) => AdminRequest::RecoveryList {
                     after_operation_id: None,
                     limit: 20,
@@ -188,8 +219,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("{HELP}");
         return Ok(());
     }
+    if let [command, path] = arguments.as_slice()
+        && command == "backup-verify"
+    {
+        cold_backup::verify(&PathBuf::from(path))?;
+        println!("backup_verified");
+        return Ok(());
+    }
+    if let [command, backup, destination] = arguments.as_slice()
+        && command == "restore"
+    {
+        cold_backup::restore(&PathBuf::from(backup), &PathBuf::from(destination)).await?;
+        println!("workspace_restored");
+        return Ok(());
+    }
     let (path, command) = parse(&arguments)?;
-    let config = Config::load(path)?;
+    let config = Config::load(&path)?;
     match command {
         Command::Initialize => {
             WorkspaceRuntime::initialize(config.workspace).await?;
@@ -202,6 +247,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Command::Adopt(name) => {
             let node_id = WorkspaceRuntime::adopt(config.workspace, name).await?;
             print_json(&serde_json::json!({ "node_id": node_id }))?;
+        }
+        Command::Backup(destination) => {
+            cold_backup::create(&config, &path, &destination).await?;
+            println!("backup_created");
         }
         Command::Admin(request) => {
             let allow_pairing_output = matches!(request, AdminRequest::IssuePairing { .. });

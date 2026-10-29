@@ -11,6 +11,9 @@ impl Workspace {
         if request.epoch != self.epoch() {
             return Err(Error::WorkspaceMismatch);
         }
+        if self.journal_integrity_failed {
+            return Err(Error::RecoveryRequired);
+        }
         self.state
             .ack_operations(
                 request.stream_id,
@@ -45,9 +48,10 @@ impl Workspace {
                 return Err(Error::OperationPending);
             }
         } else {
-            if !self.ready {
+            if !self.ready() {
                 return Err(Error::RecoveryRequired);
             }
+            self.verify_mutation_root()?;
             self.state
                 .validate_admission(request.stream_id, request.operation_seq)
                 .await?;

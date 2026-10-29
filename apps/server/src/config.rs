@@ -11,6 +11,35 @@ pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
     pub workspace: WorkspaceConfig,
+    #[serde(default)]
+    pub sync: JournalRetentionConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct JournalRetentionConfig {
+    pub journal_retention_days: u64,
+    pub journal_budget_bytes: u64,
+}
+
+impl Default for JournalRetentionConfig {
+    fn default() -> Self {
+        Self {
+            journal_retention_days: 30,
+            journal_budget_bytes: 512 * 1024 * 1024,
+        }
+    }
+}
+
+impl JournalRetentionConfig {
+    pub fn retention_seconds(&self) -> Result<u64, ConfigError> {
+        let seconds = self
+            .journal_retention_days
+            .checked_mul(24 * 60 * 60)
+            .ok_or(ConfigError::Invalid)?;
+        i64::try_from(seconds).map_err(|_| ConfigError::Invalid)?;
+        Ok(seconds)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -80,6 +109,7 @@ impl Config {
             return Err(ConfigError::Invalid);
         }
         config.workspace.uploads.validate()?;
+        config.sync.retention_seconds()?;
         Ok(config)
     }
 

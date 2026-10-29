@@ -1,6 +1,62 @@
 use sqlx::{Connection, SqliteConnection};
 
+pub async fn before_retention(connection: &mut SqliteConnection) {
+    sqlx::query("DROP TABLE IF EXISTS journal_baseline")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let floor: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('workspaces') WHERE name='journal_floor_seq'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    if floor == 1 {
+        sqlx::query("ALTER TABLE workspaces DROP COLUMN journal_floor_seq")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+    }
+    let baseline_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('workspaces') WHERE name='journal_baseline_count'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    if baseline_count == 1 {
+        sqlx::query("ALTER TABLE workspaces DROP COLUMN journal_baseline_count")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+    }
+    let baseline_hash: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('workspaces') WHERE name='journal_baseline_hash'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    if baseline_hash == 1 {
+        sqlx::query("ALTER TABLE workspaces DROP COLUMN journal_baseline_hash")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+    }
+    let committed_at: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('change_sets') WHERE name='committed_at'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    if committed_at == 1 {
+        sqlx::query("ALTER TABLE change_sets DROP COLUMN committed_at")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+    }
+}
+
 pub async fn nodes_before_deletion(connection: &mut SqliteConnection) {
+    before_retention(connection).await;
     sqlx::raw_sql("DROP TABLE IF EXISTS uploads; DROP TABLE IF EXISTS recovery_objects; DROP TABLE IF EXISTS recovery_cases;")
         .execute(&mut *connection)
         .await

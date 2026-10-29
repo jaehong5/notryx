@@ -15,6 +15,7 @@ pub async fn initialized() -> (tempfile::TempDir, Config) {
         .tempdir()
         .unwrap();
     let config = Config {
+        sync: Default::default(),
         server: ServerConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
             admin_socket: directory.path().join("admin.sock"),

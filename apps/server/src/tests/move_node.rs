@@ -537,7 +537,7 @@ async fn schema_five_migration_preserves_receipts_and_requires_explicit_upgrade(
         .fetch_one(&mut reopened.state.connection)
         .await
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
 }
 
 #[tokio::test]

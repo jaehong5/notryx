@@ -60,9 +60,10 @@ impl Workspace {
         time: i64,
     ) -> Result<UploadGrant, Error> {
         let identity = self.upload_identity(token, time).await?;
-        if !self.ready {
+        if !self.ready() {
             return Err(Error::RecoveryRequired);
         }
+        self.verify_mutation_root()?;
         if !valid_hash(&expected_hash) || time < 0 {
             return Err(Error::InvalidRequest);
         }
@@ -136,9 +137,10 @@ impl Workspace {
         time: i64,
     ) -> Result<Uploaded, Error> {
         let identity = self.upload_identity(token, time).await?;
-        if !self.ready {
+        if !self.ready() {
             return Err(Error::RecoveryRequired);
         }
+        self.verify_mutation_root()?;
         let record = self
             .state
             .upload(id)
@@ -196,11 +198,17 @@ impl Workspace {
     }
 
     pub async fn abort_upload(&mut self, id: Uuid) -> Result<(), Error> {
+        if self.journal_integrity_failed {
+            return Err(Error::RecoveryRequired);
+        }
         self.state.delete_upload(id, true).await?;
         self.cleanup_uploads(now()?).await
     }
 
     pub(crate) async fn cleanup_uploads(&mut self, time: i64) -> Result<(), Error> {
+        if self.journal_integrity_failed {
+            return Err(Error::RecoveryRequired);
+        }
         self.receiving_uploads
             .retain(|_, alive| alive.strong_count() > 0);
         let records = self.state.uploads().await?;

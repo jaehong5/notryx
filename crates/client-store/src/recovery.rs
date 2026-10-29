@@ -23,12 +23,24 @@ pub struct RecoveryDraftInfo {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub enum RecoveryOperationKind {
+    Content,
+    Restore,
+    Create,
+    Delete,
+    Move,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct RecoveryOperationInfo {
     pub operation_id: String,
     pub document_id: String,
     pub registration: Option<RegistrationBinding>,
     pub sequence: Option<u64>,
     pub generation: Option<u64>,
+    pub kind: Option<RecoveryOperationKind>,
+    pub expected_node_etag: Option<String>,
+    pub expected_meta_etag: Option<String>,
     pub status: String,
     pub terminal_kind: Option<String>,
     pub registration_status: Option<String>,
@@ -251,12 +263,14 @@ impl RecoveryStore {
                 next_after_id: None,
             });
         }
-        let query = if self.schema_version >= 5 {
-            "SELECT o.operation_id, o.document_id, o.operation_seq, o.generation, o.status, o.terminal_kind, r.status AS registration_status, r.server_origin, r.workspace_id, r.workspace_epoch, r.device_id, r.device_stream_id FROM client_outbox o LEFT JOIN client_registrations r ON r.id=o.registration_id WHERE o.payload_retired=0 AND o.operation_id>? ORDER BY o.operation_id LIMIT 101"
+        let query = if self.schema_version >= 8 {
+            "SELECT o.operation_id, o.document_id, o.operation_seq, o.generation, o.expected_revision, o.operation_kind, o.status, o.terminal_kind, r.status AS registration_status, r.server_origin, r.workspace_id, r.workspace_epoch, r.device_id, r.device_stream_id FROM client_outbox o LEFT JOIN client_registrations r ON r.id=o.registration_id WHERE o.payload_retired=0 AND o.operation_id>? ORDER BY o.operation_id LIMIT 101"
+        } else if self.schema_version >= 5 {
+            "SELECT o.operation_id, o.document_id, o.operation_seq, o.generation, o.expected_revision, 'content' AS operation_kind, o.status, o.terminal_kind, r.status AS registration_status, r.server_origin, r.workspace_id, r.workspace_epoch, r.device_id, r.device_stream_id FROM client_outbox o LEFT JOIN client_registrations r ON r.id=o.registration_id WHERE o.payload_retired=0 AND o.operation_id>? ORDER BY o.operation_id LIMIT 101"
         } else if self.schema_version == 4 {
-            "SELECT o.operation_id, o.document_id, o.operation_seq, o.generation, o.status, o.terminal_kind, r.status AS registration_status, r.server_origin, r.workspace_id, r.workspace_epoch, r.device_id, r.device_stream_id FROM client_outbox o LEFT JOIN client_registrations r ON r.id=o.registration_id WHERE o.operation_id>? ORDER BY o.operation_id LIMIT 101"
+            "SELECT o.operation_id, o.document_id, o.operation_seq, o.generation, o.expected_revision, 'content' AS operation_kind, o.status, o.terminal_kind, r.status AS registration_status, r.server_origin, r.workspace_id, r.workspace_epoch, r.device_id, r.device_stream_id FROM client_outbox o LEFT JOIN client_registrations r ON r.id=o.registration_id WHERE o.operation_id>? ORDER BY o.operation_id LIMIT 101"
         } else {
-            "SELECT o.operation_id, o.document_id, o.operation_seq, o.generation, o.status, NULL AS terminal_kind, r.status AS registration_status, r.server_origin, r.workspace_id, r.workspace_epoch, r.device_id, r.device_stream_id FROM client_outbox o LEFT JOIN client_registrations r ON r.id=o.registration_id WHERE o.operation_id>? ORDER BY o.operation_id LIMIT 101"
+            "SELECT o.operation_id, o.document_id, o.operation_seq, o.generation, o.expected_revision, 'content' AS operation_kind, o.status, NULL AS terminal_kind, r.status AS registration_status, r.server_origin, r.workspace_id, r.workspace_epoch, r.device_id, r.device_stream_id FROM client_outbox o LEFT JOIN client_registrations r ON r.id=o.registration_id WHERE o.operation_id>? ORDER BY o.operation_id LIMIT 101"
         };
         let mut rows = sqlx::query(query)
             .bind(after)
@@ -277,8 +291,34 @@ impl RecoveryStore {
                     None
                 }
             };
-            let generation = match row.try_get::<i64, _>("generation") {
-                Ok(value) if value > 0 => Some(value as u64),
+            let kind = match row.try_get::<String, _>("operation_kind") {
+                Ok(value) if value == "content" => Some(RecoveryOperationKind::Content),
+                Ok(value) if value == "restore" => Some(RecoveryOperationKind::Restore),
+                Ok(value) if value == "create" => Some(RecoveryOperationKind::Create),
+                Ok(value) if value == "delete" && self.schema_version >= 12 => {
+                    Some(RecoveryOperationKind::Delete)
+                }
+                Ok(value) if value == "move" && self.schema_version >= 14 => {
+                    Some(RecoveryOperationKind::Move)
+                }
+                _ => {
+                    metadata_error = true;
+                    None
+                }
+            };
+            let generation = match (row.try_get::<Option<i64>, _>("generation"), &kind) {
+                (Ok(Some(value)), Some(RecoveryOperationKind::Content)) if value > 0 => {
+                    Some(value as u64)
+                }
+                (
+                    Ok(None),
+                    Some(
+                        RecoveryOperationKind::Restore
+                        | RecoveryOperationKind::Create
+                        | RecoveryOperationKind::Delete
+                        | RecoveryOperationKind::Move,
+                    ),
+                ) => None,
                 _ => {
                     metadata_error = true;
                     None
@@ -323,12 +363,46 @@ impl RecoveryStore {
                     None
                 }
             };
+            let expected_node_etag = if matches!(kind, Some(RecoveryOperationKind::Delete)) {
+                match row.try_get::<Option<String>, _>("expected_revision") {
+                    Ok(Some(value)) if notryx_protocol::StrongEtag::parse(&value).is_ok() => {
+                        Some(value)
+                    }
+                    _ => {
+                        metadata_error = true;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let expected_meta_etag = if matches!(kind, Some(RecoveryOperationKind::Move)) {
+                match row.try_get::<Option<String>, _>("expected_revision") {
+                    Ok(Some(value))
+                        if value.len() <= 256
+                            && notryx_protocol::MetadataPrecondition::parse(&value)
+                                .and_then(|condition| condition.revision())
+                                .is_ok() =>
+                    {
+                        Some(value)
+                    }
+                    _ => {
+                        metadata_error = true;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             operations.push(RecoveryOperationInfo {
                 operation_id,
                 document_id,
                 registration,
                 sequence,
                 generation,
+                kind,
+                expected_node_etag,
+                expected_meta_etag,
                 status,
                 terminal_kind,
                 registration_status,

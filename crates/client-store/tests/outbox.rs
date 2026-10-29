@@ -492,6 +492,75 @@ async fn unsent_edits_coalesce_but_sent_payload_is_immutable() {
 }
 
 #[tokio::test]
+async fn prepare_matching_preserves_newer_queued_payload_and_detects_corruption() {
+    use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("drafts.db");
+    let registration = binding();
+    let mut store = ClientStore::open(&path).await.unwrap();
+    store.activate_registration(&registration).await.unwrap();
+    let opened = store
+        .open_registered_document(&registration, "doc", b"base", "rev-a")
+        .await
+        .unwrap();
+    store
+        .save_registered_checkpoint(&registration, "doc", &opened.edit_session_id, 1, b"first")
+        .await
+        .unwrap();
+    let first = queue(&mut store, &registration, "doc").await.unwrap();
+    store
+        .save_registered_checkpoint(&registration, "doc", &opened.edit_session_id, 2, b"second")
+        .await
+        .unwrap();
+    let updated = queue(&mut store, &registration, "doc").await.unwrap();
+    assert_eq!(
+        store
+            .prepare_outbox_matching(&registration, &first)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store.next_outbox(&registration).await.unwrap(),
+        Some(updated.clone())
+    );
+    let mut injection =
+        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+    sqlx::query("UPDATE client_outbox SET payload_hash = 'sha256:corrupt' WHERE operation_id = ?")
+        .bind(&updated.operation_id)
+        .execute(&mut injection)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.prepare_outbox_matching(&registration, &updated).await,
+        Err(StoreError::UnsupportedFormat)
+    );
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM client_outbox WHERE operation_id = ?")
+            .bind(&updated.operation_id)
+            .fetch_one(&mut injection)
+            .await
+            .unwrap();
+    assert_eq!(status, "queued");
+    sqlx::query("UPDATE client_outbox SET payload_hash = ? WHERE operation_id = ?")
+        .bind(&updated.payload_hash)
+        .bind(&updated.operation_id)
+        .execute(&mut injection)
+        .await
+        .unwrap();
+    injection.close().await.unwrap();
+    let sent = store
+        .prepare_outbox_matching(&registration, &updated)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(sent.status, OutboxStatus::Sent);
+    assert_eq!(sent.bytes, b"second");
+}
+
+#[tokio::test]
 async fn failed_ack_transaction_preserves_draft_base_payload_and_watermark() {
     use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
     let directory = tempfile::tempdir().unwrap();

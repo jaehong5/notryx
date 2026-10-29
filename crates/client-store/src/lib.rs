@@ -5,18 +5,48 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::path::Path;
 use std::time::Duration;
 
+mod bootstrap;
+mod content_cache;
+mod content_conflict;
+mod credential;
+mod deleted_draft_copy;
 mod outbox;
 mod recovery;
 mod registration;
+mod search;
+pub use content_cache::{CachedContent, RemoteFileObservation};
+pub use content_conflict::{
+    ContentConflictChoice, ContentConflictChoiceKind, ContentConflictChooseRemoteResult,
+    ContentConflictCopyContentState, ContentConflictCopyIntent, ContentConflictIntent,
+    ContentConflictIntentRequest, ContentConflictRef, ContentConflictResolutionState,
+    ContentConflictSnapshot,
+};
+pub use credential::CredentialPending;
+pub use deleted_draft_copy::{
+    DeletedDraftCopyBlockingFollowup, DeletedDraftCopyCreateState, DeletedDraftCopyEvidence,
+    DeletedDraftCopyIntent, DeletedDraftCopyRequest, DeletedDraftCopyStatus,
+};
 pub use outbox::{
-    OutboxAbandonState, OutboxAbandoned, OutboxCommit, OutboxConflict, OutboxDocumentState,
-    OutboxFailure, OutboxFailureKind, OutboxOperation, OutboxPage, OutboxStatus, OutboxSummary,
+    CreateOutboxOperation, CreateOutboxPage, CreateOutboxState, DeleteOutboxOperation,
+    DeleteOutboxPage, DeleteOutboxState, FrozenContentApplyApproval,
+    FrozenContentCrossEpochConfirmation, FrozenContentDecision, FrozenContentDecisionStatus,
+    FrozenContentDismissApproval, FrozenCreateChoice, FrozenCreatePage, FrozenDeleteChoice,
+    FrozenDeletePage, FrozenDocumentOperationKind, FrozenDocumentOperationSummary,
+    FrozenDocumentReviewPage, FrozenMoveChoice, FrozenMovePage, MoveOutboxOperation,
+    MoveOutboxPage, MoveOutboxState, OutboxAbandonState, OutboxAbandoned, OutboxCommit,
+    OutboxConflict, OutboxDocumentState, OutboxFailure, OutboxFailureKind, OutboxOperation,
+    OutboxPage, OutboxStatus, OutboxSummary, PendingOutboxOperation, RestoreOutboxOperation,
+    RestoreOutboxPage, RestoreOutboxState,
 };
 pub use recovery::{
-    RecoveryDraftInfo, RecoveryDraftPage, RecoveryOperationInfo, RecoveryOperationPage,
-    RecoveryStore,
+    RecoveryDraftInfo, RecoveryDraftPage, RecoveryOperationInfo, RecoveryOperationKind,
+    RecoveryOperationPage, RecoveryStore,
 };
 pub use registration::{RegisteredDraftInfo, RegistrationBinding};
+pub use search::{
+    SearchCandidate, SearchObserver, SearchPage, SearchScope, SearchSource, search_contains,
+    search_contains_cancellable,
+};
 
 pub const MAX_DOCUMENT_BYTES: usize = 5 * 1024 * 1024;
 
@@ -43,6 +73,7 @@ pub enum StoreError {
     OutboxBlocked,
     InvalidRequest,
     ReconciliationRequired,
+    BootstrapHistoryExpired,
     PayloadRetired,
 }
 
@@ -119,9 +150,11 @@ pub struct PersistedDraft {
 }
 
 const APPLICATION_ID: i64 = 0x4e545258;
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 23;
 
 struct EditSession {
+    // A remote refresh preserves the old checkpoint until the next local save.
+    refreshed_base: bool,
     id: String,
     base: Vec<u8>,
     base_revision: String,
@@ -131,6 +164,7 @@ pub struct ClientStore {
     connection: SqliteConnection,
     sessions: HashMap<String, EditSession>,
     _lock: File,
+    database_path: std::path::PathBuf,
 }
 
 fn storage_error(_: impl std::fmt::Debug) -> StoreError {
@@ -195,6 +229,12 @@ fn decode_draft(
 impl ClientStore {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
+        let database_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().map_err(storage_error)?.join(path)
+        };
+        let path = database_path.as_path();
         let mut file_options = OpenOptions::new();
         file_options
             .read(true)
@@ -243,8 +283,31 @@ impl ClientStore {
                 .await
                 .map_err(storage_error)?;
             probe.close().await.map_err(storage_error)?;
-            if !matches!(version, 1 | 2 | 3 | 4 | SCHEMA_VERSION)
-                || application_id != APPLICATION_ID
+            if !matches!(
+                version,
+                1 | 2
+                    | 3
+                    | 4
+                    | 5
+                    | 6
+                    | 7
+                    | 8
+                    | 9
+                    | 10
+                    | 11
+                    | 12
+                    | 13
+                    | 14
+                    | 15
+                    | 16
+                    | 17
+                    | 18
+                    | 19
+                    | 20
+                    | 21
+                    | 22
+                    | SCHEMA_VERSION
+            ) || application_id != APPLICATION_ID
             {
                 return Err(StoreError::UnsupportedFormat);
             }
@@ -299,6 +362,24 @@ impl ClientStore {
             || existing_version == 2
             || existing_version == 3
             || existing_version == 4
+            || existing_version == 5
+            || existing_version == 6
+            || existing_version == 7
+            || existing_version == 8
+            || existing_version == 9
+            || existing_version == 10
+            || existing_version == 11
+            || existing_version == 12
+            || existing_version == 13
+            || existing_version == 14
+            || existing_version == 15
+            || existing_version == 16
+            || existing_version == 17
+            || existing_version == 18
+            || existing_version == 19
+            || existing_version == 20
+            || existing_version == 21
+            || existing_version == 22
         {
             let mut transaction = connection.begin().await.map_err(storage_error)?;
             if initialize || existing_version == 1 {
@@ -319,7 +400,228 @@ impl ClientStore {
                     .await
                     .map_err(storage_error)?;
             }
-            sqlx::raw_sql(outbox::UPGRADE_V5)
+            if initialize || existing_version <= 4 {
+                sqlx::raw_sql(outbox::UPGRADE_V5)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 5 {
+                sqlx::raw_sql(bootstrap::UPGRADE_V6)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 6 {
+                sqlx::raw_sql(content_cache::UPGRADE_V7)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 7 {
+                sqlx::raw_sql(outbox::UPGRADE_V8)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 8 {
+                sqlx::raw_sql(credential::UPGRADE_V9)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 9 {
+                sqlx::raw_sql(outbox::UPGRADE_V10)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 10 {
+                sqlx::raw_sql(outbox::UPGRADE_V11)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 11 {
+                sqlx::raw_sql(outbox::UPGRADE_V12)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 12 {
+                sqlx::raw_sql(outbox::UPGRADE_V13)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 13 {
+                sqlx::raw_sql(outbox::UPGRADE_V14)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 14 {
+                sqlx::raw_sql(outbox::UPGRADE_V15)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 15 {
+                sqlx::raw_sql(content_conflict::UPGRADE_V16)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 16 {
+                sqlx::raw_sql(content_conflict::UPGRADE_V17)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 17 {
+                sqlx::raw_sql(content_conflict::UPGRADE_V18)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 18 {
+                sqlx::raw_sql(content_conflict::UPGRADE_V19)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 19 {
+                let content_column: Option<(String, i64)> = sqlx::query_as("SELECT type,\"notnull\" FROM pragma_table_info('content_conflict_copies') WHERE name='content_operation_id'")
+                .fetch_optional(&mut *transaction).await.map_err(storage_error)?;
+                match content_column {
+                    None => {
+                        sqlx::query("ALTER TABLE content_conflict_copies ADD COLUMN content_operation_id TEXT REFERENCES client_outbox(operation_id)").execute(&mut *transaction).await.map_err(storage_error)?;
+                    }
+                    Some((kind, required))
+                        if kind.eq_ignore_ascii_case("TEXT") && required == 0 => {}
+                    Some(_) => return Err(StoreError::UnsupportedFormat),
+                }
+                let content_fk: i64 = sqlx::query_scalar("SELECT count(*) FROM pragma_foreign_key_list('content_conflict_copies') WHERE \"table\"='client_outbox' AND \"from\"='content_operation_id' AND \"to\"='operation_id'")
+                .fetch_one(&mut *transaction).await.map_err(storage_error)?;
+                if content_fk != 1 {
+                    return Err(StoreError::UnsupportedFormat);
+                }
+                let unique_content: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pragma_index_list('content_conflict_copies') x JOIN pragma_index_info(x.name) y WHERE x.\"unique\"=1 AND x.partial=0 GROUP BY x.name HAVING count(*)=1 AND max(y.name)='content_operation_id')")
+                .fetch_one(&mut *transaction).await.map_err(storage_error)?;
+                if unique_content == 0 {
+                    sqlx::query("CREATE UNIQUE INDEX copy_content_operation_unique ON content_conflict_copies(content_operation_id)")
+                    .execute(&mut *transaction).await.map_err(storage_error)?;
+                }
+                sqlx::raw_sql(content_conflict::UPGRADE_V20_ATTEMPTS)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+                let columns: Vec<(String, String, i64, i64)> = sqlx::query_as("SELECT name,type,\"notnull\",pk FROM pragma_table_info('content_conflict_copy_attempts') ORDER BY cid")
+                .fetch_all(&mut *transaction).await.map_err(storage_error)?;
+                let expected = [
+                    "old_create_operation_id",
+                    "operation_id",
+                    "registration_id",
+                    "intent_version",
+                    "old_parent_id",
+                    "old_name",
+                    "old_node_id",
+                    "new_parent_id",
+                    "new_name",
+                    "new_node_id",
+                    "new_create_operation_id",
+                ];
+                if columns.len() != expected.len()
+                    || columns.iter().zip(expected).enumerate().any(
+                        |(index, ((name, kind, required, primary), expected))| {
+                            name != expected
+                                || !kind.eq_ignore_ascii_case(if index == 2 || index == 3 {
+                                    "INTEGER"
+                                } else {
+                                    "TEXT"
+                                })
+                                || *required != 1
+                                || *primary != i64::from(index == 0)
+                        },
+                    )
+                {
+                    return Err(StoreError::UnsupportedFormat);
+                }
+                let links: Vec<(String,String,String)> = sqlx::query_as("SELECT \"table\",\"from\",\"to\" FROM pragma_foreign_key_list('content_conflict_copy_attempts') ORDER BY \"from\"")
+                .fetch_all(&mut *transaction).await.map_err(storage_error)?;
+                if links
+                    != vec![
+                        (
+                            "client_outbox".into(),
+                            "old_create_operation_id".into(),
+                            "operation_id".into(),
+                        ),
+                        (
+                            "content_conflict_intents".into(),
+                            "operation_id".into(),
+                            "operation_id".into(),
+                        ),
+                        (
+                            "client_registrations".into(),
+                            "registration_id".into(),
+                            "id".into(),
+                        ),
+                    ]
+                {
+                    return Err(StoreError::UnsupportedFormat);
+                }
+                let definition: String = sqlx::query_scalar("SELECT sql FROM sqlite_schema WHERE type='table' AND name='content_conflict_copy_attempts'")
+                .fetch_one(&mut *transaction).await.map_err(storage_error)?;
+                let normalized: String = definition
+                    .chars()
+                    .filter(|character| !character.is_ascii_whitespace())
+                    .flat_map(char::to_lowercase)
+                    .collect();
+                if !normalized.contains("check(intent_version>=0)") {
+                    return Err(StoreError::UnsupportedFormat);
+                }
+                let unique_new: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pragma_index_list('content_conflict_copy_attempts') x JOIN pragma_index_info(x.name) y WHERE x.\"unique\"=1 AND x.partial=0 GROUP BY x.name HAVING count(*)=1 AND max(y.name)='new_create_operation_id')")
+                .fetch_one(&mut *transaction).await.map_err(storage_error)?;
+                if unique_new != 1 {
+                    return Err(StoreError::UnsupportedFormat);
+                }
+                for table in ["content_conflict_copies", "content_conflict_copy_attempts"] {
+                    let violation = match table {
+                        "content_conflict_copies" => {
+                            sqlx::query("PRAGMA foreign_key_check(content_conflict_copies)")
+                                .fetch_optional(&mut *transaction)
+                                .await
+                                .map_err(storage_error)?
+                        }
+                        _ => {
+                            sqlx::query("PRAGMA foreign_key_check(content_conflict_copy_attempts)")
+                                .fetch_optional(&mut *transaction)
+                                .await
+                                .map_err(storage_error)?
+                        }
+                    };
+                    if violation.is_some() {
+                        return Err(StoreError::UnsupportedFormat);
+                    }
+                }
+                sqlx::query("PRAGMA user_version=20")
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 20 {
+                sqlx::raw_sql(deleted_draft_copy::UPGRADE_V21)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            if initialize || existing_version <= 21 {
+                sqlx::raw_sql(outbox::UPGRADE_V22)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            sqlx::raw_sql(outbox::UPGRADE_V23)
                 .execute(&mut *transaction)
                 .await
                 .map_err(storage_error)?;
@@ -329,6 +631,7 @@ impl ClientStore {
             connection,
             sessions: HashMap::new(),
             _lock: lock,
+            database_path,
         })
     }
 
@@ -367,6 +670,7 @@ impl ClientStore {
         self.sessions.insert(
             document_id.to_owned(),
             EditSession {
+                refreshed_base: false,
                 id: edit_session_id.clone(),
                 base,
                 base_revision,
@@ -444,12 +748,24 @@ impl ClientStore {
                 .fetch_one(&mut *transaction)
                 .await
                 .map_err(storage_error)?;
+        if session.refreshed_base && base_exists != 0 {
+            sqlx::query("UPDATE draft_bases SET bytes=?,revision=? WHERE document_id=?")
+                .bind(&session.base)
+                .bind(&session.base_revision)
+                .bind(document_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
+        }
         if base_exists == 0 {
             sqlx::query("INSERT INTO draft_bases (document_id, bytes, revision) VALUES (?, ?, ?) ON CONFLICT(document_id) DO NOTHING")
                 .bind(document_id).bind(&session.base).bind(&session.base_revision)
                 .execute(&mut *transaction).await.map_err(storage_error)?;
         }
         transaction.commit().await.map_err(storage_error)?;
+        if let Some(session) = self.sessions.get_mut(document_id) {
+            session.refreshed_base = false;
+        }
         Ok(SavedCheckpoint {
             edit_session_id: edit_session_id.to_owned(),
             generation,
@@ -476,6 +792,11 @@ impl ClientStore {
         }
         self.sessions.remove(document_id);
         Ok(())
+    }
+
+    pub fn invalidate_edit_session(&mut self, edit_session_id: &str) {
+        self.sessions
+            .retain(|_, session| session.id != edit_session_id);
     }
 
     pub async fn read_checkpoint(

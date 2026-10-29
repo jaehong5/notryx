@@ -1115,6 +1115,24 @@ test("needs_review waits for an explicit retry", async () => {
   await scheduler.dispose();
 });
 
+test("a transmission stop keeps manual saves and document closing available", async () => {
+  const { ports, scheduler } = setup();
+  vi.mocked(ports.transmit).mockResolvedValueOnce({ status: "needs_review" }).mockResolvedValueOnce({ status: "idle" });
+  scheduler.edit(a, "1"); scheduler.durable(a, "1");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  scheduler.edit(a, "2"); scheduler.durable(a, "2");
+  await scheduler.syncNow(a);
+  expect(ports.queue).toHaveBeenLastCalledWith(a, "2");
+  await scheduler.deactivate(a);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  scheduler.resume();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.transmit).toHaveBeenCalledTimes(2);
+  await scheduler.dispose();
+});
+
 test.each(["needs_review", "auth_required", "gateway_auth_required"] as const)("kick preserves a %s stop until explicit resume", async (status) => {
   const { ports, scheduler } = setup();
   vi.mocked(ports.transmit).mockResolvedValueOnce({ status }).mockResolvedValueOnce({ status: "idle" });
@@ -1127,6 +1145,75 @@ test.each(["needs_review", "auth_required", "gateway_auth_required"] as const)("
   scheduler.resume();
   await vi.advanceTimersByTimeAsync(0);
   expect(ports.transmit).toHaveBeenCalledTimes(2);
+  await scheduler.dispose();
+});
+
+test("a resume during an in-flight request is not lost to a late review response", async () => {
+  const { ports, scheduler } = setup();
+  let release!: (value: { status: "needs_review" }) => void;
+  vi.mocked(ports.transmit)
+    .mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }))
+    .mockResolvedValueOnce({ status: "idle" });
+  scheduler.resume();
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  scheduler.resume();
+  release({ status: "needs_review" });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.transmit).toHaveBeenCalledTimes(2);
+  await scheduler.dispose();
+});
+
+test("sync readiness resumes initial synchronization waiting", async () => {
+  const { ports, scheduler } = setup();
+  vi.mocked(ports.transmit).mockResolvedValueOnce({ status: "sync_pending" }).mockResolvedValueOnce({ status: "idle" });
+  scheduler.resume();
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  scheduler.resumeSync();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.transmit).toHaveBeenCalledTimes(2);
+  await scheduler.dispose();
+});
+
+test("sync readiness does not clear an operation requiring review", async () => {
+  const { ports, scheduler } = setup();
+  vi.mocked(ports.transmit).mockResolvedValueOnce({ status: "needs_review" }).mockResolvedValueOnce({ status: "idle" });
+  scheduler.resume();
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  scheduler.resumeSync();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  await scheduler.dispose();
+});
+
+test("sync readiness during a request survives a late initial-sync wait response", async () => {
+  const { ports, scheduler } = setup();
+  let release!: (value: { status: "sync_pending" }) => void;
+  vi.mocked(ports.transmit).mockImplementationOnce(() => new Promise((resolve) => { release = resolve; })).mockResolvedValueOnce({ status: "idle" });
+  scheduler.resume();
+  await vi.advanceTimersByTimeAsync(1000);
+  scheduler.resumeSync();
+  release({ status: "sync_pending" });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.transmit).toHaveBeenCalledTimes(2);
+  await scheduler.dispose();
+});
+
+test("a new review response is not cleared by an earlier sync readiness signal", async () => {
+  const { ports, scheduler } = setup();
+  let release!: (value: { status: "needs_review" }) => void;
+  vi.mocked(ports.transmit).mockImplementationOnce(() => new Promise((resolve) => { release = resolve; })).mockResolvedValueOnce({ status: "idle" });
+  scheduler.resume();
+  await vi.advanceTimersByTimeAsync(1000);
+  scheduler.resumeSync();
+  release({ status: "needs_review" });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.transmit).toHaveBeenCalledOnce();
+  scheduler.resumeSync();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(ports.transmit).toHaveBeenCalledOnce();
   await scheduler.dispose();
 });
 

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-resolve-frozen-move"
+description = "Enables the workspace_resolve_frozen_move command without any pre-configured scope."
+commands.allow = ["workspace_resolve_frozen_move"]
+
+[[permission]]
+identifier = "deny-workspace-resolve-frozen-move"
+description = "Denies the workspace_resolve_frozen_move command without any pre-configured scope."
+commands.deny = ["workspace_resolve_frozen_move"]

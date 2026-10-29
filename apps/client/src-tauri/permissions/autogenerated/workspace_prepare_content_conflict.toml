@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-prepare-content-conflict"
+description = "Enables the workspace_prepare_content_conflict command without any pre-configured scope."
+commands.allow = ["workspace_prepare_content_conflict"]
+
+[[permission]]
+identifier = "deny-workspace-prepare-content-conflict"
+description = "Denies the workspace_prepare_content_conflict command without any pre-configured scope."
+commands.deny = ["workspace_prepare_content_conflict"]

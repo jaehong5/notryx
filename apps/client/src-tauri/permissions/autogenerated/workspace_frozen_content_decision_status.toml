@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-frozen-content-decision-status"
+description = "Enables the workspace_frozen_content_decision_status command without any pre-configured scope."
+commands.allow = ["workspace_frozen_content_decision_status"]
+
+[[permission]]
+identifier = "deny-workspace-frozen-content-decision-status"
+description = "Denies the workspace_frozen_content_decision_status command without any pre-configured scope."
+commands.deny = ["workspace_frozen_content_decision_status"]

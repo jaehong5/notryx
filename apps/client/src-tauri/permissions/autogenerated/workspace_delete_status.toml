@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-delete-status"
+description = "Enables the workspace_delete_status command without any pre-configured scope."
+commands.allow = ["workspace_delete_status"]
+
+[[permission]]
+identifier = "deny-workspace-delete-status"
+description = "Denies the workspace_delete_status command without any pre-configured scope."
+commands.deny = ["workspace_delete_status"]

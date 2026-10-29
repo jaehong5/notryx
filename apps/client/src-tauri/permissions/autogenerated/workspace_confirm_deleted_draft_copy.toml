@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-confirm-deleted-draft-copy"
+description = "Enables the workspace_confirm_deleted_draft_copy command without any pre-configured scope."
+commands.allow = ["workspace_confirm_deleted_draft_copy"]
+
+[[permission]]
+identifier = "deny-workspace-confirm-deleted-draft-copy"
+description = "Denies the workspace_confirm_deleted_draft_copy command without any pre-configured scope."
+commands.deny = ["workspace_confirm_deleted_draft_copy"]

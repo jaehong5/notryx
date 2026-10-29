@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-move-status"
+description = "Enables the workspace_move_status command without any pre-configured scope."
+commands.allow = ["workspace_move_status"]
+
+[[permission]]
+identifier = "deny-workspace-move-status"
+description = "Denies the workspace_move_status command without any pre-configured scope."
+commands.deny = ["workspace_move_status"]

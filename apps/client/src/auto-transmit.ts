@@ -13,8 +13,10 @@ export type QueuedOperation = {
 
 export type TransmitResult =
   | { status: "committed" | "conflict" | "failed" | "abandoned"; operationId: string }
+  | { status: "content_blocked"; binding: string; operationId: string; documentId: string }
+  | { status: "permission_denied"; operationId: string }
   | { status: "ack_pending" | "auth_required" | "gateway_auth_required"; operationId?: string }
-  | { status: "idle" | "pending" | "offline" | "needs_review" };
+  | { status: "idle" | "pending" | "offline" | "needs_review" | "sync_pending" };
 
 export type AuthRequiredReason = "auth_required" | "gateway_auth_required";
 
@@ -29,6 +31,7 @@ export type AutoTransmitPorts = {
   transmit(): Promise<TransmitResult>;
   acknowledged(scope: TransmitScope, generation: string, current: boolean): void;
   authRequired(reason: AuthRequiredReason): void;
+  permissionDenied?(operationId: string): void;
   failed(error: unknown): void;
   queueStorageFailed?(scope: TransmitScope): void;
   queueRecovered?(scope: TransmitScope): void;
@@ -47,6 +50,7 @@ type DocumentState = {
   active: boolean;
   closing: boolean;
   restored: boolean;
+  conflictHeld: boolean;
   timer?: ReturnType<typeof setTimeout>;
   pending?: Promise<void>;
   pendingTarget?: bigint;
@@ -83,6 +87,13 @@ export class AutoTransmit {
   private retryTimer?: ReturnType<typeof setTimeout>;
   private retryDelay = 1000;
   private requiresReview = false;
+  private contentConflictStop?: { binding: string; operationId: string };
+  private contentApprovalDuringSend?: { binding: string; operationId: string };
+  private restorePermissionStop?: { binding: string; operationId: string };
+  private restoreCancelDuringSend?: { binding: string; operationId: string };
+  private requiresSync = false;
+  private resumeRevision = 0;
+  private syncResumeRevision = 0;
   private stopped = false;
   private activeBinding?: string;
   private quietUntil = 0;
@@ -99,7 +110,7 @@ export class AutoTransmit {
     if (this.activeBinding !== undefined && scope.binding !== this.activeBinding) throw new Error("stale_registration");
     const identity = key(scope);
     if (this.documents.has(identity)) throw new Error("session_already_initialized");
-    this.documents.set(identity, { scope: { ...scope }, latest: 0n, durable: 0n, queued: 0n, composing: false, awaitingComposition: false, active: true, closing: false, restored: false, queueRetryDelay: 1000 });
+    this.documents.set(identity, { scope: { ...scope }, latest: 0n, durable: 0n, queued: 0n, composing: false, awaitingComposition: false, active: true, closing: false, restored: false, conflictHeld: false, queueRetryDelay: 1000 });
   }
 
   activateBinding(binding: string): void {
@@ -121,6 +132,11 @@ export class AutoTransmit {
       this.retryTimer = undefined;
       this.retryDelay = 1000;
       this.requiresReview = false;
+      this.contentConflictStop = undefined;
+      this.contentApprovalDuringSend = undefined;
+      this.restorePermissionStop = undefined;
+      this.restoreCancelDuringSend = undefined;
+      this.requiresSync = false;
       this.transmitPending = true;
       this.startTransmission();
     }
@@ -162,8 +178,21 @@ export class AutoTransmit {
     clearTimeout(this.quietTimer);
     this.quietTimer = setTimeout(() => {
       this.quietTimer = undefined;
-      this.startTransmission();
+      this.quietElapsed();
     }, 1000);
+  }
+
+  private quietElapsed(): void {
+    if (this.stopped) return;
+    const remaining = this.quietUntil - performance.now();
+    if (remaining > 0) {
+      this.quietTimer = setTimeout(() => {
+        this.quietTimer = undefined;
+        this.quietElapsed();
+      }, Math.ceil(remaining));
+      return;
+    }
+    this.startTransmission();
   }
 
   unscopedEdit(sessionId: string, generation: string): void {
@@ -216,6 +245,7 @@ export class AutoTransmit {
   async flushDocument(scope: TransmitScope): Promise<void> {
     const state = this.documents.get(key(scope));
     if (!state) return;
+    if (state.conflictHeld) throw new Error("conflict_resolution_in_progress");
     if (state.composing) throw new Error("composition_in_progress");
     clearTimeout(state.timer);
     state.timer = undefined;
@@ -253,14 +283,105 @@ export class AutoTransmit {
     await this.closeSession(state, close);
   }
 
+  async holdConflictSession(scope: TransmitScope): Promise<void> {
+    const state = this.document(scope);
+    if (state.conflictHeld) throw new Error("conflict_resolution_in_progress");
+    if (state.composing) throw new Error("composition_in_progress");
+    state.conflictHeld = true;
+    clearTimeout(state.timer);
+    state.timer = undefined;
+    try {
+      if (state.pending) await state.pending;
+      this.startTransmission();
+    } catch (cause) {
+      state.conflictHeld = false;
+      this.schedule(state);
+      throw cause;
+    }
+  }
+
+  releaseConflictSession(scope: TransmitScope): void {
+    const state = this.documents.get(key(scope));
+    if (!state || !state.active || state.closing) throw new Error("stale_session");
+    if (!state.conflictHeld) throw new Error("conflict_resolution_not_held");
+    state.conflictHeld = false;
+    this.schedule(state);
+    this.startTransmission();
+  }
+
+  retireConflictSession(scope: TransmitScope): void {
+    const state = this.documents.get(key(scope));
+    if (!state || !state.active || state.closing) throw new Error("stale_session");
+    if (!state.conflictHeld || state.composing || state.pending || state.latest !== state.durable) throw new Error("checkpoint_pending");
+    state.conflictHeld = false;
+    state.active = false;
+    clearTimeout(state.timer);
+    state.timer = undefined;
+    state.awaitingComposition = false;
+    this.documents.delete(key(state.scope));
+    this.startTransmission();
+  }
+
   resume(): void {
     if (this.stopped) return;
+    this.resumeRevision++;
     clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
     this.retryDelay = 1000;
+    this.requiresReview = this.contentConflictStop !== undefined;
+    this.restorePermissionStop = undefined;
+    this.restoreCancelDuringSend = undefined;
+    this.requiresSync = false;
+    this.transmitPending = true;
+    this.startTransmission();
+  }
+
+  resumeSync(): void {
+    if (this.stopped) return;
+    this.syncResumeRevision++;
+    this.requiresSync = false;
+    this.transmitPending = true;
+    this.startTransmission();
+  }
+
+  resumeContentAfterAbandon(binding: string, operationId: string): boolean {
+    if (this.stopped || this.requiresSync || this.activeBinding !== binding || !operationId) return false;
+    const stopped = this.contentConflictStop;
+    if (this.requiresReview) {
+      if (!stopped || stopped.binding !== binding || stopped.operationId !== operationId) return false;
+      this.contentConflictStop = undefined;
+      this.requiresReview = false;
+      this.transmitPending = true;
+      this.startTransmission();
+      return true;
+    }
+    if (!this.transmitting) return false;
+    const pending = this.contentApprovalDuringSend;
+    if (pending && (pending.binding !== binding || pending.operationId !== operationId)) return false;
+    this.contentApprovalDuringSend = { binding, operationId };
+    return true;
+  }
+
+  resumeRestoreAfterCancel(binding: string, operationId: string): boolean {
+    if (this.stopped || this.requiresSync || this.activeBinding !== binding || !operationId) return false;
+    const stopped = this.restorePermissionStop;
+    if (!this.requiresReview && this.transmitting) {
+      this.restoreCancelDuringSend = { binding, operationId };
+      this.transmitPending = true;
+      return true;
+    }
+    if (!this.requiresReview || !stopped || stopped.binding !== binding || stopped.operationId !== operationId) return false;
+    this.restorePermissionStop = undefined;
     this.requiresReview = false;
     this.transmitPending = true;
     this.startTransmission();
+    return true;
+  }
+
+  retryRestoreAfterPermissionDenied(binding: string, operationId: string): boolean {
+    const stopped = this.restorePermissionStop;
+    if (!this.requiresReview || !stopped || stopped.binding !== binding || stopped.operationId !== operationId) return false;
+    return this.resumeRestoreAfterCancel(binding, operationId);
   }
 
   kick(): void {
@@ -278,7 +399,7 @@ export class AutoTransmit {
     await this.flushDocument(scope);
     if (this.activeBinding !== undefined && scope.binding !== this.activeBinding) throw new Error("stale_registration");
     if (state && !state.active) throw new Error("stale_session");
-    if (this.requiresReview || this.stopped) return;
+    if (this.requiresReview || this.requiresSync || this.stopped) return;
     if (revision !== this.inputRevision) return;
     clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
@@ -331,7 +452,7 @@ export class AutoTransmit {
   private schedule(state: DocumentState): void {
     clearTimeout(state.timer);
     state.timer = undefined;
-    if (!state.active || state.composing || (this.activeBinding !== undefined && state.scope.binding !== this.activeBinding) || state.latest !== state.durable || state.durable <= state.queued || state.firstPendingAt === undefined || state.lastEditAt === undefined) return;
+    if (!state.active || state.conflictHeld || state.composing || (this.activeBinding !== undefined && state.scope.binding !== this.activeBinding) || state.latest !== state.durable || state.durable <= state.queued || state.firstPendingAt === undefined || state.lastEditAt === undefined) return;
     const deadline = Math.max(state.lastEditAt + 1000, state.queueRetryAt ?? 0);
     state.timer = setTimeout(() => {
       state.timer = undefined;
@@ -399,7 +520,7 @@ export class AutoTransmit {
   }
 
   private startTransmission(): void {
-    if (this.stopped || this.transmitting || !this.transmitPending || this.requiresReview || this.retryTimer !== undefined || this.blocked()) return;
+    if (this.stopped || this.transmitting || !this.transmitPending || this.requiresReview || this.requiresSync || this.retryTimer !== undefined || this.blocked()) return;
     this.transmitPending = false;
     this.transmitting = true;
     void this.drain().catch((error) => {
@@ -417,6 +538,7 @@ export class AutoTransmit {
     if (this.inputComposing || this.unscopedPending || (!this.manualTransmission && performance.now() < this.quietUntil)) return true;
     return [...this.documents.values()].some((state) => {
       if (this.activeBinding !== undefined && state.scope.binding !== this.activeBinding) return false;
+      if (state.conflictHeld && !state.pending && state.latest === state.durable) return false;
       if (state.active && state.composing) return true;
       if (state.active && (state.latest !== state.durable || state.latest > state.queued)) return true;
       if (state.awaitingComposition && state.latest === state.durable && state.durable === state.queued) {
@@ -436,13 +558,21 @@ export class AutoTransmit {
         return;
       }
       const binding = this.activeBinding;
+      const resumeRevision = this.resumeRevision;
+      const syncResumeRevision = this.syncResumeRevision;
       let result: TransmitResult;
       try {
         result = await this.ports.transmit();
       } catch (error) {
+        this.restoreCancelDuringSend = undefined;
+        this.contentApprovalDuringSend = undefined;
         if (binding !== this.activeBinding) { this.transmitPending = true; return; }
         throw error;
       }
+      const cancelledRestore = this.restoreCancelDuringSend;
+      this.restoreCancelDuringSend = undefined;
+      const approvedContent = this.contentApprovalDuringSend;
+      this.contentApprovalDuringSend = undefined;
       if (this.stopped) return;
       if (binding !== this.activeBinding) { this.transmitPending = true; return; }
       if (result.status === "idle") {
@@ -456,9 +586,44 @@ export class AutoTransmit {
         }
         return;
       }
+      if (result.status === "sync_pending") {
+        this.manualTransmission = false;
+        if (syncResumeRevision !== this.syncResumeRevision) {
+          this.transmitPending = true;
+          return;
+        }
+        this.requiresSync = true;
+        this.transmitPending = false;
+        return;
+      }
+      if (result.status === "content_blocked") {
+        this.manualTransmission = false;
+        if (!binding || result.binding !== binding || !result.operationId || !result.documentId) {
+          this.requiresReview = true;
+          this.contentConflictStop = undefined;
+          this.transmitPending = false;
+          this.ports.failed(new Error("invalid_content_block"));
+          return;
+        }
+        if (approvedContent?.binding === binding && approvedContent.operationId === result.operationId) {
+          this.transmitPending = true;
+          return;
+        }
+        this.requiresReview = true;
+        this.restorePermissionStop = undefined;
+        this.contentConflictStop = { binding, operationId: result.operationId };
+        this.transmitPending = false;
+        return;
+      }
       if (result.status === "needs_review") {
         this.manualTransmission = false;
+        if (resumeRevision !== this.resumeRevision) {
+          this.transmitPending = true;
+          return;
+        }
         this.requiresReview = true;
+        this.contentConflictStop = undefined;
+        this.restorePermissionStop = undefined;
         this.transmitPending = false;
         return;
       }
@@ -469,8 +634,34 @@ export class AutoTransmit {
           if (operation && operation.binding === binding) operation.awaitingIdle = true;
         }
         this.requiresReview = true;
+        this.contentConflictStop = undefined;
+        this.restorePermissionStop = undefined;
         this.transmitPending = false;
         this.ports.authRequired(result.status);
+        return;
+      }
+      if (result.status === "permission_denied") {
+        this.manualTransmission = false;
+        if (!binding || !result.operationId) {
+          this.requiresReview = true;
+          this.transmitPending = false;
+          this.restorePermissionStop = undefined;
+          this.ports.failed(new Error("invalid_permission_result"));
+          return;
+        }
+        if (resumeRevision !== this.resumeRevision) {
+          this.transmitPending = true;
+          return;
+        }
+        if (cancelledRestore && cancelledRestore.binding === binding && cancelledRestore.operationId === result.operationId) {
+          this.transmitPending = true;
+          return;
+        }
+        this.requiresReview = true;
+        this.contentConflictStop = undefined;
+        this.transmitPending = false;
+        this.restorePermissionStop = { binding, operationId: result.operationId };
+        this.ports.permissionDenied?.(result.operationId);
         return;
       }
       if (result.status === "pending" || result.status === "offline" || result.status === "ack_pending") {

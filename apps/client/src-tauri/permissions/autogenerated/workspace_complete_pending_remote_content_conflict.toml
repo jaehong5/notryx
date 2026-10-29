@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-complete-pending-remote-content-conflict"
+description = "Enables the workspace_complete_pending_remote_content_conflict command without any pre-configured scope."
+commands.allow = ["workspace_complete_pending_remote_content_conflict"]
+
+[[permission]]
+identifier = "deny-workspace-complete-pending-remote-content-conflict"
+description = "Denies the workspace_complete_pending_remote_content_conflict command without any pre-configured scope."
+commands.deny = ["workspace_complete_pending_remote_content_conflict"]

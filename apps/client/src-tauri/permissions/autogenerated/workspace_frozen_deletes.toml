@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-frozen-deletes"
+description = "Enables the workspace_frozen_deletes command without any pre-configured scope."
+commands.allow = ["workspace_frozen_deletes"]
+
+[[permission]]
+identifier = "deny-workspace-frozen-deletes"
+description = "Denies the workspace_frozen_deletes command without any pre-configured scope."
+commands.deny = ["workspace_frozen_deletes"]

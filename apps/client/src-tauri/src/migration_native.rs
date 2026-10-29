@@ -1,10 +1,10 @@
 use crate::{check_caller, gate::RequestGate, to_contract};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use notryx_client_store::RecoveryStore;
+use notryx_client_store::{RecoveryOperationKind, RecoveryStore};
 use notryx_protocol::{
     ClientStartupMode, ClientStartupStatus, MigrationDraft, MigrationInventory,
-    MigrationInventoryRequest, MigrationOperation, MigrationSource, MigrationSourceKind,
-    MigrationSourceRequest,
+    MigrationInventoryRequest, MigrationOperation, MigrationOperationKind, MigrationSource,
+    MigrationSourceKind, MigrationSourceRequest,
 };
 use std::sync::Arc;
 use tauri::Webview;
@@ -135,6 +135,15 @@ async fn recovery_inventory(
             binding: operation.registration.map(to_contract),
             sequence: operation.sequence.map(|value| value.to_string()),
             generation: operation.generation.map(|value| value.to_string()),
+            kind: operation.kind.map(|kind| match kind {
+                RecoveryOperationKind::Content => MigrationOperationKind::Content,
+                RecoveryOperationKind::Restore => MigrationOperationKind::Restore,
+                RecoveryOperationKind::Create => MigrationOperationKind::Create,
+                RecoveryOperationKind::Delete => MigrationOperationKind::Delete,
+                RecoveryOperationKind::Move => MigrationOperationKind::Move,
+            }),
+            expected_node_etag: operation.expected_node_etag,
+            expected_meta_etag: operation.expected_meta_etag,
             status: operation.status,
             terminal_kind: operation.terminal_kind,
             registration_status: operation.registration_status,
@@ -269,7 +278,7 @@ mod tests {
         )
         .await
         .unwrap();
-        sqlx::raw_sql("CREATE TABLE draft_checkpoints (document_id TEXT PRIMARY KEY, generation INTEGER, format_version INTEGER, bytes BLOB); CREATE TABLE draft_bases (document_id TEXT PRIMARY KEY, bytes BLOB, revision TEXT); CREATE TABLE registered_documents (registration_id INTEGER, document_id TEXT, storage_id TEXT); CREATE TABLE client_registrations (id INTEGER PRIMARY KEY, server_origin TEXT, workspace_id TEXT, workspace_epoch TEXT, device_id TEXT, device_stream_id TEXT, status TEXT); CREATE TABLE client_outbox (operation_id TEXT PRIMARY KEY, registration_id INTEGER, operation_seq INTEGER, document_id TEXT, generation INTEGER, bytes BLOB, status TEXT); INSERT INTO client_registrations VALUES (1, 'https://example.invalid', '11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333', '44444444-4444-4444-8444-444444444444', 'frozen'); INSERT INTO draft_checkpoints VALUES ('draft', 1, 1, X'61'); INSERT INTO draft_bases VALUES ('draft', X'62', 'rev'); INSERT INTO registered_documents VALUES (1, 'doc', 'draft'); INSERT INTO client_outbox VALUES ('op', 1, 1, 'doc', 1, X'62', 'sent'); PRAGMA application_id=1314148952; PRAGMA user_version=3;").execute(&mut db).await.unwrap();
+        sqlx::raw_sql("CREATE TABLE draft_checkpoints (document_id TEXT PRIMARY KEY, generation INTEGER, format_version INTEGER, bytes BLOB); CREATE TABLE draft_bases (document_id TEXT PRIMARY KEY, bytes BLOB, revision TEXT); CREATE TABLE registered_documents (registration_id INTEGER, document_id TEXT, storage_id TEXT); CREATE TABLE client_registrations (id INTEGER PRIMARY KEY, server_origin TEXT, workspace_id TEXT, workspace_epoch TEXT, device_id TEXT, device_stream_id TEXT, status TEXT); CREATE TABLE client_outbox (operation_id TEXT PRIMARY KEY, registration_id INTEGER, operation_seq INTEGER, document_id TEXT, generation INTEGER, bytes BLOB, status TEXT, expected_revision TEXT); INSERT INTO client_registrations VALUES (1, 'https://example.invalid', '11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333', '44444444-4444-4444-8444-444444444444', 'frozen'); INSERT INTO draft_checkpoints VALUES ('draft', 1, 1, X'61'); INSERT INTO draft_bases VALUES ('draft', X'62', 'rev'); INSERT INTO registered_documents VALUES (1, 'doc', 'draft'); INSERT INTO client_outbox VALUES ('op', 1, 1, 'doc', 1, X'62', 'sent', 'rev'); PRAGMA application_id=1314148952; PRAGMA user_version=3;").execute(&mut db).await.unwrap();
         if damage_drafts {
             sqlx::query("DROP TABLE registered_documents")
                 .execute(&mut db)
@@ -313,5 +322,156 @@ mod tests {
                 assert!(result.draft_error.is_none());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn recovery_inventory_distinguishes_restore_requests_and_preserves_raw_bytes() {
+        use notryx_client_store::{ClientStore, RegistrationBinding};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("drafts.db");
+        let binding = RegistrationBinding {
+            server_origin: "https://workspace.example".into(),
+            workspace_id: "00000000-0000-4000-8000-000000000001".into(),
+            workspace_epoch: "00000000-0000-4000-8000-000000000002".into(),
+            device_id: "00000000-0000-4000-8000-000000000003".into(),
+            device_stream_id: "00000000-0000-4000-8000-000000000004".into(),
+        };
+        let mut store = ClientStore::open(&path).await.unwrap();
+        store.activate_registration(&binding).await.unwrap();
+        let opened = store
+            .open_registered_document(&binding, "doc", b"base", "rev-a")
+            .await
+            .unwrap();
+        store
+            .save_registered_checkpoint(&binding, "doc", &opened.edit_session_id, 1, b"edited")
+            .await
+            .unwrap();
+        let content = store.queue_checkpoint(&binding, "doc", 1).await.unwrap();
+        let request: notryx_protocol::RestoreNodeRequest = serde_json::from_value(serde_json::json!({"expected_meta_rev":"meta-1", "parent_id":"019a1000-0000-7000-8000-000000000001", "name":"restored.md"})).unwrap();
+        let restore = store
+            .queue_restore(
+                &binding,
+                "019a1000-0000-7000-8000-000000000002".parse().unwrap(),
+                &request,
+            )
+            .await
+            .unwrap();
+        store
+            .close_registered_document(&binding, "doc", &opened.edit_session_id)
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+        let mut recovery = RecoveryStore::open(&path).await.unwrap();
+        let inventory = recovery_inventory(
+            &mut recovery,
+            &MigrationInventoryRequest {
+                renderer_session_id: "owner".into(),
+                draft_after_id: None,
+                operation_after_id: None,
+                include_drafts: true,
+                include_operations: true,
+            },
+        )
+        .await
+        .unwrap();
+        let content_row = inventory
+            .operations
+            .iter()
+            .find(|item| item.operation_id == content.operation_id)
+            .unwrap();
+        let restore_row = inventory
+            .operations
+            .iter()
+            .find(|item| item.operation_id == restore.operation_id)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(content_row).unwrap()["kind"],
+            "content"
+        );
+        assert_eq!(
+            serde_json::to_value(restore_row).unwrap()["kind"],
+            "restore"
+        );
+        for (id, expected) in [
+            (content.operation_id, b"edited".to_vec()),
+            (restore.operation_id, serde_json::to_vec(&request).unwrap()),
+        ] {
+            let bytes = source_bytes(
+                &mut recovery,
+                &MigrationSourceRequest {
+                    renderer_session_id: "owner".into(),
+                    kind: MigrationSourceKind::Outbox,
+                    id: Some(id),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(bytes, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_inventory_exposes_frozen_move_condition_and_payload() {
+        use notryx_client_store::{ClientStore, RegistrationBinding};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("drafts.db");
+        let binding = RegistrationBinding {
+            server_origin: "https://workspace.example".into(),
+            workspace_id: "00000000-0000-4000-8000-000000000001".into(),
+            workspace_epoch: "00000000-0000-4000-8000-000000000002".into(),
+            device_id: "00000000-0000-4000-8000-000000000003".into(),
+            device_stream_id: "00000000-0000-4000-8000-000000000004".into(),
+        };
+        let mut store = ClientStore::open(&path).await.unwrap();
+        store.activate_registration(&binding).await.unwrap();
+        store.close().await.unwrap();
+        let payload = br#"{"expected_parent_id":"019a1000-0000-7000-8000-000000000001","parent_id":"019a1000-0000-7000-8000-000000000002","name":"renamed.md"}"#;
+        let mut db = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&path)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE client_registrations SET status='frozen' WHERE id=1")
+            .execute(&mut db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO client_outbox (operation_id,registration_id,operation_seq,operation_kind,document_id,expected_revision,bytes,payload_hash,status,payload_len) VALUES ('move-op',1,1,'move','019a1000-0000-7000-8000-000000000003',?,?,'synthetic-hash','sent',?)")
+            .bind("\"meta-1\"").bind(payload.as_slice()).bind(payload.len() as i64).execute(&mut db).await.unwrap();
+        db.close().await.unwrap();
+        let mut recovery = RecoveryStore::open(&path).await.unwrap();
+        let inventory = recovery_inventory(
+            &mut recovery,
+            &MigrationInventoryRequest {
+                renderer_session_id: "owner".into(),
+                draft_after_id: None,
+                operation_after_id: None,
+                include_drafts: true,
+                include_operations: true,
+            },
+        )
+        .await
+        .unwrap();
+        let operation = inventory
+            .operations
+            .iter()
+            .find(|item| item.operation_id == "move-op")
+            .unwrap();
+        assert_eq!(operation.kind, Some(MigrationOperationKind::Move));
+        assert_eq!(operation.expected_meta_etag.as_deref(), Some("\"meta-1\""));
+        assert_eq!(operation.registration_status.as_deref(), Some("frozen"));
+        assert!(!operation.metadata_error);
+        let bytes = source_bytes(
+            &mut recovery,
+            &MigrationSourceRequest {
+                renderer_session_id: "owner".into(),
+                kind: MigrationSourceKind::Outbox,
+                id: Some("move-op".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(bytes, payload);
     }
 }

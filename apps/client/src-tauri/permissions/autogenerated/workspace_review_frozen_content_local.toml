@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-review-frozen-content-local"
+description = "Enables the workspace_review_frozen_content_local command without any pre-configured scope."
+commands.allow = ["workspace_review_frozen_content_local"]
+
+[[permission]]
+identifier = "deny-workspace-review-frozen-content-local"
+description = "Denies the workspace_review_frozen_content_local command without any pre-configured scope."
+commands.deny = ["workspace_review_frozen_content_local"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-prepare-remote-refresh"
+description = "Enables the workspace_prepare_remote_refresh command without any pre-configured scope."
+commands.allow = ["workspace_prepare_remote_refresh"]
+
+[[permission]]
+identifier = "deny-workspace-prepare-remote-refresh"
+description = "Denies the workspace_prepare_remote_refresh command without any pre-configured scope."
+commands.deny = ["workspace_prepare_remote_refresh"]

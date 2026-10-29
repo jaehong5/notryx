@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-search"
+description = "Enables the workspace_search command without any pre-configured scope."
+commands.allow = ["workspace_search"]
+
+[[permission]]
+identifier = "deny-workspace-search"
+description = "Denies the workspace_search command without any pre-configured scope."
+commands.deny = ["workspace_search"]

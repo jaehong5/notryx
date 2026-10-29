@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-commit-remote-refresh"
+description = "Enables the workspace_commit_remote_refresh command without any pre-configured scope."
+commands.allow = ["workspace_commit_remote_refresh"]
+
+[[permission]]
+identifier = "deny-workspace-commit-remote-refresh"
+description = "Denies the workspace_commit_remote_refresh command without any pre-configured scope."
+commands.deny = ["workspace_commit_remote_refresh"]

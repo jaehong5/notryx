@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-reopen-deleted-draft-copy"
+description = "Enables the workspace_reopen_deleted_draft_copy command without any pre-configured scope."
+commands.allow = ["workspace_reopen_deleted_draft_copy"]
+
+[[permission]]
+identifier = "deny-workspace-reopen-deleted-draft-copy"
+description = "Denies the workspace_reopen_deleted_draft_copy command without any pre-configured scope."
+commands.deny = ["workspace_reopen_deleted_draft_copy"]

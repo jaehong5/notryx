@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, drawSelection } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
@@ -7,17 +7,34 @@ import { markdown } from "@codemirror/lang-markdown";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { EditorController, initialEditorState } from "./editor-controller";
-import { openDocument, saveDocument, closeDocument, pairWorkspace, workspaceInventory, openWorkspaceDocument, saveWorkspaceDocument, closeWorkspaceDocument, localDrafts, openLocalDraft, adoptPendingPair, discardPendingPair, pendingPairStatus, queueWorkspaceDocument, sendNextWorkspaceOperation, previewWorkspaceImage, workspaceDocumentOutbox, openWorkspaceExternal, recoverWorkspaceSource } from "./ipc";
+import { openDocument, saveDocument, closeDocument, pairWorkspace, workspaceInventory, workspaceCreateParents, workspaceFrozenCreates, resolveWorkspaceFrozenCreate, workspaceFrozenDeletes, resolveWorkspaceFrozenDelete, workspaceFrozenMoves, resolveWorkspaceFrozenMove, workspaceSyncState, openWorkspaceDocument, prepareWorkspaceRemoteRefresh, commitWorkspaceRemoteRefresh, inspectWorkspaceRemoteChange, saveWorkspaceDocument, closeWorkspaceDocument, localDrafts, openLocalDraft, adoptPendingPair, discardPendingPair, pendingPairStatus, queueWorkspaceDocument, sendNextWorkspaceOperation, previewWorkspaceImage, workspaceDocumentOutbox, openWorkspaceExternal, recoverWorkspaceSource, workspaceTrash, queueWorkspaceRestore, workspaceRestoreStatus, requestWorkspaceRestoreAbandon, queueWorkspaceCreate, workspaceCreateStatus, requestWorkspaceCreateAbandon, queueWorkspaceDelete, workspaceDeleteStatus, requestWorkspaceDeleteAbandon, queueWorkspaceMove, workspaceMoveStatus, requestWorkspaceMoveAbandon, workspaceSearch, cancelWorkspaceSearch, prepareWorkspaceContentConflict, chooseWorkspaceRemoteContentConflict, confirmWorkspaceContentConflictCopy, retryWorkspaceContentConflictCopy, workspaceContentConflictCopyStatus, progressWorkspaceContentConflictCopy, continueWorkspaceRemoteContentConflict, completeWorkspacePendingRemoteContentConflict, workspaceContentConflictResolutionStatus, reopenWorkspaceContentConflictCheckpoint, confirmWorkspaceContentConflictMerge, queueWorkspaceContentConflictMerge, workspaceContentConflictMergeStatus, workspaceContentConflictMergeFollowupStatus, requestWorkspaceContentConflictMergeFollowupAbandon, prepareWorkspaceDeletedDraftCopy, confirmWorkspaceDeletedDraftCopy, workspaceDeletedDraftCopyStatus, progressWorkspaceDeletedDraftCopy, reopenWorkspaceDeletedDraftCopy, requestWorkspaceDeletedDraftCopyFollowupAbandon, reconfirmWorkspaceDeletedDraftCopy } from "./ipc";
 import { MarkdownPreview } from "./preview";
 import { PreviewImageQueue } from "./preview-image-queue";
 import { WorkspaceListLoader, workspacePath, draftKey, draftSelectionId } from "./workspace-list";
 import { resolveWorkspaceReference } from "./workspace-reference";
+import { collectPreviewReferences } from "./preview-references";
+import { compareMoveReferences } from "./move-reference-impact";
 import { AutoTransmit, QueueStorageError, type TransmitScope } from "./auto-transmit";
 import { clearQueueError, putQueueError, QueueAlerts, type QueueError } from "./queue-errors";
 import { receiptWaitResult, staleTransmissionResult } from "./send-result";
 import { documentSizeGuard } from "./document-size-guard";
 import { StartupGate } from "./migration-recovery";
-import type { NodeState, WorkspaceDraft, WorkspaceRegistration } from "../../../packages/protocol-types";
+import { workspaceOpenError } from "./workspace-open-error";
+import { credentialStatusMessage, workspaceCredentialStatus } from "./credential-status";
+import { TrashPanel, type TrashPanelPorts } from "./trash-panel";
+import { CreatePanel, type CreatePanelPorts } from "./create-panel";
+import { DeletePanel, type DeletePanelPorts } from "./delete-panel";
+import { MovePanel, type MovePanelPorts } from "./move-panel";
+import { FrozenCreateReview, type FrozenCreateReviewPorts } from "./frozen-create-review";
+import { FrozenDeleteReview, type FrozenDeleteReviewPorts } from "./frozen-delete-review";
+import { FrozenMoveReview, type FrozenMoveReviewPorts } from "./frozen-move-review";
+import { FrozenContentReview, type FrozenContentReviewItem, type FrozenContentReviewPorts } from "./frozen-content-review";
+import { workspaceOutbox, workspaceInspectFrozenContent, workspaceInspectFrozenContentCrossEpoch, workspaceReviewFrozenContentLocal, workspaceApplyFrozenContent, workspaceApplyFrozenContentCrossEpoch, workspaceDismissFrozenContent, workspaceDismissFrozenContentLocal, workspaceFrozenContentDecisionStatus } from "./ipc";
+import { SearchPanel, type SearchPanelPorts, type SearchResult } from "./search-panel";
+import { ConflictReview, type ConflictReviewPorts, type ConflictReviewSnapshot } from "./conflict-review";
+import { ConflictCopyRetry } from "./conflict-copy-retry";
+import { DeletedDraftCopyReview } from "./deleted-draft-copy-review";
+import type { NodeState, WorkspaceContentConflictMergeFollowup, WorkspaceDeletedDraftCopySnapshot, WorkspaceDeletedDraftCopyStatus, WorkspaceDraft, WorkspaceRegistration } from "../../../packages/protocol-types";
 import "./style.css";
 
 const documents = [
@@ -25,6 +42,16 @@ const documents = [
   ["100k-b", "100 KiB 문서 B"], ["5m", "5 MiB 문서"], ["5m-b", "5 MiB 문서 B"],
   ["mixed", "혼합 줄바꿈"], ["non-utf8", "비UTF-8 원문"],
 ];
+
+type ConflictIdentity = Pick<ConflictReviewSnapshot, "binding" | "node_id" | "operation_id" | "operation_seq" | "generation">;
+type ConflictChoiceContext = { instance: EditorController; snapshot: ConflictIdentity; sessionId: string; uiId: string; version: number; merge?: boolean };
+type PendingConflictContext = ConflictChoiceContext & { intentVersion: string; generation: string; revision: number };
+type PendingMergeContext = ConflictChoiceContext & { intentVersion: string; generation: string; revision: number; queuedOperationId: string | null; queuedOperationSeq: string | null; followup?: WorkspaceContentConflictMergeFollowup | null; approval?: WorkspaceContentConflictMergeFollowup | null };
+type CopyDetails = NonNullable<Awaited<ReturnType<typeof workspaceContentConflictCopyStatus>>["copy"]>;
+type PendingCopyContext = ConflictChoiceContext & { intentVersion: string; copy: CopyDetails; approval: string | null; running: boolean; awaitingFollowup: string | null };
+type DeletedCopyReview = { instance: EditorController; snapshot: WorkspaceDeletedDraftCopySnapshot; bytes: Uint8Array; revision: number; version: number; uiId: string };
+type DeletedCopyStatusContext = { instance: EditorController; binding: WorkspaceRegistration; documentId: string; sessionId: string; uiId: string; version: number; status: WorkspaceDeletedDraftCopyStatus };
+
 
 function App() {
   const parent = useRef<HTMLDivElement>(null);
@@ -35,14 +62,24 @@ function App() {
   const previewTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const modeRef = useRef<"fixture" | "workspace">("fixture");
   const nodesRef = useRef<NodeState[]>([]);
+  const searchNodesRef = useRef(new Map<string, NodeState>());
   const listLoader = useRef(new WorkspaceListLoader());
-  const sessionModes = useRef(new Map<string, { mode: "fixture" | "workspace"; documentId: string; uiId: string; scope?: TransmitScope; binding?: WorkspaceRegistration }>());
+  const metadataVersion = useRef(0);
+  const inventoryVersion = useRef<number | null>(null);
+  const inventoryBinding = useRef<string | null>(null);
+  const sessionModes = useRef(new Map<string, { mode: "fixture" | "workspace"; documentId: string; uiId: string; scope?: TransmitScope; binding?: WorkspaceRegistration; orphanDraft?: boolean }>());
+  const unqueuedEdits = useRef(new Map<string, string>());
   const syncRevision = useRef(0);
+  const workspaceSyncRevision = useRef(0);
+  const credentialRevision = useRef(0);
+  const credentialMounted = useRef(false);
+  const workspacePageStartRef = useRef<string | null>(null);
   const selectedRef = useRef("");
   const imageQueue = useRef(new PreviewImageQueue());
   const draftsRef = useRef<WorkspaceDraft[]>([]);
   const connecting = useRef(false);
   const registrationVersion = useRef(0);
+  const workspaceBindingRef = useRef<WorkspaceRegistration | null>(null);
   const [state, setState] = useState(initialEditorState);
   const [preview, setPreview] = useState(false);
   const [previewSource, setPreviewSource] = useState("");
@@ -59,12 +96,1111 @@ function App() {
   const [pendingPair, setPendingPair] = useState(false);
   const [busy, setBusy] = useState(true);
   const [syncStatus, setSyncStatus] = useState("");
+  const [workspaceSyncMessage, setWorkspaceSyncMessage] = useState("");
+  const [credentialMessage, setCredentialMessage] = useState("");
   const [recoveryMessage, setRecoveryMessage] = useState("");
+  const [memoryRecovery, setMemoryRecovery] = useState<{ instance: EditorController; id: string; session: string; generation: string; revision: number; registration: number; binding: string; sessionRef: ReturnType<typeof sessionModes.current.get>; sessionBinding?: WorkspaceRegistration; text: string } | null>(null);
+  const [hasContentConflict, setHasContentConflict] = useState(false);
+  const [conflictPreparing, setConflictPreparing] = useState(false);
+  const [deletedCopyReview, setDeletedCopyReview] = useState<DeletedCopyReview | null>(null);
+  const [deletedCopyRecovery, setDeletedCopyRecovery] = useState<DeletedCopyReview | null>(null);
+  const [deletedCopyBusy, setDeletedCopyBusy] = useState(false);
+  const [deletedCopyRecorded, setDeletedCopyRecorded] = useState(false);
+  const [deletedCopyStatus, setDeletedCopyStatus] = useState<DeletedCopyStatusContext | null>(null);
+  const deletedCopyStatusRef = useRef<DeletedCopyStatusContext | null>(null);
+  deletedCopyStatusRef.current = deletedCopyStatus;
+  const deletedCopyStatusRequest = useRef(0);
+  const [deletedFollowupApproval, setDeletedFollowupApproval] = useState<WorkspaceDeletedDraftCopyStatus["blocking_followup"]>(null);
+  const deletedCopyRun = useRef<{ context: DeletedCopyStatusContext; phase: "followup" | "create" | "content"; followupId?: string } | null>(null);
+  const deletedCopyWakePending = useRef(false);
+  const [deletedCopyMessage, setDeletedCopyMessage] = useState("");
+  const [deletedCopyRetryOpen, setDeletedCopyRetryOpen] = useState(false);
+  const deletedCopyAction = useRef(false);
+  const [conflictMessage, setConflictMessage] = useState("");
+  const [conflictSnapshot, setConflictSnapshot] = useState<{ snapshot: ConflictReviewSnapshot; sessionId: string; revision: number; canChoose: boolean; intentVersion: string | null } | null>(null);
+  const [conflictRecovery, setConflictRecovery] = useState<ConflictChoiceContext | null>(null);
+  const [pendingConflict, setPendingConflict] = useState<PendingConflictContext | null>(null);
+  const [pendingMerge, setPendingMerge] = useState<PendingMergeContext | null>(null);
+  const pendingMergeRef = useRef<PendingMergeContext | null>(null);
+  pendingMergeRef.current = pendingMerge;
+  const [pendingCopy, setPendingCopy] = useState<PendingCopyContext | null>(null);
+  const [copyRetryOpen, setCopyRetryOpen] = useState(false);
+  const pendingCopyRef = useRef<PendingCopyContext | null>(null);
+  pendingCopyRef.current = pendingCopy;
+  const [copyRevision, setCopyRevision] = useState(0);
+  const copyWakePending = useRef(false);
+  const copyStatusRequest = useRef(0);
+  const [conflictRecovering, setConflictRecovering] = useState(false);
+  const conflictPreparingRef = useRef(false);
+  const conflictActionRef = useRef(false);
+  const conflictActionRevision = useRef(0);
+  function startConflictAction() { conflictActionRef.current = true; conflictActionRevision.current++; }
   const [recovering, setRecovering] = useState(false);
+  const [workspaceBinding, setWorkspaceBinding] = useState<WorkspaceRegistration | null>(null);
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ node: NodeState; path: string } | null>(null);
+  const [deleteRequestsOpen, setDeleteRequestsOpen] = useState(false);
+  const [moveTarget, setMoveTarget] = useState<{ node: NodeState; path: string } | null>(null);
+  const [moveRequestsOpen, setMoveRequestsOpen] = useState(false);
+  const [frozenCreateOpen, setFrozenCreateOpen] = useState(false);
+  const [frozenDeleteOpen, setFrozenDeleteOpen] = useState(false);
+  const [frozenMoveOpen, setFrozenMoveOpen] = useState(false);
+  const [frozenContentOpen, setFrozenContentOpen] = useState(false);
+  const frozenContentItems = useRef(new Map<string, FrozenContentReviewItem>());
+  const frozenContentListRevision = useRef(0);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchRevision, setSearchRevision] = useState(0);
+  const [restoreRevision, setRestoreRevision] = useState(0);
+  const [restorePermission, setRestorePermission] = useState<{ binding: string; operationId: string } | null>(null);
   const recoveringRef = useRef(false);
+  const trashPorts = useMemo<TrashPanelPorts>(() => ({ trash: workspaceTrash, folders: workspaceInventory, queue: queueWorkspaceRestore, status: workspaceRestoreStatus, cancel: requestWorkspaceRestoreAbandon }), []);
+  const createPorts = useMemo<CreatePanelPorts>(() => ({
+    folders: workspaceCreateParents,
+    queue: queueWorkspaceCreate,
+    status: workspaceCreateStatus,
+    retry: async (binding, operationId) => {
+      const key = JSON.stringify(binding);
+      if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== key || !transmitter.current?.retryRestoreAfterPermissionDenied(key, operationId)) throw new Error("stale_operation");
+      setRestorePermission((current) => current?.binding === key && current.operationId === operationId ? null : current);
+    },
+    cancel: async (binding, operationId) => {
+      await requestWorkspaceCreateAbandon(binding, operationId);
+      const key = JSON.stringify(binding);
+      if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== key) return;
+      if (!transmitter.current?.resumeRestoreAfterCancel(key, operationId)) transmitter.current?.kick();
+      setRestoreRevision((current) => current + 1);
+    },
+  }), []);
+  const deletePorts = useMemo<DeletePanelPorts>(() => ({
+    queue: queueWorkspaceDelete,
+    status: workspaceDeleteStatus,
+    retry: async (binding, operationId) => {
+      const key = JSON.stringify(binding);
+      if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== key || !transmitter.current?.retryRestoreAfterPermissionDenied(key, operationId)) throw new Error("stale_operation");
+      setRestorePermission((current) => current?.binding === key && current.operationId === operationId ? null : current);
+    },
+    cancel: async (binding, operationId) => {
+      await requestWorkspaceDeleteAbandon(binding, operationId);
+      const key = JSON.stringify(binding);
+      if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== key) return;
+      if (!transmitter.current?.resumeRestoreAfterCancel(key, operationId)) transmitter.current?.kick();
+      setRestoreRevision((current) => current + 1);
+    },
+  }), []);
+  const movePorts = useMemo<MovePanelPorts>(() => ({
+    folders: workspaceCreateParents,
+    status: workspaceMoveStatus,
+    inspect: (binding, nodeId, request) => {
+      const key = JSON.stringify(binding);
+      const controllerInstance = controller.current;
+      if (!controllerInstance || !workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== key
+        || inventoryBinding.current !== key || inventoryVersion.current !== metadataVersion.current) return { status: "unavailable" };
+      try {
+        const snapshot = controllerInstance.recoverySnapshot();
+        const session = sessionModes.current.get(snapshot.session);
+        if (snapshot.id !== nodeId || !session || session.mode !== "workspace" || session.documentId !== nodeId || !session.binding || JSON.stringify(session.binding) !== key) return { status: "unavailable" };
+        const tree = nodesRef.current;
+        const version = registrationVersion.current;
+        const metadata = metadataVersion.current;
+        const references = collectPreviewReferences(new TextDecoder("utf-8", { fatal: true }).decode(snapshot.bytes));
+        if (references.status !== "checked") return { status: "unavailable" };
+        const impact = compareMoveReferences(tree, { sourceId: nodeId, parentId: request.parent_id, name: request.name }, references.references);
+        if (impact.status !== "checked") return { status: "unavailable" };
+        return {
+          status: "checked",
+          affected: impact.results.filter((item) => item.outcome === "target_changed" || item.outcome === "unresolved_after").length,
+          unresolved: impact.results.filter((item) => item.outcome === "unresolved_before").length,
+          isCurrent: () => controller.current === controllerInstance && controllerInstance.isCurrentSnapshot(snapshot.session, snapshot.generation, snapshot.revision)
+            && nodesRef.current === tree && registrationVersion.current === version && metadataVersion.current === metadata
+            && inventoryVersion.current === metadata && inventoryBinding.current === key
+            && workspaceBindingRef.current !== null && JSON.stringify(workspaceBindingRef.current) === key,
+        };
+      } catch { return { status: "unavailable" }; }
+    },
+    queue: async (binding, request) => {
+      const version = registrationVersion.current;
+      const key = JSON.stringify(binding);
+      const operation = await queueWorkspaceMove(binding, request);
+      if (version === registrationVersion.current && workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === key) {
+        setRestoreRevision((current) => current + 1);
+        transmitter.current?.kick();
+      }
+      return operation;
+    },
+    retry: async (binding, operationId) => {
+      const key = JSON.stringify(binding);
+      if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== key || !transmitter.current?.retryRestoreAfterPermissionDenied(key, operationId)) throw new Error("stale_operation");
+      setRestorePermission((current) => current?.binding === key && current.operationId === operationId ? null : current);
+      setRestoreRevision((current) => current + 1);
+    },
+    cancel: async (binding, operationId) => {
+      const version = registrationVersion.current;
+      await requestWorkspaceMoveAbandon(binding, operationId);
+      const key = JSON.stringify(binding);
+      if (version !== registrationVersion.current || !workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== key) return;
+      if (!transmitter.current?.resumeRestoreAfterCancel(key, operationId)) transmitter.current?.kick();
+      setRestoreRevision((current) => current + 1);
+    },
+  }), []);
+  const frozenCreatePorts = useMemo<FrozenCreateReviewPorts>(() => ({
+    list: workspaceFrozenCreates,
+    folders: workspaceCreateParents,
+    decide: async (binding, oldBinding, operationId, choice) => {
+      const version = registrationVersion.current;
+      const key = JSON.stringify(binding);
+      await resolveWorkspaceFrozenCreate(binding, oldBinding, operationId, choice);
+      if (choice.kind !== "apply" || version !== registrationVersion.current || !workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== key) return;
+      setRestoreRevision((current) => current + 1);
+      transmitter.current?.kick();
+    },
+  }), []);
+  const frozenDeletePorts = useMemo<FrozenDeleteReviewPorts>(() => ({
+    list: workspaceFrozenDeletes,
+    decide: async (binding, oldBinding, operationId, choice) => {
+      const version = registrationVersion.current;
+      const key = JSON.stringify(binding);
+      await resolveWorkspaceFrozenDelete(binding, oldBinding, operationId, choice);
+      if (choice.kind !== "apply" || version !== registrationVersion.current || !workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== key) return;
+      setRestoreRevision((current) => current + 1);
+      transmitter.current?.kick();
+    },
+  }), []);
+  const frozenMovePorts = useMemo<FrozenMoveReviewPorts>(() => ({
+    list: workspaceFrozenMoves,
+    decide: async (binding, oldBinding, operationId, choice) => {
+      const version = registrationVersion.current;
+      const key = JSON.stringify(binding);
+      await resolveWorkspaceFrozenMove(binding, oldBinding, operationId, choice);
+      if (choice.kind !== "apply" || version !== registrationVersion.current || !workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== key) return;
+      setRestoreRevision((current) => current + 1);
+      transmitter.current?.kick();
+    },
+  }), []);
+  const frozenContentPorts = useMemo<FrozenContentReviewPorts>(() => ({
+    list: async (binding, cursor) => {
+      const version = registrationVersion.current, key = JSON.stringify(binding), attempt = ++frozenContentListRevision.current;
+      const current = () => registrationVersion.current === version && !!workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === key && frozenContentListRevision.current === attempt;
+      if (!current()) throw new Error("stale_registration");
+      if (cursor === null) frozenContentItems.current.clear();
+      const drafts = await localDrafts();
+      if (!current()) throw new Error("stale_registration");
+      const groups = new Map<string, { binding: WorkspaceRegistration; documents: Set<string> }>();
+      for (const draft of drafts) {
+        const oldKey = JSON.stringify(draft.binding);
+        if (draft.current_registration || draft.binding.workspace_id !== binding.workspace_id || oldKey === key) continue;
+        let group = groups.get(oldKey);
+        if (!group) { group = { binding: draft.binding, documents: new Set() }; groups.set(oldKey, group); }
+        group.documents.add(draft.document_id);
+      }
+      const keys = [...groups.keys()].sort();
+      let oldKey = keys[0], after = "0";
+      if (cursor !== null) {
+        const parsed: unknown = JSON.parse(cursor);
+        if (!Array.isArray(parsed) || parsed.length !== 2 || typeof parsed[0] !== "string" || typeof parsed[1] !== "string" || !groups.has(parsed[0]) || !/^(0|[1-9][0-9]*)$/.test(parsed[1])) throw new Error("stale_cursor");
+        [oldKey, after] = parsed;
+      }
+      if (!oldKey) return { binding, entries: [], next_after_id: null };
+      const group = groups.get(oldKey)!;
+      const page = await workspaceOutbox(group.binding, after);
+      if (!current()) throw new Error("stale_registration");
+      const entries: FrozenContentReviewItem[] = [];
+      for (const operation of page.entries) {
+        if (!operation.frozen || operation.payload_retired || !group.documents.has(operation.document_id) || (operation.status !== "queued" && operation.status !== "sent" && operation.status !== "abandoning")) continue;
+        const item = { old_binding:group.binding, operation_id:operation.operation_id, operation_seq:operation.operation_seq, document_id:operation.document_id, generation:operation.generation, status:operation.status, abandon_state:operation.abandon_state };
+        entries.push(item); frozenContentItems.current.set(JSON.stringify([oldKey, operation.operation_id]), item);
+      }
+      const nextKey = keys[keys.indexOf(oldKey) + 1];
+      const next_after_id = page.next_after_seq !== null ? JSON.stringify([oldKey, page.next_after_seq]) : nextKey ? JSON.stringify([nextKey, "0"]) : null;
+      return { binding, entries, next_after_id };
+    },
+    load: async (binding, oldBinding, operationId) => {
+      const version = registrationVersion.current, key = JSON.stringify(binding), oldKey = JSON.stringify(oldBinding);
+      const item = frozenContentItems.current.get(JSON.stringify([oldKey, operationId]));
+      const current = () => registrationVersion.current === version && !!workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === key && frozenContentItems.current.get(JSON.stringify([oldKey, operationId])) === item;
+      if (!item || !current() || oldBinding.workspace_id !== binding.workspace_id || oldKey === key) throw new Error("stale_inspection");
+      const result = await workspaceInspectFrozenContent(binding, oldBinding, operationId, item.document_id);
+      if (!current() || result.operation_seq !== item.operation_seq || result.operation_generation !== item.generation || result.operation_status !== item.status || result.abandon_state !== item.abandon_state) throw new Error("stale_inspection");
+      return { binding:result.current_binding, old_binding:result.old_binding, operation_id:result.operation_id, operation_seq:result.operation_seq, document_id:result.document_id,
+        generation:result.operation_generation, local_generation:result.local_generation, status:result.operation_status, abandon_state:result.abandon_state, expected_revision:result.expected_revision,
+        outcome_unknown:result.outcome_unknown, base_revision:result.base_revision, remote_revision:result.remote_revision, inspected:result.inspected,
+        operation_bytes:result.operation_bytes, base_bytes:result.base_bytes, local_bytes:result.local_bytes, remote_bytes:result.remote_bytes };
+    },
+    loadLocal: async (binding, oldBinding, operationId) => {
+      const version = registrationVersion.current, key = JSON.stringify(binding), oldKey = JSON.stringify(oldBinding);
+      const item = frozenContentItems.current.get(JSON.stringify([oldKey, operationId]));
+      const current = () => registrationVersion.current === version && !!workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === key && frozenContentItems.current.get(JSON.stringify([oldKey, operationId])) === item;
+      if (!item || !current() || oldBinding.workspace_id !== binding.workspace_id || oldKey === key) throw new Error("stale_inspection");
+      const result = await workspaceReviewFrozenContentLocal(binding, oldBinding, operationId, item.document_id);
+      if (!current() || result.operation_seq !== item.operation_seq || result.generation !== item.generation || result.status !== item.status || result.abandon_state !== item.abandon_state) throw new Error("stale_inspection");
+      return result;
+    },
+    loadCrossEpoch: async (binding, oldBinding, operationId) => {
+      const version = registrationVersion.current, key = JSON.stringify(binding), oldKey = JSON.stringify(oldBinding);
+      const item = frozenContentItems.current.get(JSON.stringify([oldKey, operationId]));
+      const current = () => registrationVersion.current === version && !!workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === key && frozenContentItems.current.get(JSON.stringify([oldKey, operationId])) === item;
+      if (!item || !current() || oldBinding.workspace_id !== binding.workspace_id || oldBinding.workspace_epoch === binding.workspace_epoch) throw new Error("stale_inspection");
+      const result = await workspaceInspectFrozenContentCrossEpoch(binding, oldBinding, operationId, item.document_id);
+      if (!current() || result.operation_seq !== item.operation_seq || result.generation !== item.generation || result.status !== item.status || result.abandon_state !== item.abandon_state) throw new Error("stale_inspection");
+      return result;
+    },
+    status: async (binding, oldBinding, documentId, operationId) => {
+      const version = registrationVersion.current, key = JSON.stringify(binding), oldKey = JSON.stringify(oldBinding);
+      const item = frozenContentItems.current.get(JSON.stringify([oldKey, operationId]));
+      const current = () => registrationVersion.current === version && !!workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === key && frozenContentItems.current.get(JSON.stringify([oldKey, operationId])) === item;
+      if (!item || !current() || item.document_id !== documentId) throw new Error("stale_inspection");
+      const result = await workspaceFrozenContentDecisionStatus(binding, oldBinding, documentId, operationId);
+      if (!current()) throw new Error("stale_registration");
+      return result;
+    },
+    apply: async (snapshot) => {
+      const version = registrationVersion.current, key = JSON.stringify(snapshot.binding), oldKey = JSON.stringify(snapshot.old_binding);
+      const item = frozenContentItems.current.get(JSON.stringify([oldKey, snapshot.operation_id]));
+      const current = () => registrationVersion.current === version && !!workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === key && frozenContentItems.current.get(JSON.stringify([oldKey, snapshot.operation_id])) === item;
+      if (!item || !current() || item.document_id !== snapshot.document_id || item.operation_seq !== snapshot.operation_seq || item.generation !== snapshot.generation || item.status !== snapshot.status) throw new Error("stale_inspection");
+      const result = await workspaceApplyFrozenContent(snapshot);
+      if (!current()) throw new Error("stale_registration");
+      transmitter.current?.kick();
+      return result;
+    },
+    applyCrossEpoch: async (snapshot, confirmed) => {
+      const version = registrationVersion.current, key = JSON.stringify(snapshot.binding), oldKey = JSON.stringify(snapshot.old_binding);
+      const item = frozenContentItems.current.get(JSON.stringify([oldKey, snapshot.operation_id]));
+      const current = () => registrationVersion.current === version && !!workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === key && frozenContentItems.current.get(JSON.stringify([oldKey, snapshot.operation_id])) === item;
+      if (!item || !current() || item.document_id !== snapshot.document_id || item.operation_seq !== snapshot.operation_seq || item.generation !== snapshot.generation || item.status !== snapshot.status || item.abandon_state !== snapshot.abandon_state) throw new Error("stale_inspection");
+      const result = await workspaceApplyFrozenContentCrossEpoch(snapshot, confirmed);
+      if (!current()) throw new Error("stale_registration");
+      transmitter.current?.kick();
+      return result;
+    },
+    dismiss: async (snapshot) => {
+      const version = registrationVersion.current, key = JSON.stringify(snapshot.binding), oldKey = JSON.stringify(snapshot.old_binding);
+      const item = frozenContentItems.current.get(JSON.stringify([oldKey, snapshot.operation_id]));
+      const current = () => registrationVersion.current === version && !!workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === key && frozenContentItems.current.get(JSON.stringify([oldKey, snapshot.operation_id])) === item;
+      if (!item || !current() || item.document_id !== snapshot.document_id || item.operation_seq !== snapshot.operation_seq || item.generation !== snapshot.generation || item.status !== snapshot.status || item.abandon_state !== snapshot.abandon_state) throw new Error("stale_inspection");
+      const result = await workspaceDismissFrozenContent(snapshot);
+      if (!current()) throw new Error("stale_registration");
+      return result;
+    },
+    dismissLocal: async (snapshot) => {
+      const version = registrationVersion.current, key = JSON.stringify(snapshot.binding), oldKey = JSON.stringify(snapshot.old_binding);
+      const item = frozenContentItems.current.get(JSON.stringify([oldKey, snapshot.operation_id]));
+      const current = () => registrationVersion.current === version && !!workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === key && frozenContentItems.current.get(JSON.stringify([oldKey, snapshot.operation_id])) === item;
+      if (!item || !current() || item.document_id !== snapshot.document_id || item.operation_seq !== snapshot.operation_seq || item.generation !== snapshot.generation || item.status !== snapshot.status || item.abandon_state !== snapshot.abandon_state) throw new Error("stale_inspection");
+      const result = await workspaceDismissFrozenContentLocal(snapshot);
+      if (!current()) throw new Error("stale_registration");
+      return result;
+    },
+  }), []);
+  const searchPorts = useMemo<SearchPanelPorts>(() => ({ scan: workspaceSearch, cancel: cancelWorkspaceSearch }), []);
+  const conflictReviewPorts = useMemo<ConflictReviewPorts>(() => ({
+    load: async (binding, documentId, sessionId, generation, operationId) => {
+      const current = conflictSnapshot;
+      if (!current || current.sessionId !== sessionId || current.snapshot.node_id !== documentId || current.snapshot.generation !== generation || current.snapshot.operation_id !== operationId || JSON.stringify(current.snapshot.binding) !== JSON.stringify(binding)) throw new Error("stale_conflict");
+      return current.snapshot;
+    },
+  }), [conflictSnapshot]);
 
   function reportQueueError(scope: TransmitScope, message: string): void {
     setQueueErrors((errors) => putQueueError(errors, scope, message));
+  }
+
+  function deletedCopyCurrent(context: DeletedCopyReview): boolean {
+    return controller.current === context.instance && registrationVersion.current === context.version &&
+      !!workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === JSON.stringify(context.snapshot.binding) &&
+      context.instance.isCurrentSnapshot(context.snapshot.edit_session_id, context.snapshot.generation, context.revision);
+  }
+
+  function deletedStatusCurrent(context: Omit<DeletedCopyStatusContext, "status">): boolean {
+    const session = sessionModes.current.get(context.sessionId);
+    return controller.current === context.instance && context.instance.isCurrentSession(context.sessionId) &&
+      registrationVersion.current === context.version && !!workspaceBindingRef.current &&
+      JSON.stringify(workspaceBindingRef.current) === JSON.stringify(context.binding) &&
+      !!session?.scope && session.uiId === context.uiId && session.documentId === context.documentId &&
+      session.scope.binding === JSON.stringify(context.binding);
+  }
+
+  async function loadDeletedCopyStatus(context: Omit<DeletedCopyStatusContext, "status">, expected?: { previous: WorkspaceDeletedDraftCopyStatus; nodeId: string; operationId: string; parentId: string; name: string }): Promise<WorkspaceDeletedDraftCopyStatus | null> {
+    const attempt = ++deletedCopyStatusRequest.current;
+    const status = await workspaceDeletedDraftCopyStatus(context.binding, context.documentId);
+    if (attempt !== deletedCopyStatusRequest.current || !deletedStatusCurrent(context)) throw new Error("stale_deleted_copy_status");
+    if (status && (JSON.stringify(status.binding) !== JSON.stringify(context.binding) || status.document_id !== context.documentId)) throw new Error("stale_deleted_copy_status");
+    if (expected && (!status || status.node_id !== expected.nodeId || status.create_operation_id !== expected.operationId || status.parent_id !== expected.parentId || status.name !== expected.name || status.generation !== expected.previous.generation || status.local_hash !== expected.previous.local_hash || status.tombstone_seq !== expected.previous.tombstone_seq || status.terminal_operation_id !== expected.previous.terminal_operation_id)) throw new Error("stale_deleted_copy_status");
+    const next = status ? { ...context, status } : null;
+    deletedCopyStatusRef.current = next;
+    setDeletedCopyStatus(next);
+    setDeletedFollowupApproval((previous) => previous && status?.blocking_followup && previous.blocker_operation_id === status.blocking_followup.blocker_operation_id && previous.followup_operation_id === status.blocking_followup.followup_operation_id && previous.followup_operation_seq === status.blocking_followup.followup_operation_seq && previous.followup_generation === status.blocking_followup.followup_generation && previous.followup_hash === status.blocking_followup.followup_hash ? previous : null);
+    if (status) setDeletedCopyRecorded(true);
+    return status;
+  }
+
+  async function refreshDeletedCopyStatus(): Promise<void> {
+    const context = deletedCopyStatusRef.current;
+    if (!context || deletedCopyAction.current) return;
+    deletedCopyAction.current = true; setDeletedCopyBusy(true);
+    try {
+      const status = await loadDeletedCopyStatus(context);
+      if (!status) throw new Error("missing_deleted_copy");
+      setDeletedCopyMessage("사본 상태를 확인했습니다. 원래 문서는 자동으로 복원하지 않습니다.");
+    } catch {
+      deletedCopyRun.current = null;
+      deletedCopyWakePending.current = false;
+      if (deletedStatusCurrent(context)) setDeletedCopyMessage("사본 상태를 확인하지 못했습니다. 기기 초안은 보존됩니다.");
+    } finally { deletedCopyAction.current = false; setDeletedCopyBusy(false); if (deletedCopyWakePending.current) { deletedCopyWakePending.current = false; setCopyRevision((revision) => revision + 1); } }
+  }
+
+  async function reconfirmDeletedCopy(parentId: string, name: string): Promise<void> {
+    const context = deletedCopyStatusRef.current;
+    if (!context || deletedCopyAction.current || !deletedStatusCurrent(context)) return;
+    const previous = context.status;
+    if (previous.create_status !== "needs_review" || previous.create_failure !== "destination_exists" || (parentId === previous.parent_id && name === previous.name)) return;
+    const requestRevision = deletedCopyStatusRequest.current;
+    deletedCopyAction.current = true; setDeletedCopyBusy(true);
+    try {
+      const result = await reconfirmWorkspaceDeletedDraftCopy(context.binding, context.documentId, previous.create_operation_id, parentId, name);
+      if (!deletedStatusCurrent(context) || requestRevision !== deletedCopyStatusRequest.current || deletedCopyStatusRef.current !== context) return;
+      if (result.node_id === previous.node_id || result.create_operation_id === previous.create_operation_id) throw new Error("stale_deleted_copy");
+      await loadDeletedCopyStatus(context, { previous, nodeId:result.node_id, operationId:result.create_operation_id, parentId, name });
+      setDeletedCopyRetryOpen(false);
+      setDeletedCopyMessage("새 사본 대상이 이 기기에 기록됐습니다. 서버 사본 저장은 아직 완료되지 않았습니다.");
+    } catch {
+      if (deletedStatusCurrent(context)) {
+        setDeletedCopyRetryOpen(false);
+        setDeletedCopyMessage("사본 재승인 결과를 확인하지 못했습니다. 기기 초안은 보존됩니다. 사본 상태를 다시 확인해 주세요.");
+      }
+    } finally { deletedCopyAction.current = false; setDeletedCopyBusy(false); if (deletedCopyWakePending.current) { deletedCopyWakePending.current = false; setCopyRevision((revision) => revision + 1); } }
+  }
+
+  async function progressDeletedCopy(): Promise<void> {
+    const context = deletedCopyStatusRef.current;
+    if (!context || deletedCopyAction.current || !deletedStatusCurrent(context)) return;
+    const status = context.status;
+    if (status.blocking_followup !== null || status.create_status === "needs_review" || status.content_status === "needs_review" || status.content_status === "saved") return;
+    deletedCopyAction.current = true; setDeletedCopyBusy(true);
+    try {
+      const result = await progressWorkspaceDeletedDraftCopy(context.binding, context.documentId, status.node_id, status.create_operation_id);
+      if (!deletedStatusCurrent(context)) return;
+      if ((status.create_status !== "created" && result.operation_id !== status.create_operation_id) || (status.create_status === "created" && result.operation_id === status.create_operation_id) || (status.content_operation_id && result.operation_id !== status.content_operation_id)) throw new Error("stale_deleted_copy_operation");
+      deletedCopyRun.current = { context, phase: status.create_status === "created" ? "content" : "create" };
+      transmitter.current?.kick();
+      setDeletedCopyMessage("사본 저장을 진행합니다. 서버 결과와 ACK를 확인해 주세요.");
+      await loadDeletedCopyStatus(context);
+    } catch {
+      deletedCopyRun.current = null;
+      if (deletedStatusCurrent(context)) setDeletedCopyMessage("사본 처리 결과를 확인하지 못했습니다. 기기 초안은 보존됩니다. 상태를 다시 확인해 주세요.");
+    } finally { deletedCopyAction.current = false; setDeletedCopyBusy(false); if (deletedCopyWakePending.current) { deletedCopyWakePending.current = false; setCopyRevision((revision) => revision + 1); } }
+  }
+
+  async function approveDeletedFollowup(): Promise<void> {
+    const context = deletedCopyStatusRef.current, approval = deletedFollowupApproval;
+    if (!context || !approval || deletedCopyAction.current || !deletedStatusCurrent(context)) return;
+    const shown = context.status.blocking_followup;
+    if (!shown || shown.blocker_operation_id !== approval.blocker_operation_id || shown.followup_operation_id !== approval.followup_operation_id || shown.followup_operation_seq !== approval.followup_operation_seq || shown.followup_generation !== approval.followup_generation || shown.followup_hash !== approval.followup_hash) return;
+    const requestRevision = deletedCopyStatusRequest.current;
+    deletedCopyAction.current = true; setDeletedCopyBusy(true);
+    let invoked = false;
+    try {
+      const snapshot = context.instance.recoverySnapshot();
+      if (snapshot.id !== context.uiId || snapshot.session !== context.sessionId) throw new Error("stale_session");
+      const result = await context.instance.withDeletedFollowupSnapshot(snapshot, () => {
+        if (!deletedStatusCurrent(context) || requestRevision !== deletedCopyStatusRequest.current || deletedCopyStatusRef.current !== context || snapshot.generation !== approval.followup_generation) throw new Error("stale_followup");
+      }, async () => {
+        invoked = true;
+        return requestWorkspaceDeletedDraftCopyFollowupAbandon(context.binding, context.documentId, context.status.node_id, context.status.create_operation_id, approval.blocker_operation_id, approval.followup_operation_id, approval.followup_operation_seq, approval.followup_generation, approval.followup_hash);
+      });
+      if (!deletedStatusCurrent(context) || requestRevision !== deletedCopyStatusRequest.current) return;
+      if (result.operation_id !== approval.followup_operation_id) throw new Error("stale_deleted_followup");
+      setDeletedFollowupApproval(null);
+      deletedCopyRun.current = { context, phase:"followup", followupId:approval.followup_operation_id };
+      const scheduler = transmitter.current;
+      if (scheduler && !scheduler.resumeContentAfterAbandon(JSON.stringify(context.binding), approval.followup_operation_id)) scheduler.kick();
+      setDeletedCopyMessage("승인한 후속 작업의 처리를 요청했습니다. 서버 결과와 ACK를 확인합니다.");
+    } catch (cause) {
+      deletedCopyRun.current = null;
+      if (deletedStatusCurrent(context)) {
+        setDeletedFollowupApproval(null);
+        setDeletedCopyMessage(invoked ? "후속 처리 결과를 확인하지 못했습니다. 기기 초안은 보존됩니다. 앱을 다시 시작하고 상태를 확인해 주세요." : String(cause).includes("조합") ? "한글 조합을 마친 뒤 후속 작업을 다시 확인해 주세요." : "기기 초안을 저장한 뒤 후속 작업 상태를 다시 확인해 주세요.");
+      }
+    } finally { deletedCopyAction.current = false; setDeletedCopyBusy(false); if (deletedCopyWakePending.current) { deletedCopyWakePending.current = false; setCopyRevision((revision) => revision + 1); } }
+  }
+
+  async function observeDeletedCopy(): Promise<void> {
+    const run = deletedCopyRun.current;
+    if (!run || !deletedStatusCurrent(run.context)) return;
+    if (deletedCopyAction.current) { deletedCopyWakePending.current = true; return; }
+    deletedCopyAction.current = true;
+    let advance = false;
+    try {
+      const status = await loadDeletedCopyStatus(run.context);
+      if (!status || !deletedStatusCurrent(run.context) || status.node_id !== run.context.status.node_id || status.create_operation_id !== run.context.status.create_operation_id) throw new Error("stale_deleted_copy_status");
+      if (status.content_status === "saved" || status.create_status === "needs_review" || status.content_status === "needs_review") deletedCopyRun.current = null;
+      else if (status.blocking_followup) {
+        if (run.phase !== "followup" || status.blocking_followup.followup_operation_id !== run.followupId) deletedCopyRun.current = null;
+      } else if (run.phase === "followup" || (run.phase === "create" && status.create_status === "created" && status.content_status === "not_queued")) advance = true;
+    } catch {
+      deletedCopyRun.current = null;
+      if (deletedStatusCurrent(run.context)) setDeletedCopyMessage("사본 상태를 확인하지 못했습니다. 기기 초안은 보존됩니다.");
+    } finally { deletedCopyAction.current = false; }
+    if (advance) await progressDeletedCopy();
+    if (deletedCopyWakePending.current) { deletedCopyWakePending.current = false; setCopyRevision((revision) => revision + 1); }
+  }
+
+  async function inspectDeletedCopy(): Promise<void> {
+    if (deletedCopyAction.current) return;
+    deletedCopyAction.current = true; setDeletedCopyBusy(true); setDeletedCopyReview(null); setDeletedCopyMessage("");
+    let origin: { instance: EditorController; session: string; binding: string; version: number } | undefined;
+    try {
+      const instance = controller.current;
+      if (!instance) throw new Error("stale_session");
+      const current = instance.recoverySnapshot();
+      const session = sessionModes.current.get(current.session);
+      if (!session?.scope || !session.binding || session.uiId !== current.id || current.generation === "0") throw new Error("stale_session");
+      const version = registrationVersion.current, binding = session.binding;
+      origin = { instance, session: current.session, binding: JSON.stringify(binding), version };
+      const isCurrent = () => controller.current === instance && registrationVersion.current === version &&
+        !!workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === JSON.stringify(binding) &&
+        instance.isCurrentSnapshot(current.session, current.generation, current.revision);
+      await instance.flush();
+      if (!isCurrent()) throw new Error("stale_session");
+      const snapshot = await prepareWorkspaceDeletedDraftCopy(binding, session.documentId, current.session, current.generation);
+      if (!isCurrent() || JSON.stringify(snapshot.binding) !== JSON.stringify(binding) || snapshot.document_id !== session.documentId || snapshot.edit_session_id !== current.session || snapshot.generation !== current.generation) throw new Error("stale_session");
+      const bytes = current.bytes.slice();
+      const digest = await crypto.subtle.digest("SHA-256", bytes.buffer);
+      const hash = "sha256:" + [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
+      if (!isCurrent() || hash !== snapshot.local_hash) throw new Error("stale_source");
+      setDeletedCopyReview({ instance, snapshot, bytes, revision: current.revision, version, uiId: current.id });
+    } catch (cause) {
+      if (!origin || (controller.current === origin.instance && origin.instance.isCurrentSession(origin.session) && registrationVersion.current === origin.version && !!workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === origin.binding)) {
+        setDeletedCopyMessage(String(cause).includes("조합") ? "한글 조합을 마친 뒤 다시 확인해 주세요." : "삭제 상태와 기기 초안을 확인하지 못했습니다. 연결과 원문을 다시 확인해 주세요.");
+      }
+    } finally { deletedCopyAction.current = false; setDeletedCopyBusy(false); }
+  }
+
+  async function confirmDeletedCopy(snapshot: WorkspaceDeletedDraftCopySnapshot, parentId: string, name: string): Promise<void> {
+    const context = deletedCopyReview;
+    if (!context || context.snapshot !== snapshot || deletedCopyAction.current) return;
+    deletedCopyAction.current = true; setDeletedCopyBusy(true);
+    let invoked = false;
+    try {
+      const current = context.instance.recoverySnapshot();
+      if (!deletedCopyCurrent(context) || current.id !== context.uiId || current.session !== snapshot.edit_session_id || current.generation !== snapshot.generation || current.revision !== context.revision) throw new Error("stale_session");
+      await context.instance.withDeletedDraftSnapshot(current, async () => {
+        invoked = true;
+        return confirmWorkspaceDeletedDraftCopy(snapshot, parentId, name);
+      });
+      setDeletedCopyReview(null);
+      setDeletedCopyRecovery(null);
+      setDeletedCopyRecorded(true);
+      setDeletedCopyMessage("사본 선택은 보류 상태로 이 기기에 기록됐습니다. 서버 사본 저장은 아직 시작되지 않았습니다.");
+      try {
+        const status = await loadDeletedCopyStatus({ instance: context.instance, binding: snapshot.binding, documentId: snapshot.document_id, sessionId: snapshot.edit_session_id, uiId: context.uiId, version: context.version });
+        if (!status) throw new Error("missing_deleted_copy");
+      } catch {
+        if (controller.current === context.instance && context.instance.isCurrentSession(snapshot.edit_session_id) && registrationVersion.current === context.version) setDeletedCopyMessage("사본 선택은 보류 상태로 기록됐지만 상태를 확인하지 못했습니다. 기기 초안은 보존됩니다.");
+      }
+    } catch (cause) {
+      if (controller.current !== context.instance || !context.instance.isCurrentSession(snapshot.edit_session_id) || registrationVersion.current !== context.version || !workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== JSON.stringify(snapshot.binding)) return;
+      if (invoked) {
+        setDeletedCopyReview(null);
+        setDeletedCopyRecovery(context);
+        setDeletedCopyMessage("사본 선택 결과를 확인하지 못했습니다. 기기 초안은 보존됩니다. 상태를 확인하고 문서를 다시 열어 주세요.");
+      } else setDeletedCopyMessage(String(cause).includes("조합") ? "한글 조합을 마친 뒤 다시 확인해 주세요." : "문서가 변경됐습니다. 초안을 다시 확인해 주세요.");
+    } finally { deletedCopyAction.current = false; setDeletedCopyBusy(false); }
+  }
+
+  async function recoverDeletedCopy(): Promise<void> {
+    const context = deletedCopyRecovery;
+    if (!context || deletedCopyAction.current) return;
+    const current = () => controller.current === context.instance && context.instance.isCurrentSession(context.snapshot.edit_session_id) &&
+      registrationVersion.current === context.version && !!workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === JSON.stringify(context.snapshot.binding);
+    if (!current()) return;
+    deletedCopyAction.current = true; setDeletedCopyBusy(true);
+    let reopenStarted = false;
+    try {
+      const observed = await workspaceDeletedDraftCopyStatus(context.snapshot.binding, context.snapshot.document_id);
+      if (!current() || (observed && (JSON.stringify(observed.binding) !== JSON.stringify(context.snapshot.binding) || observed.document_id !== context.snapshot.document_id))) throw new Error("stale_deleted_copy_status");
+      let reopenedBinding: WorkspaceRegistration | undefined;
+      let reopenedScope: TransmitScope | undefined;
+      const state = await context.instance.reopenDeletedDraftCheckpoint(async (id, previousSessionId) => {
+        if (id !== context.uiId || previousSessionId !== context.snapshot.edit_session_id || !current()) throw new Error("stale_session");
+        reopenStarted = true;
+        const result = await reopenWorkspaceDeletedDraftCopy(context.snapshot.binding, context.snapshot.document_id, previousSessionId);
+        const document = result.document;
+        if (JSON.stringify(document.binding) !== JSON.stringify(context.snapshot.binding) || document.document_id !== context.snapshot.document_id || !document.edit_session_id || document.edit_session_id === previousSessionId || document.readonly || !document.local_draft || (result.state && (JSON.stringify(result.state.binding) !== JSON.stringify(context.snapshot.binding) || result.state.document_id !== context.snapshot.document_id))) throw new Error("stale_deleted_copy_document");
+        reopenedBinding = document.binding;
+        reopenedScope = document.has_session ? { binding: JSON.stringify(document.binding), documentId: document.document_id, editSessionId: document.edit_session_id } : undefined;
+        sessionModes.current.set(document.edit_session_id, { mode:"workspace", documentId:document.document_id, uiId:id, binding:document.binding, scope:reopenedScope, orphanDraft:true });
+        return { state:result.state, document:{ ...document, document_id:id } };
+      });
+      setDeletedCopyRecovery(null);
+      const reopened = context.instance.recoverySnapshot();
+      if (state && reopenedBinding && reopenedScope) {
+        setDeletedCopyStatus({ instance:context.instance, binding:reopenedBinding, documentId:context.snapshot.document_id, sessionId:reopened.session, uiId:reopened.id, version:context.version, status:state });
+        setDeletedCopyRecorded(true);
+        setDeletedCopyMessage("사본 선택 상태를 확인하고 기기 초안을 다시 열었습니다.");
+      } else {
+        setDeletedCopyStatus(null); setDeletedCopyRecorded(!!state);
+        setDeletedCopyMessage(state ? "기기 인증 또는 작업 공간 연결을 확인해 주세요. 초안은 보존됩니다." : "사본 선택이 기록되지 않았습니다. 기기 초안을 다시 확인해 주세요.");
+      }
+    } catch {
+      if (registrationVersion.current !== context.version || !workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== JSON.stringify(context.snapshot.binding)) return;
+      if (reopenStarted) { setDeletedCopyRecovery(null); setDeletedCopyMessage("재열기 결과를 확인하지 못했습니다. 기기 초안은 보존됩니다. 앱을 다시 시작해 주세요."); }
+      else if (current()) setDeletedCopyMessage("사본 상태를 확인하지 못했습니다. 기기 초안은 보존됩니다. 다시 확인해 주세요.");
+    } finally { deletedCopyAction.current = false; setDeletedCopyBusy(false); }
+  }
+
+  async function inspectConflict() {
+    if (conflictPreparingRef.current) return;
+    conflictPreparingRef.current = true;
+    setConflictPreparing(true); setConflictMessage(""); setConflictSnapshot(null);
+    let origin: { instance: EditorController; sessionId: string; bindingKey: string; version: number } | undefined;
+    try {
+      const instance = controller.current;
+      if (!instance) throw new Error("열린 문서를 다시 확인해 주세요.");
+      const snapshot = instance.recoverySnapshot();
+      const session = sessionModes.current.get(snapshot.session);
+      if (!session || session.mode !== "workspace" || !session.scope || !session.binding || session.uiId !== snapshot.id) throw new Error("열린 문서를 다시 확인해 주세요.");
+      const binding = session.binding;
+      const key = JSON.stringify(binding), version = registrationVersion.current;
+      origin = { instance, sessionId:snapshot.session, bindingKey:key, version };
+      await instance.flush();
+      if (controller.current !== instance || !instance.isCurrentSnapshot(snapshot.session, snapshot.generation, snapshot.revision) || version !== registrationVersion.current || !workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== key) throw new Error("문서가 변경됐습니다. 다시 확인해 주세요.");
+      const result = await prepareWorkspaceContentConflict(binding, session.documentId, snapshot.session, snapshot.generation);
+      if (controller.current !== instance || !instance.isCurrentSnapshot(snapshot.session, snapshot.generation, snapshot.revision) || version !== registrationVersion.current || !workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== key) throw new Error("문서가 변경됐습니다. 다시 확인해 주세요.");
+      if (!result) { setConflictMessage("비교할 충돌을 찾지 못했습니다. 현재 편집과 초안은 유지됩니다."); return; }
+      setConflictSnapshot({ snapshot:result, sessionId:snapshot.session, revision:snapshot.revision, canChoose:false, intentVersion:null });
+      try {
+        const resolution = await workspaceContentConflictResolutionStatus(binding, result.node_id, result.operation_id);
+        if (controller.current !== instance || !instance.isCurrentSnapshot(snapshot.session, snapshot.generation, snapshot.revision) || version !== registrationVersion.current || !workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== key) return;
+        if (JSON.stringify(resolution.binding) !== key || resolution.document_id !== result.node_id || resolution.operation_id !== result.operation_id) throw new Error("stale_conflict");
+        const state = resolution.state;
+        if (state.status === "not_found") {
+          setPendingMerge(null);
+          setConflictSnapshot((current) => current?.snapshot === result ? { ...current, canChoose:true } : current);
+        } else if (state.status === "pending" && !state.frozen && state.choice === "choose_remote") {
+          setPendingMerge(null);
+          if (state.needs_review) {
+            setPendingConflict(null);
+            setConflictSnapshot((current) => current?.snapshot === result ? { ...current, canChoose:true, intentVersion:state.version } : current);
+            setConflictMessage("저장된 선택 이후 문서가 변경됐습니다. 다시 비교하고 선택을 확인해 주세요.");
+          } else if (state.generation === snapshot.generation) {
+            setPendingConflict({ instance, snapshot:result, sessionId:snapshot.session, uiId:snapshot.id, version, intentVersion:state.version, generation:snapshot.generation, revision:snapshot.revision });
+            setConflictSnapshot((current) => current?.snapshot === result ? { ...current, canChoose:true, intentVersion:state.version } : current);
+            setConflictMessage("저장된 선택이 보류 중입니다. 후속 처리를 진행하거나 서버 본문을 다시 확인해 선택할 수 있습니다.");
+          } else throw new Error("stale_conflict");
+        } else if (state.status === "pending" && !state.frozen && state.choice === "keep_local_copy") {
+          setPendingConflict(null);
+          setPendingMerge(null);
+          await loadCopyStatus({ instance, snapshot: result, sessionId: snapshot.session, uiId: snapshot.id, version }, state.version);
+          if (state.needs_review) setConflictMessage("저장된 초안이 바뀌었습니다. 사본과 원래 충돌을 다시 확인해 주세요.");
+        } else if (state.status === "pending" && !state.frozen && state.choice === "save_merged") {
+          setPendingConflict(null);
+          setPendingMerge({ instance, snapshot:result, sessionId:snapshot.session, uiId:snapshot.id, version, merge:true, intentVersion:state.version, generation:snapshot.generation, revision:snapshot.revision, queuedOperationId:null, queuedOperationSeq:null });
+          setConflictSnapshot((current) => current?.snapshot === result ? { ...current, canChoose:state.needs_review, intentVersion:state.version } : current);
+          setConflictMessage(state.needs_review ? "초안 또는 서버 본문이 바뀌었습니다. 다시 비교하고 합본을 확인해 주세요." : "합본 선택이 저장됐습니다. 서버 저장은 아직 대기 중입니다.");
+        } else {
+          setPendingConflict(null);
+          setConflictMessage("이전 선택 상태를 대조해 주세요. 현재 문서와 초안은 보존됩니다.");
+        }
+      } catch {
+        if (controller.current === instance && instance.isCurrentSession(snapshot.session) && version === registrationVersion.current && workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === key) {
+          setConflictMessage("저장된 선택 상태를 확인하지 못했습니다. 다시 비교해 주세요.");
+        }
+      }
+    } catch (cause) {
+      if (origin && (controller.current !== origin.instance || !origin.instance.isCurrentSession(origin.sessionId) || registrationVersion.current !== origin.version || !workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== origin.bindingKey)) return;
+      setConflictMessage(String(cause).includes("조합") ? "한글 조합을 마친 뒤 다시 확인해 주세요." : String(cause).includes("문서가 변경") ? "문서가 변경됐습니다. 다시 확인해 주세요." : "비교 자료를 불러오지 못했습니다. 현재 편집과 초안은 유지됩니다.");
+    } finally {
+      conflictPreparingRef.current = false;
+      setConflictPreparing(false);
+    }
+  }
+
+  function conflictContextCurrent(context: ConflictChoiceContext): boolean {
+    return controller.current === context.instance && context.instance.isCurrentSession(context.sessionId) &&
+      registrationVersion.current === context.version && !!workspaceBindingRef.current &&
+      JSON.stringify(workspaceBindingRef.current) === JSON.stringify(context.snapshot.binding);
+  }
+
+  async function loadCopyStatus(context: ConflictChoiceContext, intentVersion: string, expected?: { nodeId: string; operationId: string; parentId: string; name: string }): Promise<CopyDetails> {
+    const attempt = ++copyStatusRequest.current;
+    const response = await workspaceContentConflictCopyStatus(context.snapshot.binding, context.snapshot.node_id, context.snapshot.operation_id);
+    if (attempt !== copyStatusRequest.current) throw new Error("stale_copy_query");
+    if (!conflictContextCurrent(context) || JSON.stringify(response.binding) !== JSON.stringify(context.snapshot.binding) || response.document_id !== context.snapshot.node_id || response.operation_id !== context.snapshot.operation_id || !response.copy || response.copy.version !== intentVersion || (expected && (response.copy.node_id !== expected.nodeId || response.copy.create_operation_id !== expected.operationId || response.copy.parent_id !== expected.parentId || response.copy.name !== expected.name))) throw new Error("stale_copy");
+    setPendingCopy((previous) => ({ ...context, intentVersion, copy: response.copy!, approval: previous?.approval ? response.copy!.followup_operation_id : null, running: previous?.intentVersion === intentVersion && previous.snapshot.operation_id === context.snapshot.operation_id ? previous.running : false, awaitingFollowup: previous?.intentVersion === intentVersion && previous.snapshot.operation_id === context.snapshot.operation_id ? previous.awaitingFollowup : null }));
+    if (response.copy.content_status === "saved") {
+      setConflictSnapshot((current) => current?.snapshot === context.snapshot && current.sessionId === context.sessionId && context.instance.isCurrentSnapshot(context.sessionId, context.snapshot.generation, current.revision) ? { ...current, canChoose: true, intentVersion } : current);
+    }
+    return response.copy;
+  }
+
+  async function reopenConflict(context: ConflictChoiceContext, checkStatus: boolean): Promise<boolean> {
+    let reopenStarted = false;
+    let reopenedCanSync = false;
+    try {
+      if (!conflictContextCurrent(context)) throw new Error("작업 공간이 변경됐습니다.");
+      if (checkStatus) {
+        await workspaceContentConflictResolutionStatus(context.snapshot.binding, context.snapshot.node_id, context.snapshot.operation_id);
+        if (!conflictContextCurrent(context)) throw new Error("작업 공간이 변경됐습니다.");
+      }
+      const state = await context.instance.reopenConflictCheckpoint(async (id, previousSessionId) => {
+        if (id !== context.uiId || previousSessionId !== context.sessionId || !conflictContextCurrent(context)) throw new Error("문서가 변경됐습니다.");
+        reopenStarted = true;
+        const result = await reopenWorkspaceContentConflictCheckpoint(context.snapshot.binding, context.snapshot.node_id, context.snapshot.operation_id, previousSessionId);
+        const document = result.document;
+        if (JSON.stringify(document.binding) !== JSON.stringify(context.snapshot.binding) || document.document_id !== context.snapshot.node_id || !document.edit_session_id || document.edit_session_id === previousSessionId) throw new Error("다른 충돌 복구 결과입니다.");
+        const scope = document.has_session && !document.readonly ? { binding: JSON.stringify(document.binding), documentId: document.document_id, editSessionId: document.edit_session_id } : undefined;
+        reopenedCanSync = !!scope;
+        sessionModes.current.set(document.edit_session_id, { mode: "workspace", documentId: document.document_id, uiId: id, scope, binding: document.binding });
+        return { state: result.state, document: { ...document, document_id: id } };
+      });
+      setConflictRecovery(null);
+      setConflictSnapshot(null);
+      if (state.status === "pending" && state.choice === "choose_remote" && !state.needs_review && !state.frozen && reopenedCanSync) {
+        const current = context.instance.recoverySnapshot();
+        setPendingConflict({ ...context, sessionId: current.session, uiId: current.id, generation: current.generation, revision: current.revision, intentVersion: state.version });
+        setPendingMerge(null);
+      } else if (state.status === "pending" && state.choice === "save_merged" && !state.frozen && reopenedCanSync) {
+        const current = context.instance.recoverySnapshot();
+        setPendingConflict(null);
+        setPendingCopy(null);
+        setPendingMerge({ ...context, merge:true, sessionId:current.session, uiId:current.id, generation:current.generation, revision:current.revision, intentVersion:state.version, queuedOperationId:null, queuedOperationSeq:null });
+      } else {
+        setPendingConflict(null);
+        setPendingMerge(null);
+        if (state.status === "pending" && state.choice === "keep_local_copy" && !state.frozen && reopenedCanSync) {
+          const current = context.instance.recoverySnapshot();
+          await loadCopyStatus({ ...context, sessionId: current.session, uiId: current.id }, state.version);
+        } else setPendingCopy(null);
+      }
+      setConflictMessage(state.status === "completed" ? (context.merge ? "충돌 선택 상태를 확인했습니다. 기기 초안을 확인해 주세요." : "서버 본문을 선택했습니다. 보존된 충돌 자료는 유지됩니다.") : state.status === "pending" ? (!reopenedCanSync ? "기기 인증 또는 작업 공간 연결을 확인해 주세요. 저장된 초안은 보존됩니다." : state.needs_review ? "문서가 변경됐습니다. 충돌을 다시 비교해 주세요." : state.choice === "save_merged" && !state.frozen ? "합본 선택이 저장됐습니다. 서버 저장은 아직 대기 중입니다." : state.frozen || state.choice !== "choose_remote" ? "이전 선택 상태를 대조해 주세요. 초안은 보존됩니다." : "선택을 저장했습니다. 충돌 처리가 보류 중입니다. 후속 처리를 직접 진행해 주세요.") : "선택이 기록되지 않았습니다. 보존된 초안을 다시 확인해 주세요.");
+      void refreshSyncStatus().catch((cause) => setConnectionError(String(cause)));
+      return true;
+    } catch {
+      if (reopenStarted) {
+        setConflictRecovery(null);
+        setConflictMessage("재열기 결과를 확인할 수 없습니다. 저장된 초안은 보존됩니다. 앱을 다시 시작해 주세요.");
+      } else {
+        if (context.merge) { setPendingMerge(null); setConflictRecovery(context); }
+        setConflictMessage("충돌 처리 상태를 확인하지 못했습니다. 저장된 초안은 보존됩니다. 다시 확인해 주세요.");
+      }
+      return false;
+    }
+  }
+
+  async function chooseRemote(snapshot: ConflictReviewSnapshot): Promise<void> {
+    if (conflictActionRef.current) return;
+    startConflictAction();
+    let started = false;
+    let context: ConflictChoiceContext | undefined;
+    try {
+      const shown = conflictSnapshot, instance = controller.current;
+      if (!shown || shown.snapshot !== snapshot || !instance) throw new Error("문서가 변경됐습니다.");
+      const current = instance.recoverySnapshot();
+      const session = sessionModes.current.get(current.session);
+      if (!session?.scope || session.uiId !== current.id || current.session !== shown.sessionId || current.generation !== snapshot.generation || current.revision !== shown.revision) throw new Error("문서가 변경됐습니다.");
+      context = { instance, snapshot, sessionId: current.session, uiId: current.id, version: registrationVersion.current };
+      if (!conflictContextCurrent(context)) throw new Error("작업 공간이 변경됐습니다.");
+      const result = await instance.withConflictSnapshot(current, async () => {
+        started = true;
+        return chooseWorkspaceRemoteContentConflict(snapshot, current.session, shown.intentVersion);
+      });
+      setConflictSnapshot(null);
+      setPendingMerge(null);
+      if (result.status === "pending") {
+        setPendingConflict({ ...context, intentVersion: result.version, generation: current.generation, revision: current.revision });
+        setConflictMessage("선택을 저장했습니다. 충돌 처리가 보류 중입니다. 후속 처리를 직접 진행해 주세요.");
+      }
+      else await reopenConflict(context, false);
+    } catch (cause) {
+      if (started && context) {
+        setConflictSnapshot(null);
+        setConflictRecovery(context);
+        setConflictMessage("선택 결과를 확인할 수 없습니다. 저장된 초안은 보존됩니다.");
+      } else setConflictMessage(String(cause).includes("조합") ? "한글 조합을 마친 뒤 다시 선택해 주세요." : "문서가 변경됐거나 저장하지 못했습니다. 비교 자료를 다시 확인해 주세요.");
+    } finally {
+      conflictActionRef.current = false;
+    }
+  }
+
+  async function saveMerged(snapshot: ConflictReviewSnapshot): Promise<void> {
+    if (conflictActionRef.current) return;
+    startConflictAction();
+    let started = false;
+    let context: ConflictChoiceContext | undefined;
+    try {
+      const shown = conflictSnapshot, instance = controller.current;
+      if (!shown || shown.snapshot !== snapshot || !instance) throw new Error("문서가 변경됐습니다.");
+      const current = instance.recoverySnapshot();
+      const session = sessionModes.current.get(current.session);
+      if (!session?.scope || session.uiId !== current.id || current.session !== shown.sessionId || current.generation !== snapshot.generation || current.revision !== shown.revision) throw new Error("문서가 변경됐습니다.");
+      context = { instance, snapshot, sessionId:current.session, uiId:current.id, version:registrationVersion.current, merge:true };
+      if (!conflictContextCurrent(context)) throw new Error("작업 공간이 변경됐습니다.");
+      const result = await instance.withConflictSnapshot(current, async () => {
+        started = true;
+        return confirmWorkspaceContentConflictMerge(snapshot, current.session, shown.intentVersion);
+      });
+      setConflictSnapshot(null);
+      setPendingConflict(null);
+      setPendingMerge(null);
+      setPendingCopy(null);
+      if (result.status === "pending") {
+        setPendingMerge({ ...context, intentVersion:result.version, generation:current.generation, revision:current.revision, queuedOperationId:null, queuedOperationSeq:null });
+        setConflictMessage("합본 선택을 기기에 저장했습니다. 서버 저장은 아직 대기 중입니다.");
+      } else await reopenConflict(context, false);
+    } catch (cause) {
+      if (started && context) {
+        setConflictSnapshot(null);
+        setPendingMerge(null);
+        setConflictRecovery(context);
+        setConflictMessage("합본 선택 결과를 확인할 수 없습니다. 저장된 초안은 보존됩니다.");
+      } else setConflictMessage(String(cause).includes("조합") ? "한글 조합을 마친 뒤 다시 선택해 주세요." : "문서가 변경됐거나 저장하지 못했습니다. 비교 자료를 다시 확인해 주세요.");
+    } finally { conflictActionRef.current = false; }
+  }
+
+  async function refreshMerge(): Promise<void> {
+    const pending = pendingMerge;
+    if (!pending || conflictActionRef.current || !conflictContextCurrent(pending)) return;
+    startConflictAction(); setConflictRecovering(true);
+    try {
+      const response = await workspaceContentConflictResolutionStatus(pending.snapshot.binding, pending.snapshot.node_id, pending.snapshot.operation_id);
+      if (!conflictContextCurrent(pending) || JSON.stringify(response.binding) !== JSON.stringify(pending.snapshot.binding) || response.document_id !== pending.snapshot.node_id || response.operation_id !== pending.snapshot.operation_id) throw new Error("stale_conflict");
+      const result = response.state;
+      if (result.status === "completed" && !result.frozen && BigInt(result.generation) === BigInt(pending.snapshot.generation) + 1n) {
+        if (!await hasConfirmedMergeIdentity(pending) || !conflictContextCurrent(pending) || pendingMergeRef.current !== pending) throw new Error("stale_merge_operation");
+        setPendingMerge(null);
+        setConflictMessage("합본 저장 완료. 이후 기기 초안과 충돌 자료는 보존됩니다.");
+        void refreshSyncStatus().catch((cause) => setConnectionError(String(cause)));
+      } else if (result.status === "pending" && result.choice === "save_merged" && result.version === pending.intentVersion && result.generation === pending.snapshot.generation && !result.frozen) {
+        setConflictMessage(result.needs_review ? "초안 또는 서버 본문이 바뀌었습니다. 충돌을 다시 비교해 주세요." : "합본 선택이 저장됐습니다. 서버 결과와 ACK를 확인하기 전까지 대기 중입니다.");
+      } else throw new Error("stale_conflict");
+    } catch {
+      if (conflictContextCurrent(pending)) setConflictMessage("합본 상태를 확인하지 못했습니다. 저장된 초안은 보존됩니다.");
+    } finally { conflictActionRef.current = false; setConflictRecovering(false); }
+  }
+
+  async function hasConfirmedMergeIdentity(pending: PendingMergeContext): Promise<boolean> {
+    const status = await workspaceContentConflictMergeStatus(pending.snapshot.binding, pending.snapshot.node_id, pending.snapshot.operation_id, pending.intentVersion);
+    const operation = status.merge_operation;
+    return JSON.stringify(status.binding) === JSON.stringify(pending.snapshot.binding) && status.document_id === pending.snapshot.node_id && status.operation_id === pending.snapshot.operation_id && status.intent_version === pending.intentVersion && !!operation && (!pending.queuedOperationId || operation.operation_id === pending.queuedOperationId) && (!pending.queuedOperationSeq || operation.operation_seq === pending.queuedOperationSeq);
+  }
+
+  async function queueMerge(): Promise<void> {
+    const pending = pendingMerge;
+    if (!pending || conflictActionRef.current || !conflictContextCurrent(pending)) return;
+    startConflictAction(); setConflictRecovering(true);
+    let started = false;
+    try {
+      const resolution = await workspaceContentConflictResolutionStatus(pending.snapshot.binding, pending.snapshot.node_id, pending.snapshot.operation_id);
+      if (!conflictContextCurrent(pending) || JSON.stringify(resolution.binding) !== JSON.stringify(pending.snapshot.binding) || resolution.document_id !== pending.snapshot.node_id || resolution.operation_id !== pending.snapshot.operation_id) throw new Error("stale_conflict");
+      if (resolution.state.status === "completed" && !resolution.state.frozen && BigInt(resolution.state.generation) === BigInt(pending.snapshot.generation) + 1n) {
+        if (!await hasConfirmedMergeIdentity(pending) || !conflictContextCurrent(pending) || pendingMergeRef.current !== pending) throw new Error("stale_merge_operation");
+        setPendingMerge(null);
+        setConflictMessage("합본 저장 완료. 이후 기기 초안과 충돌 자료는 보존됩니다.");
+        return;
+      }
+      if (resolution.state.status !== "pending" || resolution.state.choice !== "save_merged" || resolution.state.version !== pending.intentVersion || resolution.state.generation !== pending.snapshot.generation || resolution.state.frozen || resolution.state.needs_review) throw new Error("stale_conflict");
+      const status = await workspaceContentConflictMergeStatus(pending.snapshot.binding, pending.snapshot.node_id, pending.snapshot.operation_id, pending.intentVersion);
+      if (!conflictContextCurrent(pending)) throw new Error("stale_conflict");
+      if (status.merge_operation) {
+        setPendingMerge((current) => current === pending ? { ...current, queuedOperationId:status.merge_operation!.operation_id, queuedOperationSeq:status.merge_operation!.operation_seq } : current);
+        transmitter.current?.kick();
+        setConflictMessage("이미 준비된 합본 작업을 확인했습니다. 서버 결과와 ACK를 기다립니다.");
+        return;
+      }
+      const outbox = await workspaceDocumentOutbox(pending.snapshot.binding, pending.snapshot.node_id);
+      if (!conflictContextCurrent(pending) || JSON.stringify(outbox.binding) !== JSON.stringify(pending.snapshot.binding) || outbox.document_id !== pending.snapshot.node_id) throw new Error("stale_conflict");
+      const latest = outbox.latest;
+      const followup = await workspaceContentConflictMergeFollowupStatus(pending.snapshot.binding, pending.snapshot.node_id, pending.snapshot.operation_id, pending.intentVersion);
+      if (!conflictContextCurrent(pending)) throw new Error("stale_conflict");
+      if (followup.followup) {
+        const waiting = latest?.operation_id === followup.followup.operation_id && (latest.status === "abandoning" || latest.status === "abandoned" || latest.abandon_state !== "none");
+        setPendingMerge((current) => current === pending ? { ...current, followup:followup.followup, approval:waiting ? null : followup.followup } : current);
+        setConflictMessage(waiting ? "후속 작업의 서버 영수증과 ACK를 기다립니다." : "합본 저장을 위해 후속 작업의 취소 대상을 확인해 주세요.");
+        return;
+      }
+      if (latest && latest.operation_id !== pending.snapshot.operation_id && (latest.status !== "abandoned" || BigInt(outbox.confirmed_through) < BigInt(latest.operation_seq))) {
+        setConflictMessage("선행 후속 작업을 먼저 확인해야 합니다. 기기 초안과 합본 선택은 보존됩니다.");
+        return;
+      }
+      if (BigInt(outbox.confirmed_through) < BigInt(pending.snapshot.operation_seq)) {
+        setConflictMessage("이전 충돌 결과의 서버 ACK를 확인한 뒤 다시 진행해 주세요.");
+        return;
+      }
+      const current = pending.instance.recoverySnapshot();
+      if (current.id !== pending.uiId || current.session !== pending.sessionId || current.generation !== pending.generation || current.revision !== pending.revision) throw new Error("stale_checkpoint");
+      const result = await pending.instance.withMergeQueueSnapshot(current, async () => {
+        started = true;
+        return queueWorkspaceContentConflictMerge(pending.snapshot.binding, pending.snapshot.node_id, pending.sessionId, pending.snapshot.operation_id, pending.intentVersion);
+      });
+      const operationId = result.requested_operation_id;
+      if (!operationId || operationId === pending.snapshot.operation_id || result.version !== pending.intentVersion) throw new Error("stale_merge_operation");
+      if (!await reopenConflict(pending, false)) return;
+      const confirmed = await workspaceContentConflictMergeStatus(pending.snapshot.binding, pending.snapshot.node_id, pending.snapshot.operation_id, pending.intentVersion);
+      if (confirmed.merge_operation?.operation_id !== operationId || registrationVersion.current !== pending.version || !workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== JSON.stringify(pending.snapshot.binding)) throw new Error("stale_merge_operation");
+      setPendingMerge((current) => current?.snapshot.operation_id === pending.snapshot.operation_id ? { ...current, queuedOperationId:operationId, queuedOperationSeq:confirmed.merge_operation!.operation_seq } : current);
+      transmitter.current?.kick();
+      setConflictMessage("합본 전송을 준비했습니다. 서버 결과와 ACK를 확인합니다.");
+    } catch {
+      if (started && conflictContextCurrent(pending)) {
+        setPendingMerge(null);
+        setConflictRecovery(pending);
+        setConflictMessage("합본 전송 준비 결과를 확인하지 못했습니다. 저장된 초안은 보존됩니다.");
+      } else if (controller.current === pending.instance) setConflictMessage("합본 처리 상태를 확인하지 못했습니다. 저장된 초안은 보존됩니다.");
+    } finally { conflictActionRef.current = false; setConflictRecovering(false); }
+  }
+
+  function sameMergeFollowup(a: WorkspaceContentConflictMergeFollowup | null | undefined, b: WorkspaceContentConflictMergeFollowup | null | undefined): boolean {
+    return !!a && !!b && a.operation_id === b.operation_id && a.operation_seq === b.operation_seq && a.generation === b.generation && a.payload_hash === b.payload_hash;
+  }
+
+  async function refreshMergeFollowup(): Promise<void> {
+    const pending = pendingMergeRef.current;
+    if (!pending || conflictActionRef.current || !conflictContextCurrent(pending)) return;
+    startConflictAction(); setConflictRecovering(true);
+    try {
+      const response = await workspaceContentConflictMergeFollowupStatus(pending.snapshot.binding, pending.snapshot.node_id, pending.snapshot.operation_id, pending.intentVersion);
+      if (!conflictContextCurrent(pending) || pendingMergeRef.current !== pending) throw new Error("stale_conflict");
+      setPendingMerge((current) => current === pending ? { ...current, followup:response.followup, approval:sameMergeFollowup(current.approval, response.followup) ? current.approval : null } : current);
+      setConflictMessage(response.followup ? "후속 작업의 현재 내용을 확인했습니다. 내용이 바뀌었다면 다시 승인해 주세요." : "현재 확인할 후속 작업이 없습니다. 서버 결과와 ACK를 확인해 주세요.");
+    } catch {
+      if (conflictContextCurrent(pending)) setConflictMessage("후속 작업을 확인하지 못했습니다. 저장된 초안은 보존됩니다.");
+    } finally { conflictActionRef.current = false; setConflictRecovering(false); }
+  }
+
+  async function approveMergeFollowup(): Promise<void> {
+    const pending = pendingMergeRef.current, approval = pending?.approval;
+    if (!pending || !approval || conflictActionRef.current || !conflictContextCurrent(pending) || !sameMergeFollowup(pending.followup, approval)) return;
+    startConflictAction(); setConflictRecovering(true);
+    let started = false;
+    try {
+      const editor = pending.instance.recoverySnapshot();
+      if (editor.id !== pending.uiId || editor.session !== pending.sessionId || editor.generation !== pending.snapshot.generation || editor.revision !== pending.revision) throw new Error("stale_checkpoint");
+      const result = await pending.instance.withDeletedFollowupSnapshot(editor, () => {
+        if (!conflictContextCurrent(pending) || pendingMergeRef.current !== pending || !sameMergeFollowup(pendingMergeRef.current?.approval, approval)) throw new Error("stale_conflict");
+      }, async () => {
+        started = true;
+        return requestWorkspaceContentConflictMergeFollowupAbandon(pending.snapshot.binding, pending.snapshot.node_id, pending.sessionId, pending.snapshot.operation_id, pending.intentVersion, approval);
+      });
+      if (!conflictContextCurrent(pending) || result.version !== pending.intentVersion || result.requested_operation_id !== approval.operation_id) throw new Error("stale_conflict");
+      setPendingMerge((current) => current === pending ? { ...current, followup:null, approval:null } : current);
+      const scheduler = transmitter.current;
+      if (scheduler && !scheduler.resumeContentAfterAbandon(JSON.stringify(pending.snapshot.binding), approval.operation_id)) scheduler.kick();
+      setConflictMessage("승인한 후속 작업의 처리를 요청했습니다. 서버 영수증과 ACK를 확인해 주세요.");
+    } catch (cause) {
+      if (started && conflictContextCurrent(pending)) {
+        setPendingMerge(null); setConflictRecovery(pending);
+        setConflictMessage("후속 작업 처리 결과를 확인하지 못했습니다. 기기 초안은 보존됩니다.");
+      } else if (controller.current === pending.instance) {
+        setPendingMerge((current) => current === pending ? { ...current, approval:null } : current);
+        setConflictMessage(String(cause).includes("조합") ? "한글 조합을 마친 뒤 다시 확인해 주세요." : "기기 초안을 저장한 뒤 충돌과 후속 작업을 다시 확인해 주세요.");
+      }
+    } finally { conflictActionRef.current = false; setConflictRecovering(false); }
+  }
+
+  async function keepConflictCopy(snapshot: ConflictReviewSnapshot, parentId: string, name: string): Promise<void> {
+    if (conflictActionRef.current) return;
+    startConflictAction();
+    let started = false;
+    let context: ConflictChoiceContext | undefined;
+    try {
+      const shown = conflictSnapshot, instance = controller.current;
+      if (!shown || shown.snapshot !== snapshot || !shown.canChoose || !instance) throw new Error("문서가 변경됐습니다.");
+      const current = instance.recoverySnapshot();
+      const session = sessionModes.current.get(current.session);
+      if (!session?.scope || session.uiId !== current.id || current.session !== shown.sessionId || current.generation !== snapshot.generation || current.revision !== shown.revision) throw new Error("문서가 변경됐습니다.");
+      context = { instance, snapshot, sessionId: current.session, uiId: current.id, version: registrationVersion.current };
+      if (!conflictContextCurrent(context)) throw new Error("작업 공간이 변경됐습니다.");
+      const result = await instance.withConflictSnapshot(current, async () => {
+        started = true;
+        return confirmWorkspaceContentConflictCopy(snapshot, current.session, shown.intentVersion, parentId, name);
+      });
+      setConflictSnapshot(null);
+      setPendingConflict(null);
+      setPendingMerge(null);
+      setConflictMessage("사본 보존 선택을 저장했습니다. 사본 저장은 보류 중이며 원래 문서의 충돌도 남아 있습니다.");
+      try { await loadCopyStatus(context, result.version, { nodeId: result.node_id, operationId: result.create_operation_id, parentId, name }); }
+      catch { if (conflictContextCurrent(context)) setConflictMessage("사본 선택을 저장했지만 상태를 확인하지 못했습니다. 사본 저장은 보류 중입니다. 충돌을 다시 비교해 주세요."); }
+    } catch (cause) {
+      if (started && context) {
+        setConflictSnapshot(null);
+        setConflictRecovery(context);
+        setConflictMessage("사본 선택 결과를 확인할 수 없습니다. 저장된 초안은 보존됩니다.");
+      } else setConflictMessage(String(cause).includes("조합") ? "한글 조합을 마친 뒤 다시 선택해 주세요." : "문서가 변경됐거나 선택을 저장하지 못했습니다. 비교 자료를 다시 확인해 주세요.");
+    } finally {
+      conflictActionRef.current = false;
+    }
+  }
+
+  async function refreshCopy(): Promise<void> {
+    const context = pendingCopyRef.current;
+    if (!context || conflictActionRef.current) return;
+    startConflictAction(); setConflictRecovering(true);
+    try {
+      await loadCopyStatus(context, context.intentVersion);
+      if (conflictContextCurrent(context)) setConflictMessage("사본 상태를 확인했습니다. 원래 문서의 충돌은 유지됩니다.");
+    } catch {
+      if (conflictContextCurrent(context)) setConflictMessage("사본 상태를 확인하지 못했습니다. 저장된 초안은 보존됩니다.");
+    } finally { conflictActionRef.current = false; setConflictRecovering(false); }
+  }
+
+  async function retryCopy(parentId: string, name: string): Promise<void> {
+    const context = pendingCopyRef.current;
+    if (!context || context.copy.create_failure !== "destination_exists" || conflictActionRef.current || !conflictContextCurrent(context)) return;
+    startConflictAction(); setConflictRecovering(true);
+    let started = false;
+    try {
+      if (parentId === context.copy.parent_id && name === context.copy.name) throw new Error("same_copy_destination");
+      const current = context.instance.recoverySnapshot();
+      if (current.id !== context.uiId || current.session !== context.sessionId || current.generation !== context.snapshot.generation) throw new Error("stale_conflict");
+      const result = await context.instance.withConflictSnapshot(current, async () => {
+        started = true;
+        const response = await retryWorkspaceContentConflictCopy(context.snapshot.binding, context.snapshot.node_id, context.sessionId, context.snapshot.operation_id, context.intentVersion, context.copy.create_operation_id, parentId, name);
+        if (response.version !== context.intentVersion || response.node_id === context.copy.node_id || response.create_operation_id === context.copy.create_operation_id) throw new Error("stale_copy");
+        return response;
+      });
+      if (!conflictContextCurrent(context)) return;
+      setCopyRetryOpen(false);
+      setConflictMessage("새 사본 대상을 저장했습니다. 사본 저장은 대기 중이며 원래 충돌은 유지됩니다.");
+      try { await loadCopyStatus(context, result.version, { nodeId: result.node_id, operationId: result.create_operation_id, parentId, name }); }
+      catch { if (conflictContextCurrent(context)) setConflictMessage("새 대상을 저장했지만 사본 상태를 확인하지 못했습니다. 상태를 다시 확인해 주세요."); }
+    } catch (cause) {
+      if (!conflictContextCurrent(context)) return;
+      if (started) {
+        setCopyRetryOpen(false);
+        setConflictRecovery(context);
+        setConflictMessage("사본 재승인 결과를 확인하지 못했습니다. 저장된 초안은 보존됩니다. 상태를 다시 확인해 주세요.");
+      } else setConflictMessage(String(cause).includes("same_copy_destination") ? "이전과 다른 폴더나 이름을 선택해 주세요." : String(cause).includes("조합") ? "한글 조합을 마친 뒤 다시 확인해 주세요." : "문서가 변경됐습니다. 충돌을 다시 비교해 주세요.");
+    } finally { conflictActionRef.current = false; setConflictRecovering(false); }
+  }
+
+  async function progressCopy(context: PendingCopyContext, approval: string | null): Promise<void> {
+    if (conflictActionRef.current || !conflictContextCurrent(context)) return;
+    startConflictAction(); setConflictRecovering(true);
+    try {
+      const result = await progressWorkspaceContentConflictCopy(context.snapshot.binding, context.snapshot.node_id, context.sessionId, context.snapshot.operation_id, context.intentVersion, approval);
+      if (!conflictContextCurrent(context)) return;
+      if (result.status === "approval_required") {
+        setPendingCopy((current) => current?.snapshot.operation_id === context.snapshot.operation_id ? { ...current, running: false, awaitingFollowup: null, approval: result.followup_operation_id, copy: { ...current.copy, followup_operation_id: result.followup_operation_id } } : current);
+        setConflictMessage("사본 저장을 위해 후속 작업의 처리를 확인해 주세요. 원래 충돌은 유지됩니다.");
+      } else if (result.status === "needs_review") {
+        setPendingCopy((current) => current?.snapshot.operation_id === context.snapshot.operation_id ? { ...current, running: false, approval: null } : current);
+        setConflictMessage("사본 저장 상태를 다시 확인해 주세요. 초안과 원래 충돌은 유지됩니다.");
+      } else if (result.status === "saved") {
+        await loadCopyStatus(context, context.intentVersion);
+        setPendingCopy((current) => current?.snapshot.operation_id === context.snapshot.operation_id ? { ...current, running: false, approval: null } : current);
+      } else {
+        const requested = result.requested_operation_id;
+        if (requested && requested !== approval) throw new Error("stale_approval");
+        setPendingCopy((current) => current?.snapshot.operation_id === context.snapshot.operation_id ? { ...current, running: true, awaitingFollowup: requested, approval: null } : current);
+        const scheduler = transmitter.current;
+        if (requested) {
+          if (scheduler && !scheduler.resumeContentAfterAbandon(JSON.stringify(context.snapshot.binding), requested)) scheduler.kick();
+        } else scheduler?.kick();
+        setConflictMessage("사본 저장을 진행 중입니다. 서버 결과와 ACK를 확인합니다. 원래 충돌은 유지됩니다.");
+      }
+    } catch {
+      if (conflictContextCurrent(context)) {
+        setPendingCopy((current) => current?.snapshot.operation_id === context.snapshot.operation_id ? { ...current, running: false, approval: null } : current);
+        setConflictMessage("사본 처리 결과를 확인하지 못했습니다. 저장된 초안은 보존됩니다. 상태를 다시 확인해 주세요.");
+      }
+    } finally { conflictActionRef.current = false; setConflictRecovering(false); if (copyWakePending.current) { copyWakePending.current = false; setCopyRevision((revision) => revision + 1); } }
+  }
+
+  async function observeCopy(): Promise<void> {
+    const context = pendingCopyRef.current;
+    if (!context || !context.running || !conflictContextCurrent(context)) return;
+    if (conflictActionRef.current) { copyWakePending.current = true; return; }
+    try {
+      const copy = await loadCopyStatus(context, context.intentVersion);
+      if (!conflictContextCurrent(context)) return;
+      if (copy.create_status === "needs_review" || copy.content_status === "needs_review" || copy.content_status === "saved") {
+        setPendingCopy((current) => current?.snapshot.operation_id === context.snapshot.operation_id ? { ...current, running: false } : current);
+      } else if ((context.awaitingFollowup && copy.followup_operation_id !== context.awaitingFollowup) || (copy.create_status === "created" && copy.content_status === "not_queued")) {
+        await progressCopy(context, null);
+      }
+    } catch (cause) {
+      if (String(cause).includes("stale_copy_query")) return;
+      if (conflictContextCurrent(context)) {
+        setPendingCopy((current) => current?.snapshot.operation_id === context.snapshot.operation_id ? { ...current, running: false } : current);
+        setConflictMessage("사본 상태를 확인하지 못했습니다. 저장된 초안은 보존됩니다.");
+      }
+    }
+  }
+
+  useEffect(() => { if (copyRevision > 0) void observeCopy(); }, [copyRevision]);
+  useEffect(() => { if (copyRevision > 0) void observeDeletedCopy(); }, [copyRevision]);
+
+  async function recoverConflictResult(): Promise<void> {
+    if (!conflictRecovery || conflictActionRef.current) return;
+    startConflictAction(); setConflictRecovering(true);
+    try { await reopenConflict(conflictRecovery, true); }
+    finally { conflictActionRef.current = false; setConflictRecovering(false); }
+  }
+
+  async function continueConflict(): Promise<void> {
+    const pending = pendingConflict;
+    if (!pending || conflictActionRef.current) return;
+    startConflictAction(); setConflictRecovering(true);
+    let started = false;
+    try {
+      if (!conflictContextCurrent(pending)) throw new Error("작업 공간이 변경됐습니다.");
+      const current = pending.instance.recoverySnapshot();
+      if (current.id !== pending.uiId || current.session !== pending.sessionId || current.generation !== pending.generation || current.revision !== pending.revision) throw new Error("문서가 변경됐습니다.");
+      let requested: string | null = null;
+      await pending.instance.withConflictSnapshot(current, async () => {
+        started = true;
+        const result = await continueWorkspaceRemoteContentConflict(pending.snapshot.binding, pending.snapshot.node_id, pending.sessionId, pending.snapshot.operation_id, pending.intentVersion);
+        requested = result.requested_operation_id;
+        return result;
+      });
+      if (!conflictContextCurrent(pending)) throw new Error("작업 공간이 변경됐습니다.");
+      if (requested) {
+        const scheduler = transmitter.current;
+        if (scheduler && !scheduler.resumeContentAfterAbandon(JSON.stringify(pending.snapshot.binding), requested)) scheduler.kick();
+      }
+      setConflictMessage(requested ? "후속 처리를 요청했습니다. 서버 영수증 확인과 선택 완료가 남아 있습니다." : "추가로 요청할 후속 작업이 없습니다. 서버 영수증을 확인한 뒤 완료를 선택해 주세요.");
+    } catch (cause) {
+      if (started) {
+        setPendingConflict(null);
+        setConflictRecovery(pending);
+        setConflictMessage("후속 처리 결과를 확인할 수 없습니다. 저장된 초안은 보존됩니다.");
+      } else {
+        setPendingConflict(null);
+        setConflictMessage(String(cause).includes("조합") ? "한글 조합을 마친 뒤 다시 확인해 주세요." : "문서가 변경됐습니다. 충돌을 다시 비교해 주세요.");
+      }
+    } finally {
+      conflictActionRef.current = false; setConflictRecovering(false);
+    }
+  }
+
+  async function completeConflict(): Promise<void> {
+    const pending = pendingConflict;
+    if (!pending || conflictActionRef.current) return;
+    startConflictAction(); setConflictRecovering(true);
+    let started = false;
+    try {
+      if (!conflictContextCurrent(pending)) throw new Error("작업 공간이 변경됐습니다.");
+      const current = pending.instance.recoverySnapshot();
+      if (current.id !== pending.uiId || current.session !== pending.sessionId || current.generation !== pending.generation || current.revision !== pending.revision) throw new Error("문서가 변경됐습니다.");
+      await pending.instance.withConflictSnapshot(current, async () => {
+        started = true;
+        return completeWorkspacePendingRemoteContentConflict(pending.snapshot.binding, pending.snapshot.node_id, pending.sessionId, pending.snapshot.operation_id, pending.intentVersion);
+      });
+      setPendingConflict(null);
+      await reopenConflict(pending, false);
+    } catch (cause) {
+      if (started) {
+        setPendingConflict(null);
+        setConflictRecovery(pending);
+        setConflictMessage("서버 영수증 또는 선택 결과를 확인하지 못했습니다. 저장된 초안은 보존됩니다.");
+      } else {
+        setPendingConflict(null);
+        setConflictMessage(String(cause).includes("조합") ? "한글 조합을 마친 뒤 다시 확인해 주세요." : "문서가 변경됐습니다. 충돌을 다시 비교해 주세요.");
+      }
+    } finally {
+      conflictActionRef.current = false; setConflictRecovering(false);
+    }
   }
 
   async function recoverSource(action: "copy" | "export") {
@@ -72,24 +1208,42 @@ function App() {
     recoveringRef.current = true;
     setRecovering(true);
     setRecoveryMessage("");
+    setMemoryRecovery(null);
+    const instance = controller.current;
+    const registration = registrationVersion.current;
+    const binding = JSON.stringify(workspaceBindingRef.current);
+    let snapshot: ReturnType<EditorController["recoverySnapshot"]> | undefined;
+    let recoverySession: ReturnType<typeof sessionModes.current.get> = undefined;
+    const sameContext = () => controller.current === instance && registrationVersion.current === registration && JSON.stringify(workspaceBindingRef.current) === binding && !!snapshot && !!instance?.isCurrentSession(snapshot.session) && sessionModes.current.get(snapshot.session) === recoverySession;
     try {
-      const snapshot = controller.current?.recoverySnapshot();
+      snapshot = instance?.recoverySnapshot();
       const session = snapshot && sessionModes.current.get(snapshot.session);
+      recoverySession = session;
       if (!snapshot || !session || session.mode !== "workspace" || session.uiId !== snapshot.id) throw new Error("열린 문서를 다시 확인해 주세요.");
       const completed = await recoverWorkspaceSource(session.documentId, snapshot.session, snapshot.bytes, action);
+      if (!sameContext()) return;
       if (completed) {
-        const current = controller.current?.isCurrentSnapshot(snapshot.session, snapshot.generation);
-        const sameDocument = controller.current?.isCurrentSession(snapshot.session);
+        const current = instance?.isCurrentSnapshot(snapshot.session, snapshot.generation, snapshot.revision);
+        const sameDocument = instance?.isCurrentSession(snapshot.session);
         const previous = action === "copy" ? "시작 당시 원문을 복사했습니다." : "시작 당시 원문을 파일에 내보냈습니다.";
         setRecoveryMessage(current ? (action === "copy" ? "원문을 복사했습니다." : "선택한 파일에 원문을 내보냈습니다.")
-          : sameDocument ? `${previous} 이후 입력은 포함되지 않았습니다.` : `이전에 열었던 문서의 ${previous}`);
+          : sameDocument ? `${previous} 현재 문서 상태를 다시 확인하세요.` : `이전에 열었던 문서의 ${previous}`);
       }
     } catch (cause) {
+      if (snapshot && !sameContext()) return;
       const error = String(cause);
       if (/recovery_copy_not_utf8|recovery_copy_contains_nul/.test(error)) setRecoveryMessage("이 원문은 텍스트로 복사할 수 없습니다. 파일로 내보내세요.");
       else if (error.includes("recovery_too_large")) setRecoveryMessage("복구 원문이 64 MiB를 초과해 내보내거나 복사할 수 없습니다.");
       else if (error.includes("recovery_export_exists")) setRecoveryMessage("이미 있는 파일은 변경하지 않았습니다. 다른 이름으로 내보내세요.");
       else setRecoveryMessage(`원문 복구 작업에 실패했습니다: ${error}`);
+      if (snapshot && instance?.isBlockedRecoverySnapshot(snapshot.session, snapshot.generation, snapshot.revision)) {
+        try {
+          const text = new TextDecoder("utf-8", { fatal: true }).decode(snapshot.bytes);
+          setMemoryRecovery({ instance, id: snapshot.id, session: snapshot.session, generation: snapshot.generation, revision: snapshot.revision, registration, binding, sessionRef: recoverySession, sessionBinding: recoverySession?.binding, text });
+        } catch {
+          setRecoveryMessage("원문 복구 작업과 텍스트 표시가 실패했습니다. 현재 화면을 닫지 말고 저장을 다시 시도해 주세요.");
+        }
+      }
     } finally {
       recoveringRef.current = false;
       setRecovering(false);
@@ -97,12 +1251,74 @@ function App() {
   }
 
   async function refreshWorkspace(startAfter: string | null = null): Promise<void> {
+    const metadata = metadataVersion.current;
+    const binding = JSON.stringify(workspaceBindingRef.current);
     const result = await listLoader.current.load(workspaceInventory, startAfter);
-    if (!listLoader.current.isCurrent(result.revision)) throw new Error("stale_workspace_list");
+    if (!listLoader.current.isCurrent(result.revision) || metadataVersion.current !== metadata || JSON.stringify(workspaceBindingRef.current) !== binding) throw new Error("stale_workspace_list");
     nodesRef.current = result.nodes;
+    inventoryVersion.current = metadata;
+    inventoryBinding.current = binding;
     setNodes(result.nodes);
     setWorkspacePageStart(startAfter);
+    workspacePageStartRef.current = startAfter;
     setWorkspaceNextPage(result.nextAfterId);
+  }
+
+  async function refreshWorkspaceSync(): Promise<void> {
+    void refreshCredentialStatus();
+    const revision = ++workspaceSyncRevision.current;
+    const registration = registrationVersion.current;
+    const current = await workspaceSyncState();
+    if (revision !== workspaceSyncRevision.current || registration !== registrationVersion.current || modeRef.current !== "workspace") return;
+    const key = JSON.stringify(current.binding);
+    if (workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) !== key) {
+      setRestorePermission(null);
+      setConflictSnapshot(null);
+      setDeletedCopyReview(null);
+      setDeletedCopyRecovery(null);
+      setDeletedCopyMessage("");
+      setDeletedCopyRecorded(false);
+      setDeletedCopyStatus(null);
+      setDeletedCopyRetryOpen(false);
+      setDeletedFollowupApproval(null);
+      deletedCopyRun.current = null;
+      setConflictMessage("");
+      setHasContentConflict(false);
+      setPendingConflict(null);
+      setPendingMerge(null);
+      setPendingCopy(null);
+      setCopyRetryOpen(false);
+      syncRevision.current++;
+      const activeSession = [...sessionModes.current.keys()].find((session) => controller.current?.isCurrentSession(session));
+      setSyncStatus(activeSession && unqueuedEdits.current.has(activeSession) ? "이전 등록의 미전송 편집" : "");
+    }
+    workspaceBindingRef.current = current.binding;
+    setWorkspaceBinding(current.binding);
+    transmitter.current?.activateBinding(key);
+    switch (current.status) {
+      case "ready":
+        setWorkspaceSyncMessage("");
+        transmitter.current?.resumeSync();
+        void controller.current?.inspectRemoteChange();
+        break;
+      case "connecting": setWorkspaceSyncMessage("서버 동기화 중"); break;
+      case "offline": setWorkspaceSyncMessage("서버에 연결되지 않음"); break;
+      case "auth_required": setWorkspaceSyncMessage("기기 인증 필요"); break;
+      case "gateway_auth_required": setWorkspaceSyncMessage("gateway 인증 필요"); break;
+      case "needs_review": setWorkspaceSyncMessage("서버 상태 대조 필요"); break;
+    }
+  }
+
+  async function refreshCredentialStatus(): Promise<void> {
+    if (!credentialMounted.current) return;
+    const revision = ++credentialRevision.current;
+    const registration = registrationVersion.current;
+    try {
+      const status = await workspaceCredentialStatus();
+      if (credentialMounted.current && revision === credentialRevision.current && registration === registrationVersion.current) setCredentialMessage(credentialStatusMessage(status));
+    } catch {
+      if (credentialMounted.current && revision === credentialRevision.current && registration === registrationVersion.current) setCredentialMessage("인증정보 저장 상태를 확인하지 못했습니다.");
+    }
   }
 
   async function refreshDrafts(): Promise<void> {
@@ -111,25 +1327,90 @@ function App() {
     setDrafts(result);
   }
 
+  async function openSearchResult(result: SearchResult): Promise<void> {
+    const active = workspaceBindingRef.current;
+    if (!active || modeRef.current !== "workspace") throw new Error("작업 공간을 다시 확인해 주세요.");
+    const bindingKey = JSON.stringify(active);
+    if (result.scope === "recovery") {
+      const available = await localDrafts();
+      if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== bindingKey) throw new Error("작업 공간이 변경됐습니다.");
+      const draft = available.find((item) => item.document_id === result.node_id && JSON.stringify(item.binding) === bindingKey);
+      if (!draft) throw new Error("초안이 변경됐습니다. 검색을 다시 시작하세요.");
+      draftsRef.current = available;
+      setDrafts(available);
+      await controller.current?.open(draftSelectionId(draft, "workspace"));
+      return;
+    }
+    const node = (result as SearchResult & { node: NodeState | null }).node;
+    if (!node || node.node_id !== result.node_id || node.deleted || node.kind !== "file") throw new Error("문서가 변경됐습니다. 검색을 다시 시작하세요.");
+    searchNodesRef.current.set(node.node_id, node);
+    try { await controller.current?.open(node.node_id); }
+    finally { if (searchNodesRef.current.get(node.node_id) === node) searchNodesRef.current.delete(node.node_id); }
+  }
+
   async function refreshSyncStatus(): Promise<void> {
     const revision = ++syncRevision.current;
+    const actionVersion = conflictActionRevision.current;
     const current = [...sessionModes.current.entries()].find(([session]) => controller.current?.isCurrentSession(session));
     if (!current || !current[1].binding) return;
     const [sessionId, session] = current;
     const binding = session.binding;
     if (!binding) return;
+    const bindingKey = JSON.stringify(binding), version = registrationVersion.current;
     const result = await workspaceDocumentOutbox(binding, session.documentId);
-    if (revision !== syncRevision.current || !controller.current?.isCurrentSession(sessionId)) return;
+    if (revision !== syncRevision.current || actionVersion !== conflictActionRevision.current || version !== registrationVersion.current || !workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== bindingKey || !controller.current?.isCurrentSession(sessionId)) return;
+    setHasContentConflict(result.has_conflict);
     if (result.has_conflict) setSyncStatus("충돌 있음");
     else if (result.has_failure || result.latest?.frozen) setSyncStatus("서버 결과 대조 필요");
     else {
       const last = result.latest;
-      if (!last) setSyncStatus("");
+      const unqueued = unqueuedEdits.current.has(sessionId);
+      if (!last) setSyncStatus(unqueued ? "서버 반영 대기" : "");
+      else if (last.status === "conflict") setSyncStatus(unqueued ? "서버 반영 대기" : "");
+      else if (last.status === "abandoned") {
+        setSyncStatus(BigInt(last.operation_seq) <= BigInt(result.confirmed_through) ? (unqueued ? "서버 반영 대기" : "") : (unqueued ? "서버 반영 대기, 취소 영수증 확인 중" : "취소됨, 영수증 확인 중"));
+      }
       else if (last.status === "committed" && controller.current?.isCurrentSaved(sessionId, last.generation)) {
         setSyncStatus(BigInt(last.operation_seq) <= BigInt(result.confirmed_through) ? "서버 반영됨" : "서버 저장됨, 영수증 확인 중");
       }
       else setSyncStatus("서버 반영 대기");
     }
+    const first = result.first_content_conflict;
+    const instance = controller.current;
+    if (!instance || conflictActionRef.current) return;
+    const stillCurrent = () => revision === syncRevision.current && actionVersion === conflictActionRevision.current && version === registrationVersion.current && controller.current === instance && instance.isCurrentSession(sessionId) && !!workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) === bindingKey && !conflictActionRef.current;
+    if (!first) {
+      const tracked = pendingMergeRef.current;
+      if (!tracked || tracked.instance !== instance || tracked.sessionId !== sessionId || JSON.stringify(tracked.snapshot.binding) !== bindingKey || tracked.snapshot.node_id !== session.documentId) return;
+      const response = await workspaceContentConflictResolutionStatus(binding, session.documentId, tracked.snapshot.operation_id);
+      if (!stillCurrent() || pendingMergeRef.current !== tracked) return;
+      if (JSON.stringify(response.binding) !== bindingKey || response.document_id !== session.documentId || response.operation_id !== tracked.snapshot.operation_id) throw new Error("stale_conflict");
+      if (response.state.status === "completed" && !response.state.frozen && BigInt(response.state.generation) === BigInt(tracked.snapshot.generation) + 1n) {
+        if (!await hasConfirmedMergeIdentity(tracked) || !stillCurrent() || pendingMergeRef.current !== tracked) return;
+        setPendingMerge((current) => current === tracked ? null : current);
+        setConflictMessage("합본 저장 완료. 이후 기기 초안과 충돌 자료는 보존됩니다.");
+      }
+      return;
+    }
+    const resolution = await workspaceContentConflictResolutionStatus(binding, session.documentId, first.operation_id);
+    if (!stillCurrent()) return;
+    if (JSON.stringify(resolution.binding) !== bindingKey || resolution.document_id !== session.documentId || resolution.operation_id !== first.operation_id) throw new Error("stale_conflict");
+    const selected = resolution.state;
+    if (selected.status !== "pending" || selected.choice !== "save_merged" || selected.frozen) return;
+    const merge = await workspaceContentConflictMergeStatus(binding, session.documentId, first.operation_id, selected.version);
+    if (!stillCurrent()) return;
+    if (JSON.stringify(merge.binding) !== bindingKey || merge.document_id !== session.documentId || merge.operation_id !== first.operation_id || merge.intent_version !== selected.version) throw new Error("stale_merge_operation");
+    let editor: ReturnType<EditorController["recoverySnapshot"]>;
+    try { editor = instance.recoverySnapshot(); } catch { return; }
+    if (!stillCurrent() || editor.session !== sessionId || editor.id !== session.uiId) return;
+    const identity: ConflictIdentity = { binding, node_id:session.documentId, operation_id:first.operation_id, operation_seq:first.operation_seq, generation:selected.generation };
+    setPendingMerge((previous) => {
+      if (previous && previous.instance === instance && previous.sessionId === sessionId && previous.snapshot.operation_id === first.operation_id && previous.intentVersion === selected.version) {
+        return { ...previous, queuedOperationId:merge.merge_operation?.operation_id ?? null, queuedOperationSeq:merge.merge_operation?.operation_seq ?? null };
+      }
+      return { instance, snapshot:identity, sessionId, uiId:editor.id, version, merge:true, intentVersion:selected.version, generation:editor.generation, revision:editor.revision, queuedOperationId:merge.merge_operation?.operation_id ?? null, queuedOperationSeq:merge.merge_operation?.operation_seq ?? null };
+    });
+    if (selected.needs_review) setConflictMessage("합본을 확인한 뒤 초안 또는 서버 상태가 변경됐습니다. 충돌을 다시 비교해 주세요.");
   }
 
   async function connect(event: FormEvent<HTMLFormElement>) {
@@ -150,21 +1431,27 @@ function App() {
     try {
       if (!await controller.current?.prepareForWorkspaceChange()) return;
       await pairWorkspace(origin, workspaceId, secret);
+      registrationVersion.current++;
+      workspaceBindingRef.current = null;
+      setWorkspaceBinding(null);
+      setRestorePermission(null);
       modeRef.current = "workspace";
       nodesRef.current = [];
       setNodes([]);
       setWorkspacePageStart(null);
+      workspacePageStartRef.current = null;
       setWorkspaceNextPage(null);
       setMode("workspace");
+      await refreshWorkspaceSync();
       await refreshDrafts();
       await refreshWorkspace();
-      transmitter.current?.resume();
     } catch (cause) {
       if (String(cause).includes("pairing_pending_adoption") || String(cause).includes("pairing_in_progress")) setPendingPair(true);
       setConnectionError(String(cause));
     } finally {
       connecting.current = false;
       setBusy(false);
+      void refreshCredentialStatus();
     }
   }
 
@@ -181,16 +1468,21 @@ function App() {
         await discardPendingPair();
       } else {
         await adoptPendingPair();
+        registrationVersion.current++;
+        workspaceBindingRef.current = null;
+        setWorkspaceBinding(null);
+        setRestorePermission(null);
         setPendingPair(false);
         modeRef.current = "workspace";
         nodesRef.current = [];
         setNodes([]);
         setWorkspacePageStart(null);
+        workspacePageStartRef.current = null;
         setWorkspaceNextPage(null);
         setMode("workspace");
+        await refreshWorkspaceSync();
         await refreshDrafts();
         await refreshWorkspace();
-        transmitter.current?.resume();
       }
       setPendingPair(false);
     } catch (cause) {
@@ -198,6 +1490,7 @@ function App() {
     } finally {
       connecting.current = false;
       setBusy(false);
+      void refreshCredentialStatus();
     }
   }
 
@@ -206,19 +1499,30 @@ function App() {
     let operationsBinding: string | undefined;
     const scheduler = new AutoTransmit({
       queue: async (scope, generation) => {
+        const version = registrationVersion.current;
         const queued = await queueWorkspaceDocument(scope.documentId, scope.editSessionId, generation);
+        const currentScope = sessionModes.current.get(scope.editSessionId)?.scope;
+        if (version !== registrationVersion.current || !workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== scope.binding
+          || !currentScope || currentScope.binding !== scope.binding || currentScope.documentId !== scope.documentId || currentScope.editSessionId !== scope.editSessionId) throw new Error("stale_registration");
+        if (!queued.operation_id || queued.document_id !== scope.documentId || queued.generation !== generation || typeof queued.committed !== "boolean") throw new Error("invalid_queued_operation");
+        if (unqueuedEdits.current.get(scope.editSessionId) === queued.generation) unqueuedEdits.current.delete(scope.editSessionId);
         if (queued.committed) setTimeout(() => scheduler.kick(), 0);
         if (!queued.committed && operationsBinding === scope.binding) operations.set(queued.operation_id, { scope, documentId: queued.document_id, generation: queued.generation });
-        if (controller.current?.isCurrentSession(scope.editSessionId)) { syncRevision.current++; setSyncStatus("동기화 대기"); }
+        if (controller.current?.isCurrentSession(scope.editSessionId)) { syncRevision.current++; setSyncStatus(unqueuedEdits.current.has(scope.editSessionId) ? "서버 반영 대기" : "동기화 대기"); }
         return { operationId: queued.operation_id, documentId: queued.document_id, generation: queued.generation, committed: queued.committed };
       },
       transmit: async () => {
         const version = registrationVersion.current;
+        const bindingAtStart = workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current);
+        const controllerAtStart = controller.current;
+        const sessionAtStart = [...sessionModes.current.keys()].find((session) => controllerAtStart?.isCurrentSession(session));
         let result;
         try { result = await sendNextWorkspaceOperation(); }
         catch (cause) {
           if (/OutboxBlocked|ReconciliationRequired/.test(String(cause))) {
-            setSyncStatus("서버 결과 대조 필요");
+            const currentSession = [...sessionModes.current.keys()].find((session) => controller.current?.isCurrentSession(session));
+            if (version === registrationVersion.current && bindingAtStart === (workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current))
+              && controller.current === controllerAtStart && sessionAtStart === currentSession) setSyncStatus("서버 결과 대조 필요");
             return { status: "needs_review" as const };
           }
           throw cause;
@@ -227,20 +1531,38 @@ function App() {
         const activeBindings = [...sessionModes.current.values()].flatMap((session) => session.scope ? [session.scope.binding] : []);
         const stale = staleTransmissionResult(version, registrationVersion.current, binding, activeBindings);
         if (stale) return stale;
+        if (workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) !== binding) return { status: "pending" as const };
+        if (result.generation === null && result.operation_id) {
+          setRestoreRevision((current) => current + 1);
+          if (result.status === "committed" || result.status === "failed" || result.status === "abandoned") {
+            setRestorePermission((current) => current?.binding === binding && current.operationId === result.operation_id ? null : current);
+          }
+        }
         const operation = result.operation_id ? operations.get(result.operation_id) : undefined;
         const matchingOperation = operation && operation.scope.binding === binding && result.document_id === operation.documentId && result.generation === operation.generation;
         if (matchingOperation) {
           if (result.status === "committed") scheduler.acknowledge(operation.scope, { operationId: result.operation_id!, documentId: operation.documentId, generation: operation.generation }, true);
           if (controller.current?.isCurrentSession(operation.scope.editSessionId)) {
-            if (result.status === "conflict") setSyncStatus("충돌 있음");
+            if (result.status === "conflict") { setHasContentConflict(true); setSyncStatus("충돌 있음"); }
             else if (result.status === "failed" || result.status === "needs_review") setSyncStatus("서버 결과 대조 필요");
             else if (result.status === "ack_pending" || result.status === "pending") setSyncStatus("서버 결과 확인 중");
           }
           if (result.status === "committed" || result.status === "conflict" || result.status === "failed" || result.status === "abandoned") operations.delete(result.operation_id!);
         }
-        if (result.status !== "pending") void refreshSyncStatus().catch((cause) => setConnectionError(String(cause)));
+        if (result.status !== "pending") {
+          void refreshSyncStatus().catch((cause) => setConnectionError(String(cause)));
+          requestRemoteInspection();
+        }
+        if (result.status === "committed" || result.status === "abandoned" || result.status === "conflict" || result.status === "failed" || result.status === "idle") setCopyRevision((revision) => revision + 1);
         if (result.status === "ack_pending" || result.status === "auth_required" || result.status === "gateway_auth_required") return receiptWaitResult(result.status, result, binding, operation);
-        if (result.status === "idle" || result.status === "pending" || result.status === "needs_review") return { status: result.status };
+        if (result.status === "needs_review" && result.content_block && result.document_id) {
+          return { status: "content_blocked" as const, binding, operationId: result.content_block.blocked_operation_id, documentId: result.document_id };
+        }
+        if (result.status === "permission_denied") {
+          if (!result.operation_id) throw new Error("잘못된 권한 거절 응답입니다.");
+          return { status: "permission_denied" as const, operationId: result.operation_id };
+        }
+        if (result.status === "idle" || result.status === "pending" || result.status === "needs_review" || result.status === "sync_pending") return { status: result.status };
         if (!result.operation_id) throw new Error("잘못된 서버 저장 응답입니다.");
         return { status: result.status, operationId: result.operation_id };
       },
@@ -254,6 +1576,11 @@ function App() {
       authRequired: (reason) => {
         setConnectionError(reason === "auth_required" ? "기기 인증이 만료되었거나 취소됐습니다. 다시 등록해 주세요. 기기 초안은 보존됩니다." : "gateway 인증을 확인해 주세요. 기기 초안은 보존됩니다.");
       },
+      permissionDenied: (operationId) => {
+        const binding = workspaceBindingRef.current;
+        if (binding) setRestorePermission({ binding: JSON.stringify(binding), operationId });
+        setRestoreRevision((current) => current + 1);
+      },
       failed: (cause) => { if (!(cause instanceof QueueStorageError)) setConnectionError(String(cause)); },
       queueStorageFailed: (scope) => {
         if (controller.current?.isCurrentSession(scope.editSessionId)) reportQueueError(scope, "기기 초안은 저장됐지만 전송을 준비하지 못했습니다. 자동으로 다시 시도합니다.");
@@ -266,13 +1593,22 @@ function App() {
       openDocument: async (id) => {
         const local = draftsRef.current.find((draft) => draftSelectionId(draft, modeRef.current) === id);
         const selectedMode = local ? "workspace" : modeRef.current;
-        const node = selectedMode === "workspace" ? nodesRef.current.find((item) => item.node_id === id && item.kind === "file") : undefined;
+        const node = selectedMode === "workspace" ? searchNodesRef.current.get(id) ?? nodesRef.current.find((item) => item.node_id === id && item.kind === "file") : undefined;
         if (selectedMode === "workspace" && !node && !local) throw new Error("문서 목록을 다시 불러와 주세요.");
-        const opened = local ? await openLocalDraft(local) : selectedMode === "fixture" ? await openDocument(id) : await openWorkspaceDocument(node!);
-        const canSync = selectedMode === "workspace" && "binding" in opened && "readonly" in opened && !opened.readonly && (!local || (local.current_registration && local.has_session));
+        let opened;
+        try {
+          opened = local ? await openLocalDraft(local) : selectedMode === "fixture" ? await openDocument(id) : await openWorkspaceDocument(node!);
+        } catch (cause) {
+          if (selectedMode !== "workspace") throw cause;
+          if (String(cause).includes("pairing_in_progress")) setPendingPair(true);
+          throw new Error(workspaceOpenError(cause), { cause });
+        }
+        if (selectedMode === "workspace") { searchNodesRef.current.clear(); setSearchRevision((current) => current + 1); }
+        const canSync = selectedMode === "workspace" && "binding" in opened && "readonly" in opened && !opened.readonly && "has_session" in opened && opened.has_session === true && (!local || (local.current_registration && local.has_session));
         const scope = canSync && "binding" in opened ? { binding: JSON.stringify(opened.binding), documentId: opened.document_id, editSessionId: opened.edit_session_id } : undefined;
         const binding = "binding" in opened ? opened.binding as WorkspaceRegistration : undefined;
-        sessionModes.current.set(opened.edit_session_id, { mode: selectedMode, documentId: opened.document_id, uiId: id, scope, binding });
+        const orphanDraft = !!local && !nodesRef.current.some((item) => item.node_id === opened.document_id && item.kind === "file" && !item.deleted);
+        sessionModes.current.set(opened.edit_session_id, { mode: selectedMode, documentId: opened.document_id, uiId: id, scope, binding, orphanDraft });
         setSyncStatus("");
         return { ...opened, document_id: id };
       },
@@ -282,11 +1618,29 @@ function App() {
         const original = { ...request, document_id: session.documentId };
         const saved = session.mode === "fixture" ? await saveDocument(original) : await saveWorkspaceDocument(original);
         if (saved.edit_session_id !== request.edit_session_id || saved.generation !== request.generation) throw new Error("저장 응답이 현재 편집 요청과 일치하지 않습니다.");
+        if (session.mode === "workspace") { searchNodesRef.current.clear(); setSearchRevision((current) => current + 1); }
         try {
           if (session.scope) scheduler.durable(session.scope, saved.generation);
           else scheduler.unscopedDurable(saved.edit_session_id, saved.generation);
         } catch (cause) { setConnectionError(String(cause)); }
         return saved;
+      },
+      holdConflictSession: async (id, sessionId) => {
+        const session = sessionModes.current.get(sessionId);
+        if (!session?.scope || session.uiId !== id) throw new Error("편집 세션을 다시 확인해 주세요.");
+        await scheduler.holdConflictSession(session.scope);
+      },
+      releaseConflictSession: (id, sessionId) => {
+        const session = sessionModes.current.get(sessionId);
+        if (!session?.scope || session.uiId !== id) throw new Error("편집 세션을 다시 확인해 주세요.");
+        scheduler.releaseConflictSession(session.scope);
+      },
+      retireConflictSession: (id, sessionId) => {
+        const session = sessionModes.current.get(sessionId);
+        if (!session?.scope || session.uiId !== id) throw new Error("편집 세션을 다시 확인해 주세요.");
+        scheduler.retireConflictSession(session.scope);
+        sessionModes.current.delete(sessionId);
+        unqueuedEdits.current.delete(sessionId);
       },
       closeDocument: async (request) => {
         const session = sessionModes.current.get(request.edit_session_id);
@@ -306,6 +1660,7 @@ function App() {
           else await scheduler.deactivatePreservingDraft(session.scope, close);
         } else await close();
         sessionModes.current.delete(request.edit_session_id);
+        unqueuedEdits.current.delete(request.edit_session_id);
       },
       exit: async () => {
         for (const session of sessionModes.current.values()) if (session.scope) {
@@ -321,6 +1676,18 @@ function App() {
         setState(next);
         if (selectedRef.current !== next.selected) {
           selectedRef.current = next.selected;
+          setDeletedCopyReview(null); setDeletedCopyMessage("");
+          setDeletedCopyRecovery(null);
+          setDeletedCopyRecorded(false);
+          setDeletedCopyStatus(null);
+          setDeletedCopyRetryOpen(false);
+          setDeletedFollowupApproval(null);
+          deletedCopyRun.current = null;
+          setHasContentConflict(false); setConflictSnapshot(null); setConflictMessage("");
+          setPendingConflict(null);
+          setPendingMerge(null);
+          setPendingCopy(null);
+          setCopyRetryOpen(false);
           setPreviewAnchor(null);
           setRecoveryMessage("");
           syncRevision.current++;
@@ -337,9 +1704,21 @@ function App() {
         }
       },
       edited: (_id, sessionId, generation) => {
+        setConflictSnapshot(null);
+        setDeletedCopyReview((current) => current?.snapshot.edit_session_id === sessionId ? null : current);
+        setPendingConflict((pending) => pending?.sessionId === sessionId ? null : pending);
         const scope = sessionModes.current.get(sessionId)?.scope;
         try {
-          if (scope) { scheduler.edit(scope, generation); syncRevision.current++; setSyncStatus("서버 반영 대기"); }
+          if (scope) {
+            unqueuedEdits.current.set(sessionId, generation); syncRevision.current++;
+            if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== scope.binding) {
+              setSyncStatus("이전 등록의 미전송 편집");
+              setConnectionError("작업 공간 등록이 변경됐습니다. 기기 초안을 확인하세요.");
+            } else {
+              setSyncStatus("서버 반영 대기");
+              scheduler.edit(scope, generation);
+            }
+          }
           else scheduler.unscopedEdit(sessionId, generation);
         } catch (cause) { setConnectionError(String(cause)); }
       },
@@ -349,9 +1728,11 @@ function App() {
           if (scope) scheduler.composition(scope, active);
           else scheduler.inputComposition(active);
         } catch (cause) { setConnectionError(String(cause)); }
+        if (!active) queueMicrotask(() => requestRemoteRefresh());
       },
-      opened: (_id, sessionId, generation, localDraft) => {
-        const scope = sessionModes.current.get(sessionId)?.scope;
+      opened: (_id, sessionId, generation, localDraft, conflictRecovery) => {
+        const session = sessionModes.current.get(sessionId);
+        const scope = session?.scope;
         if (scope) {
           if (operationsBinding !== scope.binding) {
             operations.clear();
@@ -359,9 +1740,36 @@ function App() {
           }
           scheduler.activateBinding(scope.binding);
           scheduler.openSession(scope);
-          if (localDraft) void scheduler.restore(scope, generation).catch((cause) => { if (!(cause instanceof QueueStorageError)) setConnectionError(String(cause)); });
+          if (localDraft && !conflictRecovery) {
+            const instance = controller.current;
+            if (session?.orphanDraft && session.binding && instance) {
+              const context = { instance, binding: session.binding, documentId: session.documentId, sessionId, uiId: session.uiId, version: registrationVersion.current };
+              void loadDeletedCopyStatus(context).then((status) => {
+                if (!status && deletedStatusCurrent(context)) return scheduler.restore(scope, generation);
+              }).catch((cause) => {
+                if (deletedStatusCurrent(context) && !(cause instanceof QueueStorageError)) setDeletedCopyMessage("삭제 사본 상태를 확인하지 못했습니다. 기기 초안은 보존됩니다.");
+              });
+            } else void scheduler.restore(scope, generation).catch((cause) => { if (!(cause instanceof QueueStorageError)) setConnectionError(String(cause)); });
+          }
         }
+        queueMicrotask(() => { requestRemoteRefresh(); requestRemoteInspection(); });
       },
+      prepareRemoteRefresh: async (id, sessionId) => {
+        const session = sessionModes.current.get(sessionId);
+        if (!session || session.mode !== "workspace" || !session.scope || session.uiId !== id) return null;
+        return prepareWorkspaceRemoteRefresh(session.documentId, sessionId);
+      },
+      commitRemoteRefresh: async (id, sessionId, token) => {
+        const session = sessionModes.current.get(sessionId);
+        if (!session || session.mode !== "workspace" || !session.scope || session.uiId !== id) return false;
+        return commitWorkspaceRemoteRefresh(session.documentId, sessionId, token);
+      },
+      inspectRemoteChange: async (id, sessionId, generation) => {
+        const session = sessionModes.current.get(sessionId);
+        if (!session || session.mode !== "workspace" || !session.scope || session.uiId !== id) return "pending";
+        return inspectWorkspaceRemoteChange(session.documentId, sessionId, generation);
+      },
+      remoteInspectionVersion: () => `${registrationVersion.current}:${JSON.stringify(workspaceBindingRef.current)}`,
       manualSync: async (id, sessionId) => {
         const session = sessionModes.current.get(sessionId);
         if (!session || session.uiId !== id) throw new Error("편집 세션을 다시 열어 주세요.");
@@ -374,26 +1782,27 @@ function App() {
         const editing = new Compartment();
         let compositionTimer: ReturnType<typeof setTimeout> | undefined;
         let compositionPending = false;
-        const view = new EditorView({
-          state: EditorState.create({
-            doc: source.text,
+        let replacing = false;
+        const createState = (current: typeof source, selection?: { anchor: number; head: number }) => EditorState.create({
+            doc: current.text,
+            selection,
             extensions: [
               lineNumbers(), history(), drawSelection(),
               keymap.of([{ key: "Mod-s", run: () => { save(); return true; } }, ...defaultKeymap, ...historyKeymap]),
-              editing.of([EditorState.readOnly.of(source.readonly), EditorView.editable.of(!source.readonly)]),
-              ...(source.readonly ? [] : [documentSizeGuard(source.bom, inputRejected)]),
+              editing.of([EditorState.readOnly.of(current.readonly), EditorView.editable.of(!current.readonly)]),
+              ...(current.readonly ? [] : [documentSizeGuard(current.bom, inputRejected)]),
               EditorView.contentAttributes.of({ "aria-label": "Markdown 원문" }),
               EditorView.domEventHandlers({
                 compositionstart: () => { clearTimeout(compositionTimer); compositionPending = true; composition(true); return false; },
                 compositionend: () => { clearTimeout(compositionTimer); compositionTimer = setTimeout(() => { compositionPending = false; composition(false); }, 250); return false; },
               }),
               EditorView.updateListener.of((update) => {
-                if (update.docChanged) change(update.state.doc.toString());
+                if (update.docChanged && !replacing) change(update.state.doc.toString());
               }),
-              ...(source.original.length > 1024 * 1024 ? [] : [markdown()]),
+              ...(current.original.length > 1024 * 1024 ? [] : [markdown()]),
             ],
-          }),
-        });
+          });
+        const view = new EditorView({ state: createState(source) });
         return {
           show: () => {
             if (!parent.current) throw new Error("편집기 화면이 닫혔습니다.");
@@ -402,20 +1811,67 @@ function App() {
           destroy: () => { clearTimeout(compositionTimer); view.destroy(); },
           setEditable: (enabled) => view.dispatch({ effects: editing.reconfigure([EditorState.readOnly.of(!enabled), EditorView.editable.of(enabled)]) }),
           isComposing: () => view.composing || compositionPending,
+          replaceSource: (current) => {
+            const selection = view.state.selection.main;
+            const anchor = Math.min(selection.anchor, current.text.length);
+            const head = Math.min(selection.head, current.text.length);
+            const scrollTop = view.scrollDOM.scrollTop;
+            const scrollLeft = view.scrollDOM.scrollLeft;
+            const focused = view.hasFocus;
+            replacing = true;
+            try {
+              view.setState(createState(current, { anchor, head }));
+              view.scrollDOM.scrollTop = scrollTop;
+              view.scrollDOM.scrollLeft = scrollLeft;
+              if (focused) view.focus();
+            } finally { replacing = false; }
+          },
         };
       },
     });
     controller.current = instance;
     transmitter.current = scheduler;
     let disposed = false;
+    function requestRemoteRefresh() {
+      if (disposed || modeRef.current !== "workspace") return;
+      void instance.refreshRemote().catch(() => { if (!disposed) setConnectionError("최신 문서를 확인하지 못했습니다."); });
+    }
+    function requestRemoteInspection() {
+      if (!disposed && modeRef.current === "workspace") void instance.inspectRemoteChange();
+    }
+    credentialMounted.current = true;
+    const stop = listen("close-requested", () => { void instance.close(); });
+    const syncReady = listen("workspace-sync-status-changed", () => {
+      if (modeRef.current === "workspace") void refreshWorkspaceSync().catch((cause) => setConnectionError(String(cause)));
+    });
+    const credentialChanged = listen("workspace-credential-status-changed", () => { void refreshCredentialStatus(); }).catch(() => {
+      if (credentialMounted.current) setCredentialMessage("인증정보 저장 상태 알림을 연결하지 못했습니다.");
+      return () => {};
+    });
+    void refreshCredentialStatus();
+    const metadataChanged = listen("workspace-metadata-changed", () => {
+      if (modeRef.current === "workspace") {
+        metadataVersion.current++;
+        requestRemoteRefresh();
+        requestRemoteInspection();
+        void refreshSyncStatus().catch((cause) => setConnectionError(String(cause)));
+        searchNodesRef.current.clear();
+        setSearchRevision((current) => current + 1);
+        void refreshWorkspace(workspacePageStartRef.current).catch((cause) => {
+          if (!String(cause).includes("stale_workspace_list")) setConnectionError(String(cause));
+        });
+      }
+    });
     void (async () => {
       try {
+        await Promise.all([syncReady, metadataChanged]);
         await refreshDrafts();
-        await refreshWorkspace();
+        await workspaceSyncState();
         if (!disposed) {
           modeRef.current = "workspace";
           setMode("workspace");
-          scheduler.resume();
+          await refreshWorkspaceSync();
+          await refreshWorkspace();
         }
       } catch (cause) {
         if (!disposed && String(cause).includes("not_connected")) {
@@ -432,17 +1888,32 @@ function App() {
         if (!disposed) setBusy(false);
       }
     })();
-    const stop = listen("close-requested", () => { void instance.close(); });
     return () => {
       disposed = true;
+      credentialMounted.current = false;
+      credentialRevision.current++;
       listLoader.current.invalidate();
       controller.current = null;
       transmitter.current = null;
       clearTimeout(previewTimer.current);
       void instance.dispose().then(() => scheduler.dispose()).catch(() => {});
       void stop.then((unlisten) => unlisten()).catch(() => {});
+      for (const listener of [syncReady, metadataChanged, credentialChanged]) {
+        void listener.then((unlisten) => unlisten()).catch(() => {});
+      }
     };
   }, []);
+
+  useLayoutEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "f" && mode === "workspace" && workspaceBinding) {
+        event.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  }, [mode, workspaceBinding]);
 
   const loadPreviewImage = useCallback((target: string, signal: AbortSignal): Promise<Uint8Array> => {
     if (mode !== "workspace") return Promise.reject(new Error("작업 공간에 연결되어 있지 않습니다."));
@@ -474,8 +1945,12 @@ function App() {
   }, []);
 
   const nodeIndex = useMemo(() => new Map(nodes.map((node) => [node.node_id, node])), [nodes]);
-  const workspaceButtons = useMemo(() => nodes.filter((node) => node.kind === "file" && !node.deleted).map((node) => <button key={node.node_id} disabled={busy} data-document={node.node_id} aria-current={state.selected === node.node_id ? "page" : undefined} onClick={() => void controller.current?.open(node.node_id)}>{workspacePath(node, nodeIndex)}</button>), [nodes, nodeIndex, busy, state.selected]);
+  const workspaceButtons = useMemo(() => nodes.filter((node) => node.kind === "file" && !node.deleted).map((node) => {
+    const path = workspacePath(node, nodeIndex);
+    return <div key={node.node_id} className="workspace-file-row"><button disabled={busy} data-document={node.node_id} aria-current={state.selected === node.node_id ? "page" : undefined} onClick={() => void controller.current?.open(node.node_id)}>{path}</button><button disabled={busy || moveTarget !== null || moveRequestsOpen} data-move-node={node.node_id} aria-label={`${path} 이름 변경 또는 이동`} onClick={() => setMoveTarget({ node, path })}>이동</button><button disabled={busy || deleteTarget !== null || deleteRequestsOpen} data-delete-node={node.node_id} aria-label={`${path} 삭제`} onClick={() => setDeleteTarget({ node, path })}>삭제</button></div>;
+  }), [nodes, nodeIndex, busy, state.selected, deleteTarget, deleteRequestsOpen, moveTarget, moveRequestsOpen]);
   const hasWorkspaceDocument = [...sessionModes.current.values()].some((session) => session.mode === "workspace" && session.uiId === state.selected);
+  const visibleSyncStatus = state.remoteDeleted && (syncStatus === "서버 반영됨" || syncStatus === "서버 저장됨, 영수증 확인 중") ? "" : syncStatus;
 
   return <main>
     <header><strong>Notryx</strong><span className="badge">{mode === "fixture" ? "M0" : "M2"}</span><span className="caption">{mode === "fixture" ? "로컬 편집 시험" : "작업 공간"}</span></header>
@@ -487,14 +1962,73 @@ function App() {
           <label>등록 비밀<input name="pairing_secret" type="password" autoComplete="off" required /></label>
           <button type="submit" disabled={busy}>작업 공간 연결</button>
         </form>
+        {credentialMessage && <p role="status" data-testid="credential-status">{credentialMessage}</p>}
         {pendingPair && <div><button disabled={busy} onClick={() => void resumePair(false)}>대기 중인 등록 이어가기</button><button disabled={busy} onClick={() => void resumePair(true)}>대기 중인 등록 버리기</button></div>}
         <p>{mode === "fixture" ? "합성 문서" : "작업 공간 문서"}</p>
         {mode === "fixture" ? documents.map(([id, label]) => <button key={id} disabled={busy} data-document={id} aria-current={state.selected === id ? "page" : undefined} onClick={() => void controller.current?.open(id)}>{label}</button>)
           : workspaceButtons}
+        {mode === "workspace" && workspaceBinding && <button data-testid="move-requests-toggle" disabled={busy} aria-expanded={moveRequestsOpen} onClick={() => { setMoveTarget(null); setMoveRequestsOpen((current) => !current); }}>이동 요청</button>}
+        {mode === "workspace" && workspaceBinding && moveTarget && <MovePanel key={`${moveTarget.node.node_id}:${moveTarget.node.meta_etag}`} binding={workspaceBinding} node={moveTarget.node} displayName={moveTarget.path} ports={movePorts} revision={restoreRevision} treeRevision={searchRevision} permissionDeniedOperationId={restorePermission?.binding === JSON.stringify(workspaceBinding) ? restorePermission.operationId : null} onClose={() => setMoveTarget(null)} onWorkReady={() => {}} onRecheck={(operationId) => {
+          const key = JSON.stringify(workspaceBinding);
+          if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== key) return;
+          if (!transmitter.current?.resumeRestoreAfterCancel(key, operationId)) transmitter.current?.kick();
+        }} />}
+        {mode === "workspace" && workspaceBinding && moveRequestsOpen && <MovePanel binding={workspaceBinding} node={null} ports={movePorts} revision={restoreRevision} treeRevision={searchRevision} permissionDeniedOperationId={restorePermission?.binding === JSON.stringify(workspaceBinding) ? restorePermission.operationId : null} onClose={() => setMoveRequestsOpen(false)} onWorkReady={() => {}} onRecheck={(operationId) => {
+          const key = JSON.stringify(workspaceBinding);
+          if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== key) return;
+          if (!transmitter.current?.resumeRestoreAfterCancel(key, operationId)) transmitter.current?.kick();
+        }} />}
+        {mode === "workspace" && workspaceBinding && deleteTarget && <DeletePanel key={`${deleteTarget.node.node_id}:${deleteTarget.node.node_etag}`} binding={workspaceBinding} node={deleteTarget.node} displayName={deleteTarget.path} ports={deletePorts} revision={restoreRevision} permissionDeniedOperationId={restorePermission?.binding === JSON.stringify(workspaceBinding) ? restorePermission.operationId : null} onClose={() => setDeleteTarget(null)} onWorkReady={() => { setRestoreRevision((current) => current + 1); transmitter.current?.kick(); }} onRecheck={(operationId) => {
+          const binding = JSON.stringify(workspaceBinding);
+          if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== binding) return;
+          if (!transmitter.current?.resumeRestoreAfterCancel(binding, operationId)) transmitter.current?.kick();
+        }} />}
+        {mode === "workspace" && workspaceBinding && <button data-testid="delete-requests-toggle" disabled={busy || deleteTarget !== null} aria-expanded={deleteRequestsOpen} onClick={() => setDeleteRequestsOpen((current) => !current)}>삭제 요청</button>}
+        {mode === "workspace" && workspaceBinding && deleteRequestsOpen && <DeletePanel binding={workspaceBinding} node={null} ports={deletePorts} revision={restoreRevision} permissionDeniedOperationId={restorePermission?.binding === JSON.stringify(workspaceBinding) ? restorePermission.operationId : null} onClose={() => setDeleteRequestsOpen(false)} onWorkReady={() => { setRestoreRevision((current) => current + 1); transmitter.current?.kick(); }} onRecheck={(operationId) => {
+          const binding = JSON.stringify(workspaceBinding);
+          if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== binding) return;
+          if (!transmitter.current?.resumeRestoreAfterCancel(binding, operationId)) transmitter.current?.kick();
+        }} />}
         {mode === "workspace" && <button disabled={busy} onClick={() => { setConnectionError(""); void refreshWorkspace().catch((cause) => { if (!String(cause).includes("stale_workspace_list")) setConnectionError(String(cause)); }); }}>목록 새로고침</button>}
         {mode === "workspace" && (workspacePageStart !== null || workspaceNextPage !== null) && <p>목록을 나누어 표시합니다. 다른 구간에 있는 폴더나 첨부는 경로와 링크가 표시되지 않을 수 있습니다.</p>}
         {mode === "workspace" && workspacePageStart !== null && <button disabled={busy} onClick={() => { setConnectionError(""); void refreshWorkspace().catch((cause) => { if (!String(cause).includes("stale_workspace_list")) setConnectionError(String(cause)); }); }}>처음 목록</button>}
         {mode === "workspace" && workspaceNextPage !== null && <button disabled={busy} onClick={() => { setConnectionError(""); void refreshWorkspace(workspaceNextPage).catch((cause) => { if (!String(cause).includes("stale_workspace_list")) setConnectionError(String(cause)); }); }}>다음 목록</button>}
+        {mode === "workspace" && workspaceBinding && <button disabled={busy} aria-expanded={searchOpen} onClick={() => setSearchOpen((current) => !current)}>본문 검색</button>}
+        {mode === "workspace" && workspaceBinding && searchOpen && <SearchPanel key={searchRevision} binding={workspaceBinding} ports={searchPorts} open={(result) => void openSearchResult(result).catch((cause) => { setConnectionError(String(cause)); setSearchRevision((current) => current + 1); })} label={(result) => {
+          const node = (result as SearchResult & { node: NodeState | null }).node;
+          return node ? workspacePath(node, nodeIndex) : result.node_id;
+        }} />}
+        {mode === "workspace" && workspaceBinding && <button disabled={busy} aria-expanded={createOpen} onClick={() => setCreateOpen((current) => !current)}>새 폴더 또는 문서</button>}
+        {mode === "workspace" && workspaceBinding && createOpen && <CreatePanel binding={workspaceBinding} ports={createPorts} revision={restoreRevision} permissionDeniedOperationId={restorePermission?.binding === JSON.stringify(workspaceBinding) ? restorePermission.operationId : null} onWorkReady={() => { setRestoreRevision((current) => current + 1); transmitter.current?.kick(); }} onRecheck={(operationId) => {
+          const binding = JSON.stringify(workspaceBinding);
+          if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== binding) return;
+          if (!transmitter.current?.resumeRestoreAfterCancel(binding, operationId)) transmitter.current?.kick();
+        }} />}
+        {mode === "workspace" && workspaceBinding && <button disabled={busy} aria-expanded={frozenCreateOpen} onClick={() => setFrozenCreateOpen((current) => !current)}>이전 생성 요청 대조</button>}
+        {mode === "workspace" && workspaceBinding && frozenCreateOpen && <FrozenCreateReview binding={workspaceBinding} ports={frozenCreatePorts} onApplied={() => undefined} />}
+        {mode === "workspace" && workspaceBinding && <button disabled={busy} aria-expanded={frozenDeleteOpen} onClick={() => setFrozenDeleteOpen((current) => !current)}>이전 삭제 요청 대조</button>}
+        {mode === "workspace" && workspaceBinding && frozenDeleteOpen && <FrozenDeleteReview binding={workspaceBinding} ports={frozenDeletePorts} onApplied={() => undefined} />}
+        {mode === "workspace" && workspaceBinding && <button disabled={busy} aria-expanded={frozenMoveOpen} onClick={() => setFrozenMoveOpen((current) => !current)}>이전 이동 요청 대조</button>}
+        {mode === "workspace" && workspaceBinding && frozenMoveOpen && <FrozenMoveReview binding={workspaceBinding} ports={frozenMovePorts} onApplied={() => undefined} />}
+        {mode === "workspace" && workspaceBinding && <button disabled={busy} aria-expanded={frozenContentOpen} onClick={() => setFrozenContentOpen((current) => !current)}>이전 본문 요청 대조</button>}
+        {mode === "workspace" && workspaceBinding && frozenContentOpen && <FrozenContentReview binding={workspaceBinding} ports={frozenContentPorts} />}
+        {mode === "workspace" && workspaceBinding && <button disabled={busy} aria-expanded={trashOpen} onClick={() => setTrashOpen((current) => !current)}>휴지통</button>}
+        {mode === "workspace" && workspaceBinding && trashOpen && <TrashPanel binding={workspaceBinding} ports={trashPorts} revision={restoreRevision} permissionDeniedOperationId={restorePermission?.binding === JSON.stringify(workspaceBinding) ? restorePermission.operationId : null} onQueued={() => { setRestoreRevision((current) => current + 1); transmitter.current?.kick(); }} onCancelled={(operationId) => {
+          const binding = JSON.stringify(workspaceBinding);
+          if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== binding) return;
+          if (!transmitter.current?.resumeRestoreAfterCancel(binding, operationId)) transmitter.current?.kick();
+          setRestoreRevision((current) => current + 1);
+        }} onRecheck={(operationId) => {
+          const binding = JSON.stringify(workspaceBinding);
+          if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== binding) return;
+          if (!transmitter.current?.resumeRestoreAfterCancel(binding, operationId)) transmitter.current?.kick();
+        }} onRetry={(operationId) => {
+          const binding = JSON.stringify(workspaceBinding);
+          if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== binding) return;
+          if (transmitter.current?.retryRestoreAfterPermissionDenied(binding, operationId)) {
+            setRestorePermission((current) => current?.binding === binding && current.operationId === operationId ? null : current);
+          }
+        }} />}
         <p>기기에 보존된 초안</p>
         {drafts.map((draft) => <button key={draftKey(draft)} disabled={busy} data-draft-document={draft.document_id} aria-current={state.selected === draftSelectionId(draft, mode) ? "page" : undefined} onClick={() => void controller.current?.open(draftSelectionId(draft, mode))}>{draft.binding.workspace_id.slice(0, 8)} / {draft.document_id}</button>)}
         <button disabled={busy} onClick={() => void refreshDrafts().catch((cause) => setConnectionError(String(cause)))}>초안 목록 새로고침</button>
@@ -502,14 +2036,72 @@ function App() {
         <button id="isolation-open" onClick={() => { setIsolation(true); void invoke("m0_open_isolation").catch((cause) => setProbeError(String(cause))); }}>격리 시험 열기</button>
       </nav>
       <section className="document">
-        <div className="toolbar"><span><span id="save-status" role="status">{state.status}</span>{syncStatus && <span id="sync-status">, {syncStatus}</span>}</span><div className="toolbar-actions"><button id="preview-toggle" aria-pressed={preview} onClick={() => {
+        <div className="toolbar"><span><span id="save-status" role="status">{state.status}</span>{visibleSyncStatus && <span id="sync-status">, {visibleSyncStatus}</span>}{workspaceSyncMessage && <span id="workspace-sync-status" role="status">, {workspaceSyncMessage}</span>}</span><div className="toolbar-actions"><button id="preview-toggle" aria-pressed={preview} onClick={() => {
           clearTimeout(previewTimer.current);
           previewEnabled.current = !previewEnabled.current;
           setPreview(previewEnabled.current);
           if (previewEnabled.current) setPreviewSource(source.current);
-        }}>미리보기</button><button id="save" onClick={() => void controller.current?.save().catch(() => {})}>지금 저장</button>{hasWorkspaceDocument && <><button id="copy-source" disabled={recovering} onClick={() => void recoverSource("copy")}>원문 복사</button><button id="export-source" disabled={recovering} onClick={() => void recoverSource("export")}>파일 내보내기</button></>}</div></div>
+        }}>미리보기</button><button id="save" onClick={() => void controller.current?.save().catch(() => {})}>지금 저장</button>{hasWorkspaceDocument && <><button data-testid="close-document" onClick={() => void controller.current?.closeCurrentDocument()}>문서 닫기</button><button id="copy-source" disabled={recovering} onClick={() => void recoverSource("copy")}>원문 복사</button><button id="export-source" disabled={recovering} onClick={() => void recoverSource("export")}>파일 내보내기</button></>}</div></div>
         {state.notice && <p className="notice">{state.notice}</p>}
+        {state.remoteChanged && <p role="status">다른 기기에서 변경됨</p>}
+        {state.remoteDeleted && <p role="status">다른 기기에서 삭제됨. 현재 편집 내용은 유지됩니다. 원문을 내보내거나 휴지통에서 복원을 확인하세요.</p>}
+        {state.remoteDeleted && hasWorkspaceDocument && <button type="button" data-testid="deleted-copy-open" disabled={deletedCopyBusy || deletedCopyRecorded} onClick={() => void inspectDeletedCopy()}>초안을 새 문서로 보존</button>}
+        {deletedCopyMessage && <p role="status">{deletedCopyMessage}</p>}
+        {deletedCopyRecovery && <button type="button" data-testid="deleted-copy-recover" disabled={deletedCopyBusy} onClick={() => void recoverDeletedCopy()}>사본 상태 확인 후 문서 다시 열기</button>}
+        {deletedCopyStatus && deletedStatusCurrent(deletedCopyStatus) && <section aria-label="삭제 초안 사본 상태">
+          <p>{deletedCopyStatus.status.name}: {deletedCopyStatus.status.content_status === "saved" ? "사본 저장 완료" : deletedCopyStatus.status.create_status === "needs_review" || deletedCopyStatus.status.content_status === "needs_review" ? (deletedCopyStatus.status.create_failure === "destination_exists" ? "목적지에 같은 이름이 있습니다." : "사본 상태를 다시 확인해 주세요.") : deletedCopyStatus.status.content_status === "pending" ? "사본 본문 저장 확인 중" : deletedCopyStatus.status.create_status === "created" ? "사본 본문 저장 대기" : deletedCopyStatus.status.create_status === "pending" ? "사본 생성 확인 중" : "사본 저장 대기"}. 원래 삭제 상태는 변경하지 않습니다.</p>
+          {deletedCopyStatus.status.content_status === "saved" && <p>확인한 초안 generation {deletedCopyStatus.status.generation}의 내용이 사본에 저장됐습니다. 이후 편집한 내용은 이 사본에 포함되지 않습니다.</p>}
+          <button type="button" data-testid="deleted-copy-status-refresh" disabled={deletedCopyBusy} onClick={() => void refreshDeletedCopyStatus()}>사본 상태 확인</button>
+          {deletedCopyStatus.status.create_status === "needs_review" && deletedCopyStatus.status.create_failure === "destination_exists" && (!deletedCopyRetryOpen ? <button type="button" data-testid="deleted-copy-retry" disabled={deletedCopyBusy} onClick={() => setDeletedCopyRetryOpen(true)}>다른 사본 대상 선택</button> : <ConflictCopyRetry key={`${JSON.stringify(deletedCopyStatus.binding)}:${deletedCopyStatus.status.create_operation_id}`} binding={deletedCopyStatus.binding} previousOperationId={deletedCopyStatus.status.create_operation_id} previousParentId={deletedCopyStatus.status.parent_id} previousName={deletedCopyStatus.status.name} loadFolders={workspaceCreateParents} busy={deletedCopyBusy} onConfirm={reconfirmDeletedCopy} onCancel={() => setDeletedCopyRetryOpen(false)} />)}
+          {deletedCopyStatus.status.blocking_followup && <>
+            <p>삭제된 문서의 실패 작업 {deletedCopyStatus.status.blocking_followup.blocker_operation_id}, 후속 작업 {deletedCopyStatus.status.blocking_followup.followup_operation_id} (순번 {deletedCopyStatus.status.blocking_followup.followup_operation_seq}, generation {deletedCopyStatus.status.blocking_followup.followup_generation}, hash {deletedCopyStatus.status.blocking_followup.followup_hash})이 사본 저장을 막고 있습니다. 사본은 확인한 초안 generation {deletedCopyStatus.status.generation}을 보존합니다. 기기의 현재 초안은 별도로 보존됩니다.</p>
+            {!deletedFollowupApproval ? <button type="button" data-testid="deleted-copy-followup-open" disabled={deletedCopyBusy} onClick={() => setDeletedFollowupApproval(deletedCopyStatus.status.blocking_followup)}>후속 작업 확인</button> : <>
+              <p>후속 작업 {deletedFollowupApproval.followup_operation_id} (순번 {deletedFollowupApproval.followup_operation_seq}, generation {deletedFollowupApproval.followup_generation}, hash {deletedFollowupApproval.followup_hash})의 전송 취소를 요청합니다. 확인한 사본과 기기의 현재 초안은 별도로 보존됩니다.</p>
+              <button type="button" key={`${deletedFollowupApproval.blocker_operation_id}:${deletedFollowupApproval.followup_operation_id}:${deletedFollowupApproval.followup_operation_seq}:${deletedFollowupApproval.followup_generation}:${deletedFollowupApproval.followup_hash}`} data-testid="deleted-copy-followup-approve" disabled={deletedCopyBusy} onClick={() => void approveDeletedFollowup()}>이 작업 취소 승인</button>
+              <button type="button" data-testid="deleted-copy-followup-cancel" disabled={deletedCopyBusy} onClick={() => setDeletedFollowupApproval(null)}>취소</button>
+            </>}
+          </>}
+          {deletedCopyStatus.status.content_status !== "saved" && deletedCopyStatus.status.create_status !== "needs_review" && deletedCopyStatus.status.content_status !== "needs_review" && deletedCopyStatus.status.blocking_followup === null && <button type="button" data-testid="deleted-copy-progress" disabled={deletedCopyBusy} onClick={() => void progressDeletedCopy()}>사본 저장 진행</button>}
+        </section>}
+        {deletedCopyReview && deletedCopyCurrent(deletedCopyReview) && <DeletedDraftCopyReview key={`${deletedCopyReview.snapshot.edit_session_id}:${deletedCopyReview.snapshot.generation}:${deletedCopyReview.snapshot.local_hash}:${deletedCopyReview.snapshot.tombstone_seq}`} snapshot={deletedCopyReview.snapshot} localBytes={deletedCopyReview.bytes} loadFolders={workspaceCreateParents} onConfirm={confirmDeletedCopy} onCancel={() => setDeletedCopyReview(null)} />}
+        {hasWorkspaceDocument && hasContentConflict && <button data-testid="conflict-review-open" disabled={conflictPreparing} onClick={() => void inspectConflict()}>충돌 비교</button>}
+        {conflictMessage && <p role="status">{conflictMessage}</p>}
+        {pendingCopy && conflictContextCurrent(pendingCopy) && <section aria-label="사본 저장 상태">
+          <p>{pendingCopy.copy.name}: {pendingCopy.copy.content_status === "saved" ? "사본 저장 완료" : pendingCopy.copy.create_status === "needs_review" || pendingCopy.copy.content_status === "needs_review" ? "사본 상태를 다시 확인해 주세요" : pendingCopy.copy.content_status === "pending" ? "사본 본문 저장 확인 중" : pendingCopy.copy.create_status === "created" ? "사본 본문 저장 대기" : pendingCopy.copy.create_status === "pending" ? "사본 생성 확인 중" : "사본 저장 대기"}. 원래 문서의 충돌은 유지됩니다.</p>
+          {pendingCopy.copy.create_status === "needs_review" && <p>생성 요청 {pendingCopy.copy.create_operation_id}: {pendingCopy.copy.create_failure === "destination_exists" ? "목적지에 같은 이름이 있습니다." : "생성 결과를 확인해 주세요."} 초안과 실패 기록은 보존됩니다.</p>}
+          <button type="button" data-testid="conflict-copy-status-refresh" disabled={conflictRecovering} onClick={() => void refreshCopy()}>사본 상태 확인</button>
+          {pendingCopy.copy.create_failure === "destination_exists" && !conflictRecovery && (!copyRetryOpen ? <button type="button" data-testid="conflict-copy-retry" disabled={conflictRecovering} onClick={() => setCopyRetryOpen(true)}>다른 사본 대상 선택</button> : <ConflictCopyRetry key={`${JSON.stringify(pendingCopy.snapshot.binding)}:${pendingCopy.copy.create_operation_id}`} binding={pendingCopy.snapshot.binding} previousOperationId={pendingCopy.copy.create_operation_id} previousParentId={pendingCopy.copy.parent_id} previousName={pendingCopy.copy.name} loadFolders={workspaceCreateParents} busy={conflictRecovering} onConfirm={retryCopy} onCancel={() => setCopyRetryOpen(false)} />)}
+          {pendingCopy.copy.content_status !== "saved" && pendingCopy.copy.create_status !== "needs_review" && pendingCopy.copy.content_status !== "needs_review" && !pendingCopy.approval && !conflictRecovery && <button type="button" data-testid="conflict-copy-progress" disabled={conflictRecovering} onClick={() => {
+            if (pendingCopy.copy.followup_operation_id) setPendingCopy({ ...pendingCopy, running: false, approval: pendingCopy.copy.followup_operation_id });
+            else void progressCopy(pendingCopy, null);
+          }}>사본 저장 진행</button>}
+          {pendingCopy.approval && <>
+            <p>사본 저장을 위해 후속 작업 {pendingCopy.approval}의 전송 취소가 필요합니다. 보존된 초안과 충돌 자료는 유지됩니다.</p>
+            <button type="button" key={pendingCopy.approval} data-testid="conflict-copy-approve" disabled={conflictRecovering} onClick={() => { if (pendingCopy.approval === pendingCopy.copy.followup_operation_id) void progressCopy(pendingCopy, pendingCopy.approval); }}>이 작업 취소 승인</button>
+            <button type="button" data-testid="conflict-copy-approval-cancel" disabled={conflictRecovering} onClick={() => setPendingCopy({ ...pendingCopy, approval: null, running: false })}>취소</button>
+          </>}
+        </section>}
+        {pendingConflict && <button data-testid="conflict-continue" disabled={conflictRecovering} onClick={() => void continueConflict()}>후속 처리 진행</button>}
+        {pendingConflict && <button data-testid="conflict-complete" disabled={conflictRecovering} onClick={() => void completeConflict()}>서버 본문으로 완료</button>}
+        {pendingMerge && conflictContextCurrent(pendingMerge) && <section aria-label="합본 저장 상태">
+          <p>{pendingMerge.queuedOperationId ? `합본 작업 ${pendingMerge.queuedOperationId} (순번 ${pendingMerge.queuedOperationSeq})의 서버 결과와 ACK를 기다립니다.` : "합본 선택을 기기에 저장했습니다. 서버 저장은 대기 중입니다."}</p>
+          <button type="button" data-testid="conflict-merge-status-refresh" disabled={conflictRecovering} onClick={() => void refreshMerge()}>합본 상태 확인</button>
+          {!pendingMerge.queuedOperationId && <button type="button" data-testid="conflict-merge-queue" disabled={conflictRecovering} onClick={() => void queueMerge()}>합본 전송 준비</button>}
+          {pendingMerge.followup && <>
+            <p>후속 작업 {pendingMerge.followup.operation_id} (순번 {pendingMerge.followup.operation_seq}, generation {pendingMerge.followup.generation}, hash {pendingMerge.followup.payload_hash})의 전송 취소가 필요합니다. 선택한 합본과 기기 초안은 보존됩니다.</p>
+            <button type="button" data-testid="conflict-merge-followup-refresh" disabled={conflictRecovering} onClick={() => void refreshMergeFollowup()}>후속 작업 다시 확인</button>
+            {pendingMerge.approval ? <button type="button" data-testid="conflict-merge-followup-confirm" disabled={conflictRecovering} onClick={() => void approveMergeFollowup()}>이 작업 취소 승인</button> : <button type="button" disabled={conflictRecovering} onClick={() => setPendingMerge((current) => current === pendingMerge ? { ...current, approval:current.followup } : current)}>표시한 작업 확인</button>}
+            <button type="button" data-testid="conflict-merge-followup-cancel" disabled={conflictRecovering} onClick={() => setPendingMerge((current) => current === pendingMerge ? { ...current, followup:null, approval:null } : current)}>취소</button>
+          </>}
+        </section>}
+        {conflictRecovery && <button data-testid="conflict-recover-result" disabled={conflictRecovering} onClick={() => void recoverConflictResult()}>선택 결과 확인 후 문서 다시 열기</button>}
+        {conflictSnapshot && workspaceBinding && JSON.stringify(conflictSnapshot.snapshot.binding) === JSON.stringify(workspaceBinding) && <ConflictReview binding={conflictSnapshot.snapshot.binding} documentId={conflictSnapshot.snapshot.node_id} sessionId={conflictSnapshot.sessionId} generation={conflictSnapshot.snapshot.generation} operationId={conflictSnapshot.snapshot.operation_id} ports={conflictReviewPorts} onClose={() => setConflictSnapshot(null)} onChooseRemote={conflictSnapshot.canChoose ? chooseRemote : undefined} onKeepCopy={conflictSnapshot.canChoose && pendingCopy?.copy.content_status !== "saved" ? keepConflictCopy : undefined} onSaveMerged={conflictSnapshot.canChoose ? saveMerged : undefined} loadFolders={workspaceCreateParents} />}
         {recoveryMessage && <p role="status">{recoveryMessage}</p>}
+        {memoryRecovery && controller.current === memoryRecovery.instance && state.selected === memoryRecovery.id && registrationVersion.current === memoryRecovery.registration && JSON.stringify(workspaceBindingRef.current) === memoryRecovery.binding && sessionModes.current.get(memoryRecovery.session) === memoryRecovery.sessionRef && memoryRecovery.instance.isBlockedRecoverySnapshot(memoryRecovery.session, memoryRecovery.generation, memoryRecovery.revision) && <section data-testid="memory-source-recovery" aria-label="메모리 원문 복구">
+          {memoryRecovery.sessionBinding ? <p>{JSON.stringify(memoryRecovery.sessionBinding) === memoryRecovery.binding ? "현재 등록" : "이전 등록"}의 문서: 서버 {memoryRecovery.sessionBinding.server_origin}, 작업 공간 {memoryRecovery.sessionBinding.workspace_id}, epoch {memoryRecovery.sessionBinding.workspace_epoch}</p> : <p>이 문서의 등록 정보를 확인할 수 없습니다.</p>}
+          <p>저장에 실패한 내용입니다. 앱을 닫지 말고 아래 텍스트를 직접 전체 선택해 복사한 뒤 안전한 곳에 보관하세요. BOM과 바이트의 동일성은 보장하지 않으며 자동 파일 내보내기는 되지 않습니다.</p>
+          <textarea data-testid="memory-source-fallback" aria-label="복구할 메모리 텍스트" readOnly value={memoryRecovery.text} />
+        </section>}
         <QueueAlerts error={state.error || probeError || connectionError} queueErrors={queueErrors} />
         <div className="document-content">
           <div id="editor" ref={parent} />

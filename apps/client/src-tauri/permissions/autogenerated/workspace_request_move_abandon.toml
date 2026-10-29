@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-request-move-abandon"
+description = "Enables the workspace_request_move_abandon command without any pre-configured scope."
+commands.allow = ["workspace_request_move_abandon"]
+
+[[permission]]
+identifier = "deny-workspace-request-move-abandon"
+description = "Denies the workspace_request_move_abandon command without any pre-configured scope."
+commands.deny = ["workspace_request_move_abandon"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-request-deleted-draft-copy-followup-abandon"
+description = "Enables the workspace_request_deleted_draft_copy_followup_abandon command without any pre-configured scope."
+commands.allow = ["workspace_request_deleted_draft_copy_followup_abandon"]
+
+[[permission]]
+identifier = "deny-workspace-request-deleted-draft-copy-followup-abandon"
+description = "Denies the workspace_request_deleted_draft_copy_followup_abandon command without any pre-configured scope."
+commands.deny = ["workspace_request_deleted_draft_copy_followup_abandon"]

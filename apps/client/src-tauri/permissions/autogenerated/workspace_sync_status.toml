@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-sync-status"
+description = "Enables the workspace_sync_status command without any pre-configured scope."
+commands.allow = ["workspace_sync_status"]
+
+[[permission]]
+identifier = "deny-workspace-sync-status"
+description = "Denies the workspace_sync_status command without any pre-configured scope."
+commands.deny = ["workspace_sync_status"]

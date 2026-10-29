@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-confirm-content-conflict-copy"
+description = "Enables the workspace_confirm_content_conflict_copy command without any pre-configured scope."
+commands.allow = ["workspace_confirm_content_conflict_copy"]
+
+[[permission]]
+identifier = "deny-workspace-confirm-content-conflict-copy"
+description = "Denies the workspace_confirm_content_conflict_copy command without any pre-configured scope."
+commands.deny = ["workspace_confirm_content_conflict_copy"]

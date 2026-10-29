@@ -44,7 +44,9 @@ function inventory(value: unknown): MigrationInventory {
   });
   const operations: MigrationOperation[] = data.operations.map((value: unknown) => {
     const row = object(value);
-    return { operation_id: text(row.operation_id), document_id: text(row.document_id), binding: row.binding === null ? null : binding(row.binding), sequence: nullableText(row.sequence), generation: nullableText(row.generation), status: text(row.status), terminal_kind: nullableText(row.terminal_kind), registration_status: nullableText(row.registration_status), metadata_error: bool(row.metadata_error) };
+    const kind = nullableText(row.kind);
+    if (kind !== null && kind !== "content" && kind !== "restore" && kind !== "create" && kind !== "delete" && kind !== "move") throw new Error("잘못된 복구 작업 종류입니다.");
+    return { operation_id: text(row.operation_id), document_id: text(row.document_id), binding: row.binding === null ? null : binding(row.binding), sequence: nullableText(row.sequence), generation: nullableText(row.generation), kind, expected_node_etag: nullableText(row.expected_node_etag), expected_meta_etag: nullableText(row.expected_meta_etag), status: text(row.status), terminal_kind: nullableText(row.terminal_kind), registration_status: nullableText(row.registration_status), metadata_error: bool(row.metadata_error) };
   });
   return { drafts, operations, next_draft_after_id: nullableText(data.next_draft_after_id), next_operation_after_id: nullableText(data.next_operation_after_id), draft_error: nullableText(data.draft_error), operation_error: nullableText(data.operation_error) };
 }
@@ -104,7 +106,7 @@ function MigrationRecovery({ owner }: { owner: string }) {
 
   return <main data-testid="migration-recovery">
     <h1>로컬 저장소 복구</h1>
-    <p>저장소를 업데이트하지 못했습니다. 기존 자료를 유지하고 편집과 서버 전송을 중지했습니다. 전체 저장소 사본에는 초안, 기준 원문과 전송 기록이 포함됩니다.</p>
+    <p>저장소를 업데이트하지 못했습니다. 기존 자료를 유지하고 편집과 서버 전송을 중지했습니다. 전체 저장소 사본에는 초안, 기준 원문과 전송 기록이 포함됩니다. 작업 데이터를 따로 내보내면 요청 본문만 저장되므로 조건과 등록 정보를 함께 보존하려면 전체 저장소 사본을 내보내세요.</p>
     <p>새 파일 이름을 선택하세요. 기존 파일은 덮어쓰지 않습니다.</p>
     <button data-testid="migration-export-store" disabled={busy} onClick={() => void act("store", null, "export")}>전체 저장소 내보내기</button>
     {message && <p role="status">{message}</p>}
@@ -118,12 +120,12 @@ function MigrationRecovery({ owner }: { owner: string }) {
         {draft.has_base && <><button data-testid="migration-view-base" disabled={busy} onClick={() => void act("base", draft.storage_id, "view")}>기준 원문 보기</button>
         <button data-testid="migration-export-base" disabled={busy} onClick={() => void act("base", draft.storage_id, "export")}>기준 원문 내보내기</button></>}
       </section>)}
-      <h2>전송 기록 원문</h2>
+      <h2>전송 기록</h2>
       {data.operation_error && <p role="status">전송 기록 목록을 읽지 못했습니다. 전체 저장소 사본을 보존해 주세요.</p>}
       {data.operations.map((operation) => <section key={operation.operation_id}>
-        <p>{operation.document_id} / 작업 {operation.operation_id} / 순번 {operation.sequence ?? "확인 불가"} / 상태 {operation.status} / 종료 결과 {operation.terminal_kind ?? "없음 또는 구형 형식"} / 등록 {operation.registration_status ?? "확인 불가"} / {bindingLabel(operation.binding, operation.metadata_error)} {operation.metadata_error && "/ 일부 정보 확인 불가"}</p>
-        <button data-testid="migration-view-outbox" disabled={busy} onClick={() => void act("outbox", operation.operation_id, "view")}>전송 원문 보기</button>
-        <button data-testid="migration-export-outbox" disabled={busy} onClick={() => void act("outbox", operation.operation_id, "export")}>전송 원문 내보내기</button>
+        <p>{operation.document_id} / 작업 {operation.operation_id} / 순번 {operation.sequence ?? "확인 불가"} / {operation.kind === "content" ? "문서 편집" : operation.kind === "restore" ? "복원 요청" : operation.kind === "create" ? "생성 요청" : operation.kind === "delete" ? "삭제 요청" : operation.kind === "move" ? "이동 요청" : "종류 확인 불가"} / 상태 {operation.status} / 종료 결과 {operation.terminal_kind ?? "없음 또는 구형 형식"} / 등록 {operation.registration_status ?? "확인 불가"} / {bindingLabel(operation.binding, operation.metadata_error)} {operation.metadata_error && "/ 일부 정보 확인 불가"}{operation.kind === "delete" && <> / 확인 ETag {operation.expected_node_etag ?? "확인 불가"}</>}{operation.kind === "move" && <> / 구조 ETag {operation.expected_meta_etag ?? "확인 불가"}</>}</p>
+        {operation.kind !== "delete" && <><button data-testid="migration-view-outbox" disabled={busy} onClick={() => void act("outbox", operation.operation_id, "view")}>{operation.kind === "content" ? "전송 원문 보기" : operation.kind === "restore" ? "복원 요청 보기" : "작업 데이터 보기"}</button>
+        <button data-testid="migration-export-outbox" disabled={busy} onClick={() => void act("outbox", operation.operation_id, "export")}>{operation.kind === "content" ? "전송 원문 내보내기" : operation.kind === "restore" ? "복원 요청 내보내기" : "작업 데이터 내보내기"}</button></>}
       </section>)}
       {(data.next_draft_after_id !== null || data.next_operation_after_id !== null) && <button disabled={busy} onClick={() => void more()}>복구 목록 더 보기</button>}
     </>}

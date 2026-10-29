@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-restore-status"
+description = "Enables the workspace_restore_status command without any pre-configured scope."
+commands.allow = ["workspace_restore_status"]
+
+[[permission]]
+identifier = "deny-workspace-restore-status"
+description = "Denies the workspace_restore_status command without any pre-configured scope."
+commands.deny = ["workspace_restore_status"]

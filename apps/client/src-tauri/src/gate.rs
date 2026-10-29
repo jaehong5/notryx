@@ -10,6 +10,7 @@ pub struct RequestGate {
     sessions: HashSet<String>,
 }
 
+#[derive(Clone)]
 pub struct RequestSnapshot {
     owner: String,
     registration: u64,
@@ -99,6 +100,13 @@ impl RequestGate {
 
     pub fn close_session(&mut self, session: &str) -> Result<(), &'static str> {
         if !self.sessions.remove(session) {
+            return Err("stale_session");
+        }
+        Ok(())
+    }
+
+    pub fn check_session(&self, session: &str) -> Result<(), &'static str> {
+        if !self.sessions.contains(session) {
             return Err("stale_session");
         }
         Ok(())

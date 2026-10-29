@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-apply-frozen-content"
+description = "Enables the workspace_apply_frozen_content command without any pre-configured scope."
+commands.allow = ["workspace_apply_frozen_content"]
+
+[[permission]]
+identifier = "deny-workspace-apply-frozen-content"
+description = "Denies the workspace_apply_frozen_content command without any pre-configured scope."
+commands.deny = ["workspace_apply_frozen_content"]

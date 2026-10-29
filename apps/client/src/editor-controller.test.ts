@@ -12,20 +12,21 @@ const opened = (id: string) => ({ document_id: id, edit_session_id: `session-${i
 
 function fixture() {
   const states: EditorState[] = [];
-  const views: Array<{ options: EditorOptions; editable: boolean; composing: boolean; show: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn> }> = [];
+  const views: Array<{ options: EditorOptions; editable: boolean; composing: boolean; show: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn>; replaceSource: ReturnType<typeof vi.fn> }> = [];
   const ports: EditorPorts = {
     openDocument: vi.fn(async (id) => opened(id)),
     saveDocument: vi.fn(async (request) => ({ edit_session_id: request.edit_session_id, generation: request.generation })),
     closeDocument: vi.fn(async () => {}),
     exit: vi.fn(async () => {}),
     createEditor: vi.fn((options) => {
-      const view = { options, editable: true, composing: false, show: vi.fn(), destroy: vi.fn() };
+      const view = { options, editable: true, composing: false, show: vi.fn(), destroy: vi.fn(), replaceSource: vi.fn() };
       views.push(view);
       return {
         show: view.show,
         destroy: view.destroy,
         setEditable: (enabled: boolean) => { view.editable = enabled; },
         isComposing: () => view.composing,
+        replaceSource: view.replaceSource,
       };
     }),
     stateChanged: (state) => { states.push(state); },
@@ -34,6 +35,198 @@ function fixture() {
 }
 
 afterEach(() => { vi.useRealTimers(); });
+
+function inspectRemote(controller: EditorController): Promise<void> {
+  return (controller as EditorController & { inspectRemoteChange(): Promise<void> }).inspectRemoteChange();
+}
+
+function remoteChanged(states: EditorState[]): boolean | undefined {
+  return (states.at(-1) as (EditorState & { remoteChanged?: boolean }) | undefined)?.remoteChanged;
+}
+
+test("remote change notice preserves active composition, local input, and existing notice", async () => {
+  const { controller, ports, views, states } = fixture();
+  vi.mocked(ports.openDocument).mockResolvedValueOnce({ ...opened("a"), bytes_base64: btoa("base\r\n") });
+  const inspect = vi.fn(async () => "changed");
+  Object.assign(ports, { inspectRemoteChange: inspect });
+  await controller.open("a");
+  const notice = states.at(-1)?.notice;
+  expect(notice).toContain("LF");
+  views[0].options.change("local input");
+  views[0].composing = true;
+  await inspectRemote(controller);
+  expect(inspect).toHaveBeenCalledExactlyOnceWith("a", "session-a", "1");
+  expect(remoteChanged(states)).toBe(true);
+  expect(states.at(-1)?.notice).toBe(notice);
+  expect(ports.saveDocument).not.toHaveBeenCalled();
+  views[0].composing = false;
+  expect(new TextDecoder().decode(controller.recoverySnapshot().bytes)).toBe("local input");
+  await controller.dispose();
+});
+
+test("remote notice checks a durable dirty draft without changing its checkpoint or generation", async () => {
+  const { controller, ports, views, states } = fixture();
+  Object.assign(ports, { inspectRemoteChange: vi.fn(async () => "changed") });
+  await controller.open("a");
+  views[0].options.change("durable local");
+  await controller.flush();
+  const snapshot = controller.recoverySnapshot();
+  const calls = vi.mocked(ports.saveDocument).mock.calls.length;
+  await inspectRemote(controller);
+  expect(remoteChanged(states)).toBe(true);
+  expect(controller.recoverySnapshot()).toEqual(snapshot);
+  expect(ports.saveDocument).toHaveBeenCalledTimes(calls);
+  await controller.dispose();
+});
+
+test("pending or failed remote checks do not clear an existing notice", async () => {
+  const { controller, ports, states } = fixture();
+  Object.assign(ports, { inspectRemoteChange: vi.fn().mockResolvedValueOnce("changed").mockResolvedValueOnce("pending").mockRejectedValueOnce(new Error("temporary failure")) });
+  await controller.open("a");
+  await inspectRemote(controller);
+  expect(remoteChanged(states)).toBe(true);
+  await inspectRemote(controller);
+  expect(remoteChanged(states)).toBe(true);
+  await inspectRemote(controller);
+  expect(remoteChanged(states)).toBe(true);
+  await controller.dispose();
+});
+
+test("a remote result for the previous session is discarded and the current session is checked", async () => {
+  const { controller, ports, states } = fixture();
+  const old = deferred<"changed" | "same" | "pending">();
+  const inspect = vi.fn().mockReturnValueOnce(old.promise).mockResolvedValue("same");
+  Object.assign(ports, { inspectRemoteChange: inspect });
+  await controller.open("a");
+  const checking = inspectRemote(controller);
+  await controller.open("b");
+  old.resolve("changed");
+  await checking;
+  expect(remoteChanged(states)).not.toBe(true);
+  expect(inspect).toHaveBeenLastCalledWith("b", "session-b", "0");
+  await controller.dispose();
+});
+
+test("a remote result for an old generation is discarded and rechecked", async () => {
+  const { controller, ports, views, states } = fixture();
+  const old = deferred<"changed" | "same" | "pending">();
+  const inspect = vi.fn().mockReturnValueOnce(old.promise).mockResolvedValue("changed");
+  Object.assign(ports, { inspectRemoteChange: inspect });
+  await controller.open("a");
+  views[0].options.change("one");
+  const checking = inspectRemote(controller);
+  views[0].options.change("one plus two");
+  old.resolve("same");
+  await checking;
+  expect(inspect).toHaveBeenNthCalledWith(1, "a", "session-a", "1");
+  expect(inspect).toHaveBeenLastCalledWith("a", "session-a", "2");
+  expect(remoteChanged(states)).toBe(true);
+  expect(controller.recoverySnapshot().generation).toBe("2");
+  expect(new TextDecoder().decode(controller.recoverySnapshot().bytes)).toBe("one plus two");
+  await controller.dispose();
+});
+
+test("remote refresh keeps input enabled during fetch and rejects a candidate after an edit", async () => {
+  const { controller, ports, views } = fixture();
+  const candidate = deferred<{ token: string; bytes_base64: string } | null>();
+  ports.prepareRemoteRefresh = vi.fn(() => candidate.promise);
+  ports.commitRemoteRefresh = vi.fn(async () => true);
+  await controller.open("a");
+  const refresh = controller.refreshRemote();
+  expect(views[0].editable).toBe(true);
+  views[0].options.change("local edit");
+  candidate.resolve({ token: "candidate", bytes_base64: btoa("remote") });
+  await refresh;
+  expect(ports.commitRemoteRefresh).not.toHaveBeenCalled();
+  expect(views[0].replaceSource).not.toHaveBeenCalled();
+  expect(new TextDecoder().decode(controller.recoverySnapshot().bytes)).toBe("local edit");
+  await controller.dispose();
+});
+
+test("remote refresh rejects a response after document switch or composition starts", async () => {
+  for (const invalidation of ["switch", "composition"] as const) {
+    const { controller, ports, views } = fixture();
+    const candidate = deferred<{ token: string; bytes_base64: string } | null>();
+    ports.prepareRemoteRefresh = vi.fn(() => candidate.promise);
+    ports.commitRemoteRefresh = vi.fn(async () => true);
+    await controller.open("a");
+    const refresh = controller.refreshRemote();
+    if (invalidation === "switch") await controller.open("b");
+    else views[0].composing = true;
+    candidate.resolve({ token: "candidate", bytes_base64: btoa("remote") });
+    await refresh;
+    expect(ports.commitRemoteRefresh).not.toHaveBeenCalled();
+    expect(views[0].replaceSource).not.toHaveBeenCalled();
+    views[0].composing = false;
+    await controller.dispose();
+  }
+});
+
+test("a metadata notification during refresh retries once after a stale candidate", async () => {
+  const { controller, ports, views } = fixture();
+  const first = deferred<{ token: string; bytes_base64: string } | null>();
+  ports.prepareRemoteRefresh = vi.fn().mockReturnValueOnce(first.promise)
+    .mockResolvedValueOnce({ token: "latest", bytes_base64: btoa("latest") });
+  ports.commitRemoteRefresh = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+  await controller.open("a");
+  const refresh = controller.refreshRemote();
+  const next = controller.refreshRemote();
+  first.resolve({ token: "stale", bytes_base64: btoa("old") });
+  await Promise.all([refresh, next]);
+  expect(ports.prepareRemoteRefresh).toHaveBeenCalledTimes(2);
+  expect(ports.commitRemoteRefresh).toHaveBeenCalledTimes(2);
+  expect(views[0].replaceSource).toHaveBeenCalledOnce();
+  expect(new TextDecoder().decode(controller.recoverySnapshot().bytes)).toBe("latest");
+  await controller.dispose();
+});
+
+test("remote refresh locks the editor during commit and updates the source without a local save", async () => {
+  const { controller, ports, views } = fixture();
+  const commit = deferred<boolean>();
+  ports.prepareRemoteRefresh = vi.fn(async () => ({ token: "candidate", bytes_base64: btoa("remote") }));
+  ports.commitRemoteRefresh = vi.fn(() => commit.promise);
+  await controller.open("a");
+  const refresh = controller.refreshRemote();
+  await vi.waitFor(() => expect(ports.commitRemoteRefresh).toHaveBeenCalledOnce());
+  expect(views[0].editable).toBe(false);
+  await controller.open("b");
+  expect(ports.openDocument).toHaveBeenCalledTimes(1);
+  commit.resolve(true);
+  await refresh;
+  expect(views[0].replaceSource).toHaveBeenCalledOnce();
+  expect(new TextDecoder().decode(controller.recoverySnapshot().bytes)).toBe("remote");
+  expect(ports.saveDocument).not.toHaveBeenCalled();
+  expect(views[0].editable).toBe(true);
+  await controller.dispose();
+});
+
+test("a rejected remote commit retains the original editable document", async () => {
+  const { controller, ports, views } = fixture();
+  ports.prepareRemoteRefresh = vi.fn(async () => ({ token: "candidate", bytes_base64: btoa("remote") }));
+  ports.commitRemoteRefresh = vi.fn(async () => false);
+  await controller.open("a");
+  await controller.refreshRemote();
+  expect(views[0].replaceSource).not.toHaveBeenCalled();
+  expect(new TextDecoder().decode(controller.recoverySnapshot().bytes)).toBe("base");
+  expect(views[0].editable).toBe(true);
+  await controller.dispose();
+});
+
+test.each(["unknown commit", "view failure"])("%s never re-enables the old text", async (failure) => {
+  const { controller, ports, views, states } = fixture();
+  ports.prepareRemoteRefresh = vi.fn(async () => ({ token: "candidate", bytes_base64: btoa("remote") }));
+  ports.commitRemoteRefresh = failure === "unknown commit" ? vi.fn(async () => { throw new Error("lost reply"); }) : vi.fn(async () => true);
+  await controller.open("a");
+  if (failure === "view failure") views[0].replaceSource.mockImplementation(() => { throw new Error("view failure"); });
+  await controller.refreshRemote();
+  expect(views[0].editable).toBe(false);
+  expect(states.at(-1)?.error).toContain("다시 열어");
+  await controller.open("b");
+  expect(ports.openDocument).toHaveBeenCalledTimes(1);
+  await controller.save();
+  expect(ports.saveDocument).not.toHaveBeenCalled();
+  await controller.dispose();
+});
 
 test("manual save flushes the current edit before prompting server transmission", async () => {
   const { controller, ports, views } = fixture();
@@ -92,13 +285,45 @@ test("recovery snapshot keeps failed input in its current session and waits for 
   const snapshot = controller.recoverySnapshot();
   expect(snapshot.id).toBe("a");
   expect(snapshot.session).toBe("session-a");
-  expect(controller.isCurrentSnapshot(snapshot.session, snapshot.generation)).toBe(true);
+  expect(controller.isCurrentSnapshot(snapshot.session, snapshot.generation, snapshot.revision)).toBe(true);
   expect(new TextDecoder().decode(snapshot.bytes)).toBe("미저장");
   views[0].options.change("추가 입력");
-  expect(controller.isCurrentSnapshot(snapshot.session, snapshot.generation)).toBe(false);
+  expect(controller.isCurrentSnapshot(snapshot.session, snapshot.generation, snapshot.revision)).toBe(false);
   expect(controller.isCurrentSession(snapshot.session)).toBe(true);
   views[0].composing = true;
   expect(() => controller.recoverySnapshot()).toThrow("조합");
+  views[0].composing = false;
+  await controller.dispose();
+});
+
+test("remote source replacement invalidates an earlier snapshot even when session and generation are unchanged", async () => {
+  const { controller, ports, views } = fixture();
+  ports.prepareRemoteRefresh = vi.fn(async () => ({ token: "candidate", bytes_base64: btoa("[new](new.md)") }));
+  ports.commitRemoteRefresh = vi.fn(async () => true);
+  vi.mocked(ports.openDocument).mockResolvedValueOnce({ ...opened("a"), bytes_base64: btoa("[old](old.md)") });
+  await controller.open("a");
+  const snapshot = controller.recoverySnapshot() as ReturnType<EditorController["recoverySnapshot"]> & { revision: number };
+  const isCurrent = () => (controller.isCurrentSnapshot as (session: string, generation: string, revision: number) => boolean)(snapshot.session, snapshot.generation, snapshot.revision);
+  expect(isCurrent()).toBe(true);
+  await controller.refreshRemote();
+  const refreshed = controller.recoverySnapshot();
+  expect(refreshed.session).toBe(snapshot.session);
+  expect(refreshed.generation).toBe(snapshot.generation);
+  expect(new TextDecoder().decode(refreshed.bytes)).toBe("[new](new.md)");
+  expect(views[0].replaceSource).toHaveBeenCalledOnce();
+  expect(isCurrent()).toBe(false);
+  await controller.dispose();
+});
+
+test("starting IME composition invalidates snapshot use before a text change", async () => {
+  const { controller, views } = fixture();
+  await controller.open("a");
+  const snapshot = controller.recoverySnapshot() as ReturnType<EditorController["recoverySnapshot"]> & { revision: number };
+  const isCurrent = () => (controller.isCurrentSnapshot as (session: string, generation: string, revision: number) => boolean)(snapshot.session, snapshot.generation, snapshot.revision);
+  expect(isCurrent()).toBe(true);
+  views[0].composing = true;
+  expect(controller.isCurrentSession(snapshot.session)).toBe(true);
+  expect(isCurrent()).toBe(false);
   views[0].composing = false;
   await controller.dispose();
 });
@@ -805,5 +1030,73 @@ test("repeated requests during a failed exit do not close a later document switc
   expect(views[1].editable).toBe(true);
   await controller.close();
   expect(ports.exit).toHaveBeenCalledTimes(2);
+  await controller.dispose();
+});
+
+test.each([
+  ["storage", "기기 캐시에 저장하지 못했습니다"],
+  ["damaged", "기기 캐시 상태를 확인해야 합니다"],
+  ["unexpected", "기기 캐시 오류를 확인해야 합니다"],
+] as const)("opens the document and displays the %s cache warning", async (warning, message) => {
+  const { controller, ports, states, views } = fixture();
+  vi.mocked(ports.openDocument).mockResolvedValueOnce({ ...opened("a"), cache_warning: warning });
+  await controller.open("a");
+  expect(states.at(-1)?.selected).toBe("a");
+  expect(states.at(-1)?.notice).toContain(message);
+  expect(views[0].editable).toBe(true);
+  await controller.dispose();
+});
+
+test("이전 초안을 보존하면 최신 본문을 읽기 전용으로 여는 이유를 표시한다", async () => {
+  const { controller, ports, states, views } = fixture();
+  const response = { ...opened("a"), readonly:true, local_draft:false, cache_warning:"storage" as const, open_notice:"prior_draft_preserved" as const };
+  vi.mocked(ports.openDocument).mockResolvedValueOnce(response);
+  await controller.open("a");
+  expect(states.at(-1)?.notice).toContain("이전 초안을 보존해 최신 본문을 읽기 전용으로 표시합니다");
+  expect(states.at(-1)?.notice).toContain("기기 캐시에 저장하지 못했습니다");
+  expect(views[0].options.source.readonly).toBe(true);
+  expect(views[0].editable).toBe(false);
+  expect(new TextDecoder().decode(controller.recoverySnapshot().bytes)).toBe("base");
+  await controller.dispose();
+});
+
+test("reopened confirmed content stays editable and only checkpoints the next edit", async () => {
+  const { controller, ports, states, views } = fixture();
+  const onOpen = vi.fn();
+  ports.opened = onOpen;
+  vi.mocked(ports.openDocument).mockResolvedValueOnce({
+    ...opened("a"), generation: "1", bytes_base64: btoa("peer content"),
+    readonly: false, local_draft: false, open_notice: null,
+  });
+  await controller.open("a");
+  expect(views[0].editable).toBe(true);
+  expect(onOpen).toHaveBeenCalledWith("a", "session-a", "1", false);
+  expect(states.at(-1)?.notice).not.toContain("읽기 전용");
+  await controller.save();
+  expect(ports.saveDocument).not.toHaveBeenCalled();
+  views[0].options.change("peer content plus local edit");
+  await controller.flush();
+  expect(ports.saveDocument).toHaveBeenCalledExactlyOnceWith({
+    document_id: "a", edit_session_id: "session-a", generation: "2",
+    bytes_base64: btoa("peer content plus local edit"),
+  });
+  await controller.dispose();
+});
+
+
+test("a durable edited session accepts native-approved refresh without resetting generation", async () => {
+  const { controller, ports, views } = fixture();
+  await controller.open("a");
+  views[0].options.change("saved local");
+  await controller.flush();
+  const prepare = vi.fn(async () => ({ token: "approved", bytes_base64: btoa("remote") }));
+  const commit = vi.fn(async () => true);
+  Object.assign(ports, { prepareRemoteRefresh: prepare, commitRemoteRefresh: commit });
+  await controller.refreshRemote();
+  expect(views[0].replaceSource).toHaveBeenCalled();
+  expect(controller.recoverySnapshot().generation).toBe("1");
+  views[0].options.change("remote plus local");
+  await controller.flush();
+  expect(ports.saveDocument).toHaveBeenLastCalledWith(expect.objectContaining({ generation: "2", bytes_base64: btoa("remote plus local") }));
   await controller.dispose();
 });

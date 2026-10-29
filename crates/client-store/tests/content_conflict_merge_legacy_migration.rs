@@ -133,7 +133,7 @@ async fn v20_legacy_merge_and_history_remain_readable_without_claiming_prior_has
         V16_LOCAL
     );
     store.close().await.unwrap();
-    assert_integrity(&path, 21).await;
+    assert_integrity(&path, 23).await;
     assert_eq!(snapshot(&path).await, before);
     assert_eq!(v16_intents(&path).await, intents_before);
 }

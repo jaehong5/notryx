@@ -1,6 +1,6 @@
 # Notryx 개발 환경
 
-이 문서는 Ubuntu 24.04 x86_64에서 Linux와 Android ARM64 개발에 사용하는 도구와 확인 명령을 정리한다. 현재 `0.1.0`의 클라이언트는 M0 편집 및 초안 저장 시험 앱이다. Linux 서버는 실행, 로컬 관리, 기기 등록과 인증된 파일 및 폴더 관리를 제공한다. 원문 조회와 조건부 저장, 이름 변경과 이동, 삭제와 복원 및 기기별 작업 결과 관리를 지원한다. 클라이언트 서버 연결과 동기화는 아직 없다.
+이 문서는 Ubuntu 24.04 x86_64에서 Linux와 Android ARM64 개발에 사용하는 도구와 확인 명령을 정리한다. 현재 `0.1.0`의 클라이언트는 서버 연결, 편집과 기기 초안 저장을 제공하며 동기화 기능은 개발 중이다. Linux 서버는 실행, 로컬 관리, 기기 등록과 인증된 파일 및 폴더 관리를 제공한다. 원문 조회와 조건부 저장, 이름 변경과 이동, 삭제와 복원 및 기기별 작업 결과 관리를 지원한다. M3의 두 Linux 클라이언트 통합 검증은 아직 완료되지 않았다.
 
 ## 버전과 설치 위치
 
@@ -127,6 +127,31 @@ WebKitWebDriver를 별도 위치에 추출했다면 `--driver /path/to/WebKitWeb
 
 아래 예제는 새 합성 저장소와 loopback HTTP를 사용한다. Linux `openat2`가 필요하며 지원하지 않는 환경에서는 시작을 거절한다. 서버의 전용 worker가 Workspace와 파일 I/O를 소유한다. 초기화, migration과 파일 등록은 서버를 중지한 상태에서 실행한다.
 
+### 중단 상태의 백업 시험
+
+합성 workspace의 서버와 외부 writer를 중지한 뒤, 아직 존재하지 않는 독립 경로에 사본을 만든다. 백업 경로의 상위 디렉터리는 현재 사용자 소유이고 group과 other에 접근 권한이 없어야 한다. POSIX access ACL이 있거나 이를 확인할 수 없는 파일시스템은 거절한다. 같은 UID의 다른 프로세스는 같은 권한을 가지므로 신뢰 범위에 포함된다. 백업 대상은 notes와 state 전체 및 지정한 서버 설정 파일이다. 이어서 manifest에 기록한 파일 집합과 내용 hash를 확인한다.
+
+```bash
+notryx-server backup --config /path/to/server.toml /path/to/new-backup
+notryx-server backup-verify /path/to/new-backup
+```
+
+백업은 workspace 잠금을 확인하고 복사본의 SQLite 무결성, 참조 객체, 미만료 ready upload와 live 문서의 경로 및 본문을 검사한다. 심볼릭 링크는 따라가지 않고 링크 자체를 보존한다. notes나 state 내부의 다른 mount, FIFO, socket과 장치 파일은 지원하지 않으며 발견하면 완료 백업을 만들지 않는다. notes와 state 루트 아래의 디렉터리 깊이는 최대 64단계이며 제외 디렉터리에도 이 제한을 적용한다. 더 깊으면 `backup_directory_depth_exceeded` 오류로 중단한다. manifest가 64 MiB를 넘으면 `backup_manifest_too_large` 오류로 중단한다. 프로세스의 파일 디스크립터 한도가 낮으면 그보다 얕은 트리에서도 오류가 날 수 있다. runtime lock은 백업하지 않는다. 백업 명령이 실패하면 출력 경로를 사용하지 않는다. 실패한 작업은 이름에 `.incomplete`가 포함된 디렉터리나 불완전한 대상 디렉터리를 남길 수 있다. 마지막 디렉터리 fsync와 완료 marker 정리가 모두 실패하면 `backup_publication_indeterminate`를 반환한다. 이때 marker가 남아 검증 명령이 성공하더라도 백업 명령의 성공이나 영속성을 증명하지 못한다. 실패한 출력은 별도로 격리하고 새 경로에서 백업을 다시 실행한다.
+
+현재 사본은 파일 mode만 보존한다. UID, GID, ACL, xattr, hardlink 관계와 timestamp는 보존하지 않으며 배포 설정도 포함하지 않는다. manifest는 이 제한과 외부 writer의 중지 및 최종 reconcile을 자동 확인하지 못한다는 사실을 기록한다. manifest 검증은 파일 집합과 hash의 일치를 확인하며 백업의 출처나 변조 여부를 암호학적으로 인증하지 않는다.
+
+### 빈 경로 복원 시험
+
+서버와 외부 writer를 중지하고 검증된 백업을 아직 존재하지 않는 독립 경로에 복원한다. 복원 대상의 상위 디렉터리에도 백업과 같은 소유권, 권한과 ACL 제한이 적용된다. 원본 notes, state 또는 백업 내부에 대상 경로를 지정하지 않는다. 경로와 inode 검사로 감지할 수 없는 mount 별칭이 있을 수 있으므로 운영자가 독립된 경로인지 확인해야 한다.
+
+```bash
+notryx-server restore /path/to/new-backup /path/to/new-restore
+```
+
+복원은 격리 사본에서 본문과 서버 상태를 확인하고 새 workspace epoch를 발급한다. schema 9 백업은 원본 백업을 수정하지 않고 복원 사본을 검증한 뒤 schema 10으로 이전한다. 기존 device token과 미사용 pairing secret은 폐기하므로 기기를 다시 등록해야 한다. `config/server.toml`은 새 notes와 state, loopback 임시 주소, 복원 경로 안의 새 admin socket을 가리킨다. 생성할 Unix socket 절대 경로가 107 bytes를 초과하면 `restore_admin_socket_path_too_long` 오류가 발생한다. 이때는 복원 대상의 경로를 더 짧게 지정한다. `config/original-server.toml`은 원래 경로가 들어 있는 참고 사본이다. 참고 사본으로 서버를 실행하지 않는다. 실제 배포 설정과 공개 주소는 운영자가 별도로 정한다.
+
+복원 명령이 실패하면 출력 경로를 사용하지 않는다. 게시 후 상위 디렉터리 fsync가 실패하면 `restore_publication_indeterminate`가 반환되고 대상 경로가 이미 존재할 수 있다. 실패한 출력은 별도로 격리하고 새 경로에서 다시 복원한다. 기기의 미전송 초안과 outbox는 서버 백업에 포함되지 않으므로 각 기기의 저장소도 별도로 보존한다.
+
 파일 게시에는 로컬 파일시스템의 `O_TMPFILE` 지원도 필요하다. 새 파일은 이름 없는 파일을 완성한 뒤 최종 이름으로 연결한다. 지원하지 않는 환경에서 일반 임시 파일로 우회하지 않는다. 실제 배포 파일시스템에서 저장과 재시작 시험을 실행해야 한다.
 
 ### 새 저장소와 실행
@@ -158,7 +183,19 @@ target/debug/notryx-server adopt --config /tmp/notryx-dev/server.toml sample.md
 target/debug/notryx-server serve --config /tmp/notryx-dev/server.toml
 ```
 
-`init`는 새 schema 9 저장소와 credential이 없는 최초 owner를 만든다. `adopt`는 notes 루트 바로 아래의 기존 일반 파일 하나를 등록하고 `node_id`를 JSON으로 출력한다. 경로나 디렉터리 대신 파일 이름을 전달한다. 아래 조회 예제에 이 ID를 사용한다. 전체 폴더 가져오기와 외부 변경 자동 수용은 제공하지 않는다.
+`init`는 새 schema 10 저장소와 credential이 없는 최초 owner를 만든다. `adopt`는 notes 루트 바로 아래의 기존 일반 파일 하나를 등록하고 `node_id`를 JSON으로 출력한다. 경로나 디렉터리 대신 파일 이름을 전달한다. 아래 조회 예제에 이 ID를 사용한다. 전체 폴더 가져오기는 제공하지 않으며 외부 변경 자동 수용은 아래에 설명한 범위로 제한된다.
+
+서버 설정에 다음 journal 보존 항목을 선택적으로 넣을 수 있다. `[sync]`를 생략하면 같은 기본값을 사용한다.
+
+```toml
+[sync]
+journal_retention_days = 30
+journal_budget_bytes = 536870912
+```
+
+서버는 시작 후 한 번, 이후 각 검사 종료 시점부터 약 1시간마다 journal 보존 상태를 확인한다. 보존 기간이 지난 이력은 완전한 ChangeSet 단위로 정리하며, budget 압력이 있으면 기간이 지나기 전에도 범위를 줄일 수 있다. commit 시각을 알 수 없는 이력은 처음 확인한 시각부터 보수적으로 기간을 계산한다. 시스템 시계가 크게 바뀌면 설정한 기간이 실제로 경과했는지 절대적으로 보장할 수 없다. floor 시점의 서버 내부 기준 상태는 보존한다. 정리된 과거 전이는 다시 검증할 수 없다.
+
+budget은 ChangeSet, node 변경 및 내부 기준 상태의 논리적 metadata 크기다. SQLite 텍스트의 BLOB 길이와 기록된 각 시각의 8 bytes를 합산하며 DB, WAL, 인덱스나 freelist의 물리 디스크 사용량 상한은 아니다. 기준 상태만으로 budget을 초과해도 필요한 기준은 보존한다. 현재 `[sync]`는 위 두 항목만 지원한다.
 
 `serve`는 기존 저장소를 열고 복구한 뒤 요청을 처리한다. 누락되거나 손상된 저장소를 초기화하지 않는다. `Ctrl+C` 또는 SIGTERM으로 새 작업 접수를 닫고 진행 작업을 마친 뒤 잠금을 해제한다. 다른 터미널에서 health를 확인한다.
 
@@ -169,7 +206,24 @@ curl --fail http://127.0.0.1:8080/health/ready
 
 `live`는 HTTP 응답 여부, `ready`는 복구 후 저장소 준비 상태를 나타낸다. 준비되지 않았거나 worker에 요청할 수 없으면 `ready`는 503이다. 이 HTTP 예제는 로컬 개발용이다. 서버 이미지 빌드와 격리 실행은 [Docker 안내](deployment.md)를 따른다.
 
-### 기존 schema 1~8 저장소
+서버 시작 후 기존 등록 파일과 등록된 폴더의 신규 Markdown을 확인하는 동안 표준 오류에 `known_file_scan_started`가 기록된다. 이 순회를 오류 없이 마치면 `known_file_scan_complete`, 하나 이상의 항목을 확인하지 못하거나 목록 조회에 실패하면 `known_file_scan_incomplete`가 기록된다. 종료로 순회를 중단하면 `known_file_scan_stopped`가 기록된다. watcher는 `known_file_watch_started`로 시작을 기록하고, 등록 실패나 이벤트 누락 가능성은 `known_file_watch_degraded`로 표시한다. 종료 시 `known_file_watch_stopped`가 기록된다. 로그에는 파일명이나 경로를 넣지 않는다. 이 상태는 `ready`와 별개이며, scan 완료는 등록된 폴더를 대상으로 한 번 순회한 결과다. 각 로그는 당시 관측한 상태를 기록하므로 다른 오류가 동시에 발생할 수 있다.
+
+하위 폴더의 등록 파일도 외부 변경을 관측하며 API 저장과 구조 변경을 지원한다. 서버가 중지된 동안 같은 경로의 폴더가 다른 폴더로 교체된 경우에는 이를 자동으로 구별하지 않고 현재 경로를 기존 폴더로 취급한다. 이때 같은 경로의 파일을 기존 문서 ID로 반영하거나 수정할 수 있다. 서버 실행 중에는 등록된 부모의 identity를 관측 준비와 commit에서 다시 검사한다. 등록된 폴더의 신규 `.md` 파일은 watcher와 시작·재검사에서 발견한다. 실행 중 API로 생성한 폴더는 watcher에 추가하고 등록 직전 생성된 파일도 재검사한다. 등록 큐가 가득 차면 기존 폴더 목록을 다시 확인한다. 외부에서 생성한 폴더도 watcher와 시작·재검사에서 단계별로 발견한다. API로 복원하거나 등록 후 이동한 폴더의 watcher 처리는 미완료다. 등록 파일 한 개가 외부에서 사라진 경우 부모를 확인하고 1초 유예 후 재확인해 삭제를 반영한다. 여러 등록 파일의 동시 부재나 확인 오류는 삭제하지 않고 미완료 상태로 남긴다. 외부 writer와 최종 commit 사이의 경쟁은 완전히 제거할 수 없다. 기존 등록 파일과 신규 `.md` 파일은 기본 600초마다 재검사한다. 60초 metadata 검사와 파일별 600초 기한 및 지연 진단은 아직 구현되지 않았다. 다른 확장자의 신규 파일 발견, 외부 폴더 삭제와 이동 처리는 미완료다.
+
+처리 불가 항목의 최근 관측 결과는 서버와 같은 UID의 로컬 관리자만 조회한다. 이 명령은 실행 중인 서버의 admin socket에 요청하며 파일을 수정하지 않는다.
+
+```bash
+target/debug/notryx-server admin --config /tmp/notryx-dev/server.toml unsupported-items
+target/debug/notryx-server admin --config /tmp/notryx-dev/server.toml unsupported-items SNAPSHOT_UUID NEXT_OFFSET
+```
+
+두 번째 명령에는 앞 응답의 `snapshot_id`와 `next_offset`을 넣는다. 한 응답은 최대 20개 항목이며 실제 JSON 크기가 socket frame 한도에 가까우면 더 적게 반환한다. `parent_path`는 workspace 상대 경로다. `name_hex`는 이름의 원래 바이트이고, UTF-8 이름은 `name_utf8`에도 표시한다. 이유는 `symlink`, `hard_link`, `special_file`, `invalid_name`으로 구분한다. 제외 경로는 목록에 넣지 않으며 link 대상, 파일 내용과 호스트 절대 경로는 반환하지 않는다.
+
+`snapshot_id`가 null이면 아직 게시된 관측 결과가 없다. `coverage_complete`는 해당 snapshot의 검사 범위가 완료됐는지 나타내며, 처리 불가 항목이 있어도 열거를 끝냈다면 true일 수 있다. `stale`은 재검사 중이거나 관측 뒤 변경 또는 검사의 실패가 있어 현재 상태와 다를 수 있다는 뜻이다. 부분 scan에서 관측한 항목이 있으면 미완료·stale snapshot으로 표시하고, `previous_snapshot_id`가 있으면 마지막 완료 snapshot을 같은 명령으로 조회할 수 있다. 이전 snapshot은 항상 stale로 표시한다. `truncated`는 항목 256개 또는 수집 예산 128 KiB를 초과해 목록이 일부 생략됐다는 뜻이며, `next_offset`이 없어도 모든 항목을 담았다는 뜻은 아니다. 결과는 메모리에만 보관하므로 재시작 뒤에는 다시 검사한다. 마지막 관측 이후 처리되지 않은 파일시스템 이벤트까지 실시간으로 반영된다는 보장은 없다. 원격 앱의 항목별 진단 화면은 제공하지 않는다.
+
+생성·이동·복원 intent에는 실행 중 목적지 부모 교체를 감지할 관측 identity가 포함된다. 이전 버전이 남긴 intent에 이 증거가 없거나 현재 부모가 다르면 자동 완료하지 않고 복구 대상으로 보존한다. 이전 서버는 새 필드가 들어간 pending intent나 보존된 recovery case를 읽지 못할 수 있으므로, 버전을 되돌리기 전에 백업을 보존하고 해당 기록의 호환성을 확인해야 한다. 이 identity는 서버 중지 중 폴더 교체를 식별하는 영속 식별자가 아니다.
+
+### 기존 schema 1~9 저장소
 
 기존 개발 저장소가 `MigrationRequired` 오류로 기동 거절되면 서버를 중지하고 해당 저장소의 설정으로 명시적으로 실행한다. `init`를 다시 실행하지 않는다.
 
@@ -177,7 +231,9 @@ curl --fail http://127.0.0.1:8080/health/ready
 target/debug/notryx-server migrate --config /tmp/notryx-dev/server.toml
 ```
 
-migration은 notes/state 잠금과 기존 무결성을 검사하고 schema 1~8을 9로 전환한다. schema 1에는 인증 테이블과 최초 owner를 추가하고, schema 1/2에는 receipt 회수 watermark와 최소 식별 기록을 추가한다. schema 4는 하위 폴더와 생성 intent를 지원하는 저장 형식을 구분한다. schema 5는 성공 receipt의 node ETag를 보존하는 컬럼을 추가하고 기존 계산값을 기록한다. schema 6은 이동 intent와 누적 자식 namespace 검사를 구분한다. schema 7은 tombstone과 살아 있는 node만의 이름 유일성을 지원하도록 nodes 테이블을 교체한다. schema 8은 receipt ACK와 독립적으로 유지하는 격리 사건과 보존 객체 참조를 추가한다. schema 9는 기기별 임시 업로드의 예약, 만료와 pending intent 참조를 추가한다. 문서, revision, epoch, 기존 owner와 token, stream, receipt, 회수 기록과 pending intent를 보존하며 자동 migration은 하지 않는다. foreign key 검사를 잠시 끈 상태에서 테이블을 교체하되 데이터 복사, 무결성 검사와 버전 전환은 한 transaction으로 처리한다. 실패 시 기존 schema를 유지하고 foreign key 검사를 다시 켠다. 현재 schema에서 다시 실행해도 owner나 stream을 새로 만들지 않는다.
+migration은 notes/state 잠금과 기존 무결성을 검사하고 schema 1~9를 10으로 전환한다. schema 1에는 인증 테이블과 최초 owner를 추가하고, schema 1/2에는 receipt 회수 watermark와 최소 식별 기록을 추가한다. schema 4는 하위 폴더와 생성 intent를 지원하는 저장 형식을 구분한다. schema 5는 성공 receipt의 node ETag를 보존하는 컬럼을 추가하고 기존 계산값을 기록한다. schema 6은 이동 intent와 누적 자식 namespace 검사를 구분한다. schema 7은 tombstone과 살아 있는 node만의 이름 유일성을 지원하도록 nodes 테이블을 교체한다. schema 8은 receipt ACK와 독립적으로 유지하는 격리 사건과 보존 객체 참조를 추가한다. schema 9는 기기별 임시 업로드의 예약, 만료와 pending intent 참조를 추가한다. schema 10은 journal floor와 서버 내부 기준 상태 및 기준의 건수와 hash를 추가한다. 기존 journal의 floor는 0이며 알 수 없는 commit 시각을 임의로 과거 시각으로 정하지 않는다. 문서, revision, epoch, 기존 owner와 token, stream, receipt, 회수 기록과 pending intent를 보존하며 자동 migration은 하지 않는다. foreign key 검사를 잠시 끈 상태에서 테이블을 교체하되 데이터 복사, 무결성 검사와 버전 전환은 한 transaction으로 처리한다. 실패 시 기존 schema를 유지하고 foreign key 검사를 다시 켠다. 현재 schema에서 다시 실행해도 owner나 stream을 새로 만들지 않는다.
+
+이전 서버 binary는 schema 10 저장소를 열 수 없다. 이전 binary는 새 `[sync]` 항목이 있는 설정도 거절할 수 있다. 버전을 되돌릴 때는 이전 binary와 설정의 호환성을 확인하고, schema를 되돌리는 대신 이전에 검증한 백업 복원을 사용한다.
 
 ### 로컬 관리자와 기기 등록
 
@@ -189,6 +245,14 @@ migration은 notes/state 잠금과 기존 무결성을 검사하고 schema 1~8�
 target/debug/notryx-server admin --config /tmp/notryx-dev/server.toml status
 target/debug/notryx-server admin --config /tmp/notryx-dev/server.toml create-principal reader
 ```
+
+journal의 현재 범위와 논리적 사용량은 같은 관리자 socket에서 조회한다.
+
+```bash
+target/debug/notryx-server admin --config /tmp/notryx-dev/server.toml journal-status
+```
+
+응답은 `workspace_epoch`, `head_seq`, `journal_floor_seq`, `logical_bytes`, `budget_bytes`, `budget_exceeded`와 계산 방식 `sqlite_blob_lengths_v1`을 제공한다. 크기는 조회 시점의 논리적 metadata 크기이며 물리 디스크 사용량이 아니다. 조회 실패를 0이나 정상 상태로 표시하지 않는다.
 
 `status`에서 workspace 및 owner의 ID를, `create-principal`에서 새 `principal_id`를 확인한다. 읽기 시험은 새 reader로 진행할 수 있다. 다음 `<principal UUID>`를 실제 ID로 바꿔 실행한다.
 
@@ -237,7 +301,8 @@ HTTP 계약은 [Rust DTO](../crates/protocol/src/http.rs), 실제 경로와 head
 | 경로 | 요청과 결과 |
 |---|---|
 | `POST /v1/pair` | `protocol`, `workspace_id`, `pairing_secret` JSON. 기기 token과 새 stream, 만료 시각 반환 |
-| `GET /v1/server-info` | Bearer 인증. workspace, epoch, root, head와 제한 조회 |
+| `GET /v1/server-info` | Bearer 인증. workspace, epoch, root, head, journal floor와 제한 조회 |
+| `GET /v1/changes?after={seq}&through={seq}` | Bearer 인증. 고정된 범위의 완전한 ChangeSet 조회. `through` 생략 시 현재 head 사용 |
 | `GET /v1/nodes?after_id={id}&limit={n}` | Bearer 인증. root를 포함한 살아 있는 node의 UUID keyset 페이지 |
 | `GET /v1/nodes/{id}` | Bearer 인증. 전체 own-state와 node 전용 ETag 반환 |
 | `GET /v1/nodes/{id}/metadata` | Bearer 인증. node metadata와 metadata 전용 ETag 반환 |
@@ -245,6 +310,8 @@ HTTP 계약은 [Rust DTO](../crates/protocol/src/http.rs), 실제 경로와 head
 | `GET /v1/trash?after_id={id}&limit={n}` | Bearer 인증. 삭제된 node의 UUID keyset 페이지와 복원 가능 여부 |
 
 목록은 UUID 바이트 순서이며 `after_id`보다 큰 ID부터 반환한다. cursor ID가 실제로 존재할 필요는 없다. `limit`는 기본 100, 최소 1, 최대 100이며 전체 JSON 응답은 1 MiB 이하다. 응답 필드는 `workspace_epoch`, `nodes`, `next_after_id`다. 다음 페이지가 있으면 마지막 반환 ID를 cursor로 제공하고 끝이면 null이다. 각 페이지는 별도 read transaction이므로 목록 전체를 고정 snapshot으로 취급하지 않는다. 중복 또는 미지정 query와 잘못된 UUID 및 limit는 400이다.
+
+`changes`의 `after`가 현재 `journal_floor_seq`보다 작으면 410 `resync_required`를 반환한다. `after`가 floor와 같으면 그 다음 순번부터 조회할 수 있다. 클라이언트는 이력을 다시 가져올 수 없을 때 초안과 outbox를 보존한 채 초기 동기화를 다시 수행한다.
 
 전체 node 조회는 본문 bytes와 파생 경로를 포함하지 않는다. root는 빈 이름과 null parent를 가진 폴더다. node ETag는 본문 상태, 구조와 직접 자식 namespace 및 마지막 변경 순번을 반영한다. 새 생성, 저장, 이동, 삭제와 복원 receipt의 node ETag도 같은 계산을 사용한다. 구 schema에서 migration한 Saved receipt는 과거 ETag를 유지하므로 새 전체 조회와 다를 수 있다. 과거 작업 결과를 고치지 말고 현재 조건부 작업에는 새 조회에서 받은 validator를 사용한다. metadata 조회는 CAS 본문 유실이나 복구 대기 중에도 마지막 commit 상태를 반환한다.
 
@@ -429,4 +496,4 @@ cargo test --locked -p notryx-server --test http_upload progressing_upload_obeys
 
 저장 코어는 content revision, 요청 순번과 digest를 검사한다. 저장 전후의 예상 상태와 다른 파일이 발견되면 자료를 보존하고 쓰기를 막는다. 로컬 관리자가 현재 상태를 검증하고 명시적으로 해결할 수 있다. 다른 프로세스의 동시 파일 변경을 완전히 제어할 수는 없다.
 
-일반 본문 객체의 GC, watcher와 외부 변경 수용, SSE와 journal 동기화, token renew와 gateway 인증은 후속 범위다. 실제 Linux IME와 Android 실기기 검증도 별도로 남아 있다. 실패 주입 hook은 테스트용이며 운영 환경변수로 활성화하지 않는다.
+일반 본문 객체의 GC, watcher와 외부 변경 수용의 미완료 범위, token renew와 gateway 인증은 후속 범위다. SSE와 journal 동기화는 구현했지만 전체 동기화 게이트는 아직 통과하지 않았다. 다른 Linux 컴퓨터의 Fcitx 5에서 사용자가 물리 키보드 한글 입력과 저장 후 재시작 복구를 확인했다고 보고했다. 해당 시험 이후 M3 구현의 실제 Linux IME와 Android 실기기 검증은 별도로 남아 있다. 실패 주입 hook은 테스트용이며 운영 환경변수로 활성화하지 않는다.

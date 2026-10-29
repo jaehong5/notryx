@@ -11,10 +11,12 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import select
 import signal
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -48,14 +50,34 @@ def operation_id():
     return str(uuid.UUID(bytes=bytes(value)))
 
 
+def leader_running(process):
+    if process.returncode is not None:
+        return False
+    try:
+        return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None
+    except ChildProcessError:
+        return False
+
+
 def stop(process):
-    if process and process.poll() is None:
+    if not process or process.returncode is not None:
+        return
+    try:
+        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        return
+    try:
         os.killpg(process.pid, signal.SIGTERM)
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=10)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + 10
+    while leader_running(process) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait(timeout=10)
 
 
 def driver_owns_port(pid, port):
@@ -85,6 +107,115 @@ def xvfb_on_current_display():
         except (OSError, ValueError):
             continue
     return False
+
+
+def blur_open_race_window():
+    require(xvfb_on_current_display(), "open race requires an isolated Xvfb display")
+    xlib = ctypes.CDLL(ctypes.util.find_library("X11"))
+    xlib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    xlib.XOpenDisplay.restype = ctypes.c_void_p
+    xlib.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+    xlib.XDefaultRootWindow.restype = ctypes.c_ulong
+    xlib.XGetInputFocus.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int)]
+    xlib.XSetInputFocus.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    xlib.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    xlib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    display = xlib.XOpenDisplay(None)
+    require(bool(display), "isolated display could not be opened")
+    previous = ctypes.c_ulong()
+    revert = ctypes.c_int()
+    xlib.XGetInputFocus(display, ctypes.byref(previous), ctypes.byref(revert))
+    xlib.XSetInputFocus(display, xlib.XDefaultRootWindow(display), 1, 0)
+    xlib.XSync(display, 0)
+    return xlib, display, previous.value, revert.value
+
+
+def restore_open_race_focus(focus):
+    if focus is None:
+        return
+    xlib, display, previous, revert = focus
+    try:
+        xlib.XSetInputFocus(display, previous, revert, 0)
+        xlib.XSync(display, 0)
+    finally:
+        xlib.XCloseDisplay(display)
+
+
+def capture_remote_change_focus(exclude_window=None):
+    require(xvfb_on_current_display(), "remote change focus requires an isolated Xvfb display")
+    xlib = ctypes.CDLL(ctypes.util.find_library("X11"))
+    display_type = ctypes.c_void_p
+    window_type = ctypes.c_ulong
+
+    class WindowAttributes(ctypes.Structure):
+        _fields_ = [
+            ("x", ctypes.c_int), ("y", ctypes.c_int), ("width", ctypes.c_int), ("height", ctypes.c_int),
+            ("border_width", ctypes.c_int), ("depth", ctypes.c_int), ("visual", ctypes.c_void_p),
+            ("root", window_type), ("class_value", ctypes.c_int), ("bit_gravity", ctypes.c_int),
+            ("win_gravity", ctypes.c_int), ("backing_store", ctypes.c_int),
+            ("backing_planes", ctypes.c_ulong), ("backing_pixel", ctypes.c_ulong),
+            ("save_under", ctypes.c_int), ("colormap", ctypes.c_ulong), ("map_installed", ctypes.c_int),
+            ("map_state", ctypes.c_int), ("all_event_masks", ctypes.c_long),
+            ("your_event_mask", ctypes.c_long), ("do_not_propagate_mask", ctypes.c_long),
+            ("override_redirect", ctypes.c_int), ("screen", ctypes.c_void_p),
+        ]
+
+    xlib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    xlib.XOpenDisplay.restype = display_type
+    xlib.XDefaultRootWindow.argtypes = [display_type]
+    xlib.XDefaultRootWindow.restype = window_type
+    xlib.XQueryTree.argtypes = [display_type, window_type, ctypes.POINTER(window_type), ctypes.POINTER(window_type), ctypes.POINTER(ctypes.POINTER(window_type)), ctypes.POINTER(ctypes.c_uint)]
+    xlib.XGetWindowAttributes.argtypes = [display_type, window_type, ctypes.POINTER(WindowAttributes)]
+    xlib.XInternAtom.argtypes = [display_type, ctypes.c_char_p, ctypes.c_int]
+    xlib.XInternAtom.restype = ctypes.c_ulong
+    xlib.XGetWindowProperty.argtypes = [display_type, window_type, ctypes.c_ulong, ctypes.c_long, ctypes.c_long, ctypes.c_int, ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte))]
+    xlib.XFree.argtypes = [ctypes.c_void_p]
+    xlib.XGetInputFocus.argtypes = [display_type, ctypes.POINTER(window_type), ctypes.POINTER(ctypes.c_int)]
+    xlib.XSetInputFocus.argtypes = [display_type, window_type, ctypes.c_int, ctypes.c_ulong]
+    xlib.XRaiseWindow.argtypes = [display_type, window_type]
+    xlib.XSync.argtypes = [display_type, ctypes.c_int]
+    xlib.XCloseDisplay.argtypes = [display_type]
+    display = xlib.XOpenDisplay(None)
+    require(bool(display), "isolated display could not be opened")
+    try:
+        root = xlib.XDefaultRootWindow(display)
+        name_atom = xlib.XInternAtom(display, b"_NET_WM_NAME", 0)
+        root_return, parent = window_type(), window_type()
+        children = ctypes.POINTER(window_type)()
+        count = ctypes.c_uint()
+        require(bool(xlib.XQueryTree(display, root, ctypes.byref(root_return), ctypes.byref(parent), ctypes.byref(children), ctypes.byref(count))), "receiver window enumeration failed")
+        matches = []
+        try:
+            for index in range(count.value):
+                child = children[index]
+                actual_type, length, remaining = ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_ulong()
+                actual_format = ctypes.c_int()
+                data = ctypes.POINTER(ctypes.c_ubyte)()
+                status = xlib.XGetWindowProperty(display, child, name_atom, 0, 1024, 0, 0, ctypes.byref(actual_type), ctypes.byref(actual_format), ctypes.byref(length), ctypes.byref(remaining), ctypes.byref(data))
+                try:
+                    if status == 0 and bool(data) and actual_format.value == 8:
+                        title = ctypes.string_at(data, length.value).decode("utf-8", "replace")
+                        attributes = WindowAttributes()
+                        if child != exclude_window and title == "Notryx" and xlib.XGetWindowAttributes(display, child, ctypes.byref(attributes)) and attributes.map_state == 2:
+                            matches.append(child)
+                finally:
+                    if data:
+                        xlib.XFree(data)
+        finally:
+            if children:
+                xlib.XFree(children)
+        require(len(matches) == 1, "target Notryx window is missing or ambiguous")
+        window = matches[0]
+        xlib.XRaiseWindow(display, window)
+        xlib.XSetInputFocus(display, window, 2, 0)
+        xlib.XSync(display, 0)
+        focused, revert = window_type(), ctypes.c_int()
+        xlib.XGetInputFocus(display, ctypes.byref(focused), ctypes.byref(revert))
+        require(focused.value == window, "target X11 window focus failed")
+        return xlib, display, window, 2
+    except BaseException:
+        xlib.XCloseDisplay(display)
+        raise
 
 
 def respond_to_recovery_dialog(destination):
@@ -355,12 +486,20 @@ def main():
     parser.add_argument("--boundary-25m", action="store_true")
     parser.add_argument("--verify-5m", action="store_true")
     parser.add_argument("--unscoped-recovery", action="store_true")
+    parser.add_argument("--resync-race", action="store_true")
+    parser.add_argument("--open-race", action="store_true")
+    parser.add_argument("--open-race-delete", action="store_true")
+    parser.add_argument("--remote-change", choices=("clean", "dirty"))
     args = parser.parse_args()
     require(not (args.measure and args.recovery_dialogs), "performance and dialog verification must run separately")
     require(not args.paste_probe or args.measure, "paste probe requires the release measurement setup")
     require(not args.boundary_25m or not (args.measure or args.recovery_dialogs), "25 MiB boundary verification must run separately")
     require(not args.verify_5m or not (args.measure or args.recovery_dialogs or args.boundary_25m), "5 MiB verification must run separately")
     require(not args.unscoped_recovery or not (args.measure or args.recovery_dialogs or args.boundary_25m or args.verify_5m), "unscoped recovery verification must run separately")
+    require(not args.resync_race or not (args.measure or args.recovery_dialogs or args.boundary_25m or args.verify_5m or args.unscoped_recovery), "resync race verification must run separately")
+    require(not args.open_race or not (args.measure or args.recovery_dialogs or args.boundary_25m or args.verify_5m or args.unscoped_recovery or args.resync_race), "open race verification must run separately")
+    require(not args.open_race_delete or not (args.measure or args.recovery_dialogs or args.boundary_25m or args.verify_5m or args.unscoped_recovery or args.resync_race or args.open_race), "open deletion race verification must run separately")
+    require(not args.remote_change or not (args.measure or args.recovery_dialogs or args.boundary_25m or args.verify_5m or args.unscoped_recovery or args.resync_race or args.open_race or args.open_race_delete), "remote change verification must run separately")
     server_binary = str(Path(args.server).resolve())
     client_binary = str(Path(args.binary).resolve())
     if args.measure:
@@ -369,13 +508,38 @@ def main():
         require(xvfb_on_current_display(), "performance measurement requires a local Xvfb display")
     if args.recovery_dialogs:
         require(xvfb_on_current_display(), "recovery dialog verification requires an isolated Xvfb display")
-    server = driver = remote_probe = remote_thread = None
+    if args.remote_change:
+        test_bus_prefix = os.environ.get("NOTRYX_TEST_SECRET_BUS_PREFIX", "")
+        test_bus_address = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+        test_bus_directory = Path(test_bus_prefix)
+        require(
+            test_bus_directory.parent == Path("/tmp")
+            and re.fullmatch(r"notryx-secret-test\.[A-Za-z0-9]{8}", test_bus_directory.name) is not None
+            and not test_bus_directory.is_symlink()
+            and test_bus_directory.is_dir()
+            and test_bus_directory.stat().st_uid == os.getuid()
+            and stat.S_IMODE(test_bus_directory.stat().st_mode) == 0o700
+            and not (test_bus_directory / "bus.sock").is_symlink()
+            and (test_bus_directory / "bus.sock").is_socket()
+            and re.fullmatch(r"unix:path=" + re.escape(str(test_bus_directory / "bus.sock")) + r"(?:,guid=[0-9a-fA-F]{32})?", test_bus_address) is not None
+            and not os.environ.get("DBUS_STARTER_ADDRESS")
+            and not os.environ.get("DBUS_STARTER_BUS_TYPE"),
+            "remote change verification requires scripts/m3-secret-no-service.sh with an isolated session bus",
+        )
+        require(xvfb_on_current_display(), "remote change verification requires an isolated Xvfb display")
+    server = driver = peer_driver = remote_probe = remote_thread = resync_proxy = None
     session_id = None
+    peer_session = None
+    peer_wd = None
+    race_focus = None
+    remote_focus = None
 
     with tempfile.TemporaryDirectory(prefix="notryx-m2-webdriver-") as temporary:
         root = Path(temporary)
-        notes, state, run, client_data = (root / name for name in ("notes", "state", "run", "client"))
-        for directory in (notes, state, run, client_data):
+        notes, state, run, client_data, xdg_data, xdg_cache, xdg_config = (
+            root / name for name in ("notes", "state", "run", "client", "xdg-data", "xdg-cache", "xdg-config")
+        )
+        for directory in (notes, state, run, client_data, xdg_data, xdg_cache, xdg_config):
             directory.mkdir(mode=0o700)
         port = free_port()
         config = root / "server.toml"
@@ -415,14 +579,14 @@ def main():
             finally:
                 connection.close()
 
-        def wait(check, seconds=20):
+        def wait(check, seconds=20, description="expected application state"):
             deadline = time.monotonic() + seconds
             while time.monotonic() < deadline:
                 result = check()
                 if result:
                     return result
                 time.sleep(0.1)
-            raise TestFailure("timed out waiting for expected application state")
+            raise TestFailure(f"timed out waiting for {description}")
 
         try:
             remote_requests = []
@@ -449,7 +613,7 @@ def main():
                 stderr=subprocess.DEVNULL, text=True, start_new_session=True,
             )
             ready, _, _ = select.select([server.stdout], [], [], 30)
-            require(bool(ready) and server.stdout.readline().strip() == "server_started" and server.poll() is None,
+            require(bool(ready) and server.stdout.readline().strip() == "server_started" and leader_running(server),
                     "synthetic server did not start")
             admin_status = admin("status")
             setup_grant = admin("issue-pairing", admin_status["owner_principal_id"])
@@ -561,24 +725,37 @@ def main():
                         sequence += 1
                         create(identifier, folder_id, f"Perf {size} {suffix}.md", "file", sequence, measured_upload["upload_id"])
                         performance_nodes[(size, suffix)] = identifier
+            if args.resync_race:
+                from m3_resync_proxy import ResyncProxy
+                resync_proxy = ResyncProxy(port, document_id)
+                resync_proxy.start()
+            if args.open_race or args.open_race_delete:
+                from m3_open_proxy import OpenProxy
+                resync_proxy = OpenProxy(port, document_id)
+                resync_proxy.start()
             ui_grant = admin("issue-pairing", admin_status["owner_principal_id"])
             driver_port = free_port()
             driver_origin = f"http://127.0.0.1:{driver_port}"
+            local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             environment = os.environ.copy()
-            environment.update(TAURI_WEBVIEW_AUTOMATION="true", NOTRYX_M0_DATA_DIR=str(client_data))
+            environment.update(
+                TAURI_WEBVIEW_AUTOMATION="true", NOTRYX_M0_DATA_DIR=str(client_data),
+                XDG_DATA_HOME=str(xdg_data), XDG_CACHE_HOME=str(xdg_cache), XDG_CONFIG_HOME=str(xdg_config),
+            )
             if args.recovery_dialogs:
                 environment["GTK_USE_PORTAL"] = "0"
             driver = subprocess.Popen(
                 [args.driver, f"--port={driver_port}", "--host=127.0.0.1"], env=environment,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
             )
+            test_stage = "webdriver startup"
 
             def wd(method, path, payload=None):
                 data = None if payload is None else json.dumps(payload).encode()
                 request = urllib.request.Request(driver_origin + path, data=data, method=method,
                                                  headers={"Content-Type": "application/json"})
                 try:
-                    with urllib.request.urlopen(request, timeout=180 if args.measure or args.boundary_25m or args.verify_5m else 35) as response:
+                    with local_opener.open(request, timeout=180 if args.measure or args.boundary_25m or args.verify_5m else 35) as response:
                         result = json.load(response)
                     value = result["value"]
                     if isinstance(value, dict) and "error" in value:
@@ -586,10 +763,31 @@ def main():
                         safe_codes = {"script timeout", "timeout", "javascript error", "no such window", "invalid session id", "unknown error"}
                         raise TestFailure(f"WebDriver error: {code if code in safe_codes else 'other'}")
                     return value
-                except (OSError, ValueError, KeyError, urllib.error.HTTPError):
-                    raise TestFailure("WebDriver request failed") from None
+                except (OSError, ValueError, KeyError, urllib.error.HTTPError) as error:
+                    operation = "execute" if "/execute/" in path else "session" if "/session" in path else "status"
+                    status = error.code if isinstance(error, urllib.error.HTTPError) else None
+                    code = "unknown"
+                    category = "unavailable"
+                    if isinstance(error, urllib.error.HTTPError):
+                        try:
+                            value = json.loads(error.read(16384)).get("value", {})
+                            known = {"script timeout", "timeout", "javascript error", "no such window", "invalid session id", "unknown error"}
+                            if value.get("error") in known:
+                                code = value["error"]
+                            message = str(value.get("message", "")).lower()
+                            if "null is not an object" in message or "cannot read properties of null" in message:
+                                category = "missing element"
+                            elif "not a function" in message:
+                                category = "missing function"
+                            elif "timeout" in message:
+                                category = "timeout"
+                            else:
+                                category = "other"
+                        except (OSError, ValueError, AttributeError):
+                            pass
+                    raise TestFailure(f"WebDriver request failed: {test_stage}, {operation}, {type(error).__name__}, HTTP {status}, {code}, {category}") from None
 
-            wait(lambda: driver.poll() is None and driver_owns_port(driver.pid, driver_port))
+            wait(lambda: leader_running(driver) and driver_owns_port(driver.pid, driver_port))
 
             def driver_ready():
                 try:
@@ -666,23 +864,583 @@ def main():
                 with sqlite3.connect(f"file:{client_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
                     return db.execute("SELECT * FROM client_outbox ORDER BY operation_id").fetchall()
 
-            wait(lambda: js("return !!document.querySelector('.cm-content[contenteditable=true]')"))
-            wait(lambda: js("return !document.querySelector('.workspace-connect button').disabled"))
+            test_stage = "initial screen"
+            if not (args.open_race or args.open_race_delete):
+                try:
+                    wait(lambda: js("return !!document.querySelector('.cm-content[contenteditable=true]')"), description="initial editor")
+                except TestFailure:
+                    diagnostic = js("""
+                        const done=arguments[arguments.length-1];
+                        const result={ready:document.readyState, rootChildren:document.getElementById('root')?.childElementCount ?? -1,
+                          editor:!!document.querySelector('.cm-content'), pairing:!!document.querySelector('.workspace-connect'),
+                          startupFailure:!![...document.querySelectorAll('h1')].find(el=>el.textContent.includes('시작 상태 확인 실패')),
+                          unavailable:!![...document.querySelectorAll('h1')].find(el=>el.textContent.includes('로컬 저장소를 열 수 없습니다')),
+                          recovery:!!document.querySelector('[data-migration-recovery]'), startupMode:null};
+                        if (!window.__TAURI_INTERNALS__) { done(result); return; }
+                        window.__TAURI_INTERNALS__.invoke('client_startup_status')
+                          .then(value=>{result.startupMode=value.mode; done(result);}).catch(()=>done(result));
+                    """, asynchronous=True)
+                    print("Initial UI diagnostic:", json.dumps(diagnostic, ensure_ascii=False), flush=True)
+                    raise
+            wait(lambda: js("const button=document.querySelector('.workspace-connect button'); return !!button && !button.disabled"), description="pairing form")
+            test_stage = "pairing submit"
             js("""
                 const form = document.querySelector('.workspace-connect');
                 form.elements.namedItem('origin').value = arguments[0];
                 form.elements.namedItem('workspace_id').value = arguments[1];
                 form.elements.namedItem('pairing_secret').value = arguments[2];
                 form.requestSubmit();
-            """, f"http://127.0.0.1:{port}", ui_grant["workspace_id"], ui_grant["pairing_secret"])
-            wait(lambda: js("return !!document.querySelector('[data-document=\"' + arguments[0] + '\"]:not(:disabled)')", document_id))
+            """, f"http://127.0.0.1:{resync_proxy.server_address[1] if resync_proxy else port}", ui_grant["workspace_id"], ui_grant["pairing_secret"])
+            test_stage = "paired list"
+            wait(lambda: js("return !!document.querySelector('[data-document=\"' + arguments[0] + '\"]:not(:disabled)')", document_id), description="paired document list")
             require(js("return document.querySelector('[name=pairing_secret]').value === ''"), "pairing secret remained in the form")
             require(js("return document.querySelector('[data-document=\"' + arguments[0] + '\"]').textContent", document_id) == "Test Folder/Example.md", "folder path was not shown")
+            if args.open_race or args.open_race_delete:
+                test_stage = "initial sync"
+                owner = js("const done=arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke('m0_renderer_session').then(done)", asynchronous=True)
+                def sync_ready():
+                    return js("""
+                        const done=arguments[arguments.length-1];
+                        window.__TAURI_INTERNALS__.invoke('workspace_sync_status', {request:{renderer_session_id:arguments[0]}})
+                          .then(value=>done(value.status === 'ready')).catch(()=>done(false));
+                    """, owner, asynchronous=True)
+                try:
+                    wait(sync_ready, seconds=45, description="open race initial sync")
+                except TestFailure:
+                    status = js("""
+                        const done=arguments[arguments.length-1];
+                        window.__TAURI_INTERNALS__.invoke('workspace_sync_status', {request:{renderer_session_id:arguments[0]}})
+                          .then(value=>done(['connecting','ready','offline','auth_required','gateway_auth_required','needs_review'].includes(value.status) ? value.status : 'unknown'))
+                          .catch(error=>{
+                            const value=String(error);
+                            const codes=['stale_renderer_session','stale_registration','not_connected','pairing_in_progress','invalid args','invalid value'];
+                            done(codes.find(code=>value.includes(code)) ?? 'request_failed');
+                          });
+                    """, owner, asynchronous=True)
+                    owner_shape = isinstance(owner, str) and len(owner) == 36
+                    with sqlite3.connect(f"file:{client_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
+                        index_present = db.execute("SELECT EXISTS(SELECT 1 FROM remote_index)").fetchone()[0] == 1
+                        active_registration = db.execute("SELECT EXISTS(SELECT 1 FROM client_registrations WHERE status='active')").fetchone()[0] == 1
+                    with resync_proxy.lock:
+                        print("Open sync diagnostic:", json.dumps({"status": status, "owner_shape": owner_shape, "index_present": index_present, "active_registration": active_registration, "routes": resync_proxy.route_counts, "responses": resync_proxy.response_counts, "proxy_failed": resync_proxy.failure.is_set()}), flush=True)
+                    raise
+                node = server_request("GET", f"/v1/nodes/{document_id}", headers=authorization)
+                updated = b"# Synthetic updated source\n"
+                race_focus = blur_open_race_window()
+                time.sleep(1)
+                resync_proxy.hold_get.set()
+                resync_proxy.hold_events.set()
+                test_stage = "open selected document"
+                js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", document_id)
+                require(resync_proxy.get_held.wait(20), "initial content GET was not held")
+                time.sleep(1)
+                with resync_proxy.lock:
+                    require(resync_proxy.inflight.get("inventory", 0) == 0, "initial inventory request was still running")
+                resync_proxy.capture_changes.set()
+                if args.open_race_delete:
+                    server_request("DELETE", f"/v1/nodes/{document_id}", headers={
+                        **authorization, "If-Match": node["node_etag"], "X-Workspace-Epoch": info["workspace_epoch"],
+                        "X-Device-Stream": pair["device_stream_id"], "X-Operation-Seq": "6", "Idempotency-Key": operation_id(),
+                    })
+                else:
+                    server_request("PUT", f"/v1/nodes/{document_id}/content", data=updated, headers={
+                        **authorization, "Content-Type": "application/octet-stream",
+                        "Content-Digest": "sha-256=:" + base64.b64encode(hashlib.sha256(updated).digest()).decode() + ":",
+                        "If-Match": node["content_etag"], "X-Workspace-Epoch": info["workspace_epoch"],
+                        "X-Device-Stream": pair["device_stream_id"], "X-Operation-Seq": "6", "Idempotency-Key": operation_id(),
+                    })
+                resync_proxy.release_get.set()
+                test_stage = "open race result"
+                require(resync_proxy.changes_seen.wait(20), "stale content did not trigger metadata catch-up")
+                if args.open_race_delete:
+                    wait(lambda: js("return [...document.querySelectorAll('[role=alert]')].some(item => item.textContent.includes('삭제된 문서입니다'))"), seconds=45, description="deleted document notice")
+                    wait(lambda: js("return !document.querySelector('[data-document=\"' + arguments[0] + '\"]')", document_id), seconds=45, description="deleted document list refresh")
+                    with resync_proxy.lock:
+                        require(resync_proxy.get_count == 1 and resync_proxy.get_statuses == [410], "deleted content GET did not return 410")
+                        trace = list(resync_proxy.trace)
+                    print("Open deletion proxy trace:", json.dumps(trace), flush=True)
+                    require(trace.count("server-info:request") == 1 and trace.count("changes:request") == 1, "background catch-up overlapped the open request")
+                    require("inventory:request" not in trace[:trace.index("changes:request")], "inventory refresh preceded the open catch-up")
+                    require(not resync_proxy.failure.is_set(), "open test proxy failed")
+                    require(checkpoint() is None, "deleted content created a draft")
+                    resync_proxy.release_events.set()
+                    print("M3 WebView deletion race passed: 410, tombstone catch-up and list refresh.", flush=True)
+                    return
+                wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && document.querySelector('.cm-content')?.cmTile.root.view.state.doc.toString() === arguments[1]", document_id, updated.decode()), seconds=45, description="updated document after one retry")
+                with resync_proxy.lock:
+                    require(resync_proxy.get_count == 2 and resync_proxy.get_statuses == [412, 200], "open did not retry one stale content GET")
+                require(not resync_proxy.failure.is_set(), "open test proxy failed")
+                with sqlite3.connect(f"file:{client_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
+                    row = db.execute("SELECT c.bytes, n.content_ready FROM cached_content c JOIN remote_nodes n ON n.registration_id=c.registration_id AND n.node_id=c.node_id JOIN client_registrations r ON r.id=c.registration_id WHERE r.status='active' AND c.node_id=?", (document_id,)).fetchone()
+                require(row == (updated, 1), "retried content did not become the current cache")
+                require(checkpoint() is None, "unmodified retried content created a draft")
+                resync_proxy.release_events.set()
+                print("M3 WebView open race passed: 412, one current revision retry and verified cache.", flush=True)
+                return
+            if args.resync_race:
+                test_stage = "resync initial sync"
+                owner = js("const done=arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke('m0_renderer_session').then(done)", asynchronous=True)
+
+                def sync_status():
+                    return js("""
+                        const done=arguments[arguments.length-1];
+                        window.__TAURI_INTERNALS__.invoke('workspace_sync_status',
+                          {request:{renderer_session_id:arguments[0]}})
+                          .then(value=>done(value.status)).catch(()=>done(null));
+                    """, owner, asynchronous=True)
+
+                def sync_cursor():
+                    with sqlite3.connect(f"file:{client_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
+                        row = db.execute("""
+                            SELECT i.cursor FROM remote_index i JOIN client_registrations r ON r.id=i.registration_id
+                            WHERE r.status='active'
+                        """).fetchone()
+                    return int(row[0]) if row else None
+
+                wait(lambda: sync_cursor() is not None and sync_status() == "ready" and js("return !document.querySelector('#workspace-sync-status')"), seconds=45, description="resync initial ready")
+            if args.remote_change:
+                test_stage = "remote change pre-open sync"
+                setup_owner = js("const done=arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke('m0_renderer_session').then(done)", asynchronous=True)
+
+                def pre_open_cursor(data):
+                    with sqlite3.connect(f"file:{data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
+                        row = db.execute("""
+                            SELECT i.cursor FROM remote_index i JOIN client_registrations r ON r.id=i.registration_id
+                            WHERE r.status='active'
+                        """).fetchone()
+                    return int(row[0]) if row else None
+
+                sync_details_script = """
+                    const [owner, nodeId, done] = arguments;
+                    const statuses=['connecting','ready','offline','auth_required','gateway_auth_required','needs_review'];
+                    const labels=[
+                      ['open_network', '서버에 연결할 수 없습니다. 연결 상태를 확인하고 다시 열어 주세요.'],
+                      ['open_deleted', '삭제된 문서입니다. 목록을 갱신해 주세요.'],
+                      ['open_changed', '문서가 계속 변경되고 있습니다. 목록을 갱신한 뒤 다시 열어 주세요.'],
+                      ['open_sync', '동기화 상태를 확인한 뒤 문서를 다시 열어 주세요.'],
+                      ['open_other', '문서를 열지 못했습니다. 상태를 확인한 뒤 다시 시도해 주세요.'],
+                      ['inventory_refresh', '문서 목록을 다시 불러와 주세요.'],
+                      ['editor_closed', '편집기 화면이 닫혔습니다.'],
+                      ['open_response', '잘못된 문서 응답입니다.'],
+                      ['other_document', '다른 문서의 응답입니다.'],
+                      ['composition', '한글 조합을 마친 뒤 문서를 전환해 주세요.'],
+                    ];
+                    const button=document.querySelector('[data-document="' + nodeId + '"]');
+                    const editor=document.querySelector('.cm-content');
+                    const alerts=[...document.querySelectorAll('[role=alert]')].map(el=>el.textContent ?? '');
+                    const result={focused:document.hasFocus(), button_present:!!button,
+                      button_disabled:!!button?.disabled, selected_target:button?.getAttribute('aria-current') === 'page',
+                      editor_present:!!editor, editor_editable:editor?.getAttribute('contenteditable') === 'true',
+                      alert_present:alerts.length > 0,
+                      error_labels:labels.filter(([, message])=>alerts.some(alert=>alert.includes(message))).map(([label])=>label),
+                      status:'unavailable'};
+                    window.__TAURI_INTERNALS__.invoke('workspace_sync_status', {request:{renderer_session_id:owner}})
+                      .then(value=>{result.status=statuses.includes(value.status) ? value.status : 'unknown'; done(result);})
+                      .catch(()=>done(result));
+                """
+
+                def remote_pre_open_ready():
+                    return pre_open_cursor(client_data) is not None and js(sync_details_script, setup_owner, document_id, asynchronous=True)["status"] == "ready"
+
+                try:
+                    wait(remote_pre_open_ready, seconds=45, description="remote change pre-open sync")
+                except TestFailure:
+                    try:
+                        print("M3 receiver pre-open diagnostic:", json.dumps({
+                            **js(sync_details_script, setup_owner, document_id, asynchronous=True),
+                            "cursor": pre_open_cursor(client_data),
+                        }), flush=True)
+                    except Exception:
+                        print("M3 receiver pre-open diagnostic unavailable.", flush=True)
+                    raise
+            test_stage = "open selected document"
             js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", document_id)
-            wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", document_id))
+            try:
+                wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')" , document_id), description="selected document editor")
+            except TestFailure:
+                if args.remote_change:
+                    try:
+                        diagnostic = js("""
+                            const [nodeId, done] = arguments;
+                            const button=document.querySelector('[data-document="' + nodeId + '"]');
+                            const selected=document.querySelector('[aria-current=page]');
+                            const editor=document.querySelector('.cm-content');
+                            const alerts=[...document.querySelectorAll('[role=alert]')].map(el=>el.textContent ?? '');
+                            const codes=['stale_renderer_session','stale_registration','not_connected','bootstrap_required',
+                              'stale_sync','server_not_ready','history_regressed','resync_required','binding_mismatch',
+                              'protocol_mismatch','document_not_found','network_error'];
+                            const labels=[
+                              ['open_network', '서버에 연결할 수 없습니다. 연결 상태를 확인하고 다시 열어 주세요.'],
+                              ['open_deleted', '삭제된 문서입니다. 목록을 갱신해 주세요.'],
+                              ['open_changed', '문서가 계속 변경되고 있습니다. 목록을 갱신한 뒤 다시 열어 주세요.'],
+                              ['open_sync', '동기화 상태를 확인한 뒤 문서를 다시 열어 주세요.'],
+                              ['open_other', '문서를 열지 못했습니다. 상태를 확인한 뒤 다시 시도해 주세요.'],
+                              ['inventory_refresh', '문서 목록을 다시 불러와 주세요.'],
+                              ['editor_closed', '편집기 화면이 닫혔습니다.'],
+                              ['open_response', '잘못된 문서 응답입니다.'],
+                              ['other_document', '다른 문서의 응답입니다.'],
+                              ['composition', '한글 조합을 마친 뒤 문서를 전환해 주세요.'],
+                            ];
+                            const statuses=['connecting','ready','offline','auth_required','gateway_auth_required','needs_review'];
+                            const result={button_present:!!button, button_disabled:!!button?.disabled,
+                              selected_target:button?.getAttribute('aria-current') === 'page',
+                              selected_other:!!selected && selected !== button,
+                              editor_present:!!editor, editor_editable:editor?.getAttribute('contenteditable') === 'true',
+                              focused:document.hasFocus(), alert_present:alerts.length > 0,
+                              error_codes:codes.filter(code=>alerts.some(alert=>alert.includes(code))),
+                              error_labels:labels.filter(([, message])=>alerts.some(alert=>alert.includes(message))).map(([label])=>label),
+                              status:'unavailable'};
+                            window.__TAURI_INTERNALS__.invoke('m0_renderer_session')
+                              .then(owner=>window.__TAURI_INTERNALS__.invoke('workspace_sync_status', {request:{renderer_session_id:owner}}))
+                              .then(value=>{result.status=statuses.includes(value.status) ? value.status : 'unknown'; done(result);})
+                              .catch(()=>done(result));
+                        """, document_id, asynchronous=True)
+                        print("M3 remote change open diagnostic:", json.dumps(diagnostic), flush=True)
+                    except Exception:
+                        print("M3 remote change open diagnostic unavailable.", flush=True)
+                raise
             require(checkpoint() is None, "unmodified document unexpectedly created a draft")
             opened_text = js("return document.querySelector('.cm-content').cmTile.root.view.state.doc.toString()")
             require(opened_text == original.decode("utf-8-sig").replace("\r\n", "\n"), "editor did not open the expected source")
+            if args.remote_change:
+                test_stage = "remote change initial sync"
+                owner = js("const done=arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke('m0_renderer_session').then(done)", asynchronous=True)
+
+                def remote_cursor():
+                    with sqlite3.connect(f"file:{client_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
+                        row = db.execute("""
+                            SELECT i.cursor FROM remote_index i JOIN client_registrations r ON r.id=i.registration_id
+                            WHERE r.status='active'
+                        """).fetchone()
+                    return int(row[0]) if row else None
+
+                def remote_ready():
+                    return js("""
+                        const done=arguments[arguments.length-1];
+                        window.__TAURI_INTERNALS__.invoke('workspace_sync_status', {request:{renderer_session_id:arguments[0]}})
+                          .then(value=>done(value.status === 'ready')).catch(()=>done(false));
+                    """, owner, asynchronous=True)
+
+                wait(lambda: remote_cursor() is not None and remote_ready(), seconds=45, description="remote change initial sync")
+                test_stage = "receiver focus setup"
+                remote_focus = capture_remote_change_focus()
+                wait(lambda: js("return document.hasFocus()"), seconds=10, description="receiver WebView initial focus")
+                test_stage = "peer client setup"
+                peer_data, peer_xdg_data, peer_xdg_cache, peer_xdg_config = (
+                    root / name for name in ("peer-client", "peer-xdg-data", "peer-xdg-cache", "peer-xdg-config")
+                )
+                for directory in (peer_data, peer_xdg_data, peer_xdg_cache, peer_xdg_config):
+                    directory.mkdir(mode=0o700)
+                peer_grant = admin("issue-pairing", admin_status["owner_principal_id"])
+                peer_port = free_port()
+                peer_origin = f"http://127.0.0.1:{peer_port}"
+                peer_environment = os.environ.copy()
+                peer_environment.update(
+                    TAURI_WEBVIEW_AUTOMATION="true", NOTRYX_M0_DATA_DIR=str(peer_data),
+                    XDG_DATA_HOME=str(peer_xdg_data), XDG_CACHE_HOME=str(peer_xdg_cache), XDG_CONFIG_HOME=str(peer_xdg_config),
+                )
+                peer_driver = subprocess.Popen(
+                    [args.driver, f"--port={peer_port}", "--host=127.0.0.1"], env=peer_environment,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+                )
+
+                def peer_wd(method, path, payload=None):
+                    data = None if payload is None else json.dumps(payload).encode()
+                    request = urllib.request.Request(peer_origin + path, data=data, method=method,
+                                                     headers={"Content-Type": "application/json"})
+                    try:
+                        with local_opener.open(request, timeout=35) as response:
+                            value = json.load(response)["value"]
+                        if isinstance(value, dict) and "error" in value:
+                            raise TestFailure(f"peer WebDriver returned an error: {test_stage}")
+                        return value
+                    except (OSError, ValueError, KeyError, urllib.error.HTTPError):
+                        raise TestFailure(f"peer WebDriver request failed: {test_stage}") from None
+
+                def peer_driver_ready():
+                    try:
+                        return leader_running(peer_driver) and driver_owns_port(peer_driver.pid, peer_port) and peer_wd("GET", "/status")
+                    except TestFailure:
+                        return False
+
+                wait(peer_driver_ready, seconds=45, description="peer WebDriver startup")
+                peer_session = peer_wd("POST", "/session", capabilities)["sessionId"]
+                peer_wd("POST", f"/session/{peer_session}/timeouts", {"script": 30000})
+
+                def peer_js(script, *values, asynchronous=False):
+                    mode = "async" if asynchronous else "sync"
+                    return peer_wd("POST", f"/session/{peer_session}/execute/{mode}", {"script": script, "args": list(values)})
+
+                wait(lambda: peer_js("const button=document.querySelector('.workspace-connect button'); return !!button && !button.disabled"), description="peer pairing form")
+                peer_js("""
+                    const form=document.querySelector('.workspace-connect');
+                    form.elements.namedItem('origin').value=arguments[0];
+                    form.elements.namedItem('workspace_id').value=arguments[1];
+                    form.elements.namedItem('pairing_secret').value=arguments[2];
+                    form.requestSubmit();
+                """, f"http://127.0.0.1:{port}", peer_grant["workspace_id"], peer_grant["pairing_secret"])
+                wait(lambda: peer_js("return !!document.querySelector('[data-document=\"' + arguments[0] + '\"]:not(:disabled)')", document_id), seconds=45, description="peer document list")
+                require(peer_js("return document.querySelector('[name=pairing_secret]').value === ''"), "peer pairing secret remained in form")
+                test_stage = "peer focus setup"
+                peer_focus = capture_remote_change_focus(exclude_window=remote_focus[2])
+                peer_focus[0].XCloseDisplay(peer_focus[1])
+                wait(lambda: peer_js("return document.hasFocus()"), seconds=10, description="peer WebView focus")
+                peer_owner = peer_js("const done=arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke('m0_renderer_session').then(done)", asynchronous=True)
+
+                def peer_pre_open_ready():
+                    return pre_open_cursor(peer_data) is not None and peer_js(sync_details_script, peer_owner, document_id, asynchronous=True)["status"] == "ready"
+
+                test_stage = "peer pre-open sync"
+                try:
+                    wait(peer_pre_open_ready, seconds=45, description="peer pre-open sync")
+                except TestFailure:
+                    try:
+                        print("M3 peer pre-open diagnostic:", json.dumps({
+                            **peer_js(sync_details_script, peer_owner, document_id, asynchronous=True),
+                            "cursor": pre_open_cursor(peer_data),
+                            "receiver_focused": js("return document.hasFocus()"),
+                        }), flush=True)
+                    except Exception:
+                        print("M3 peer pre-open diagnostic unavailable.", flush=True)
+                    raise
+                print("M3 peer pre-open state:", json.dumps({
+                    **peer_js(sync_details_script, peer_owner, document_id, asynchronous=True),
+                    "cursor": pre_open_cursor(peer_data),
+                    "receiver_focused": js("return document.hasFocus()"),
+                }), flush=True)
+                test_stage = "peer open selected document"
+                peer_js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", document_id)
+                try:
+                    wait(lambda: peer_js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", document_id), description="peer selected editor")
+                except TestFailure:
+                    try:
+                        print("M3 peer open diagnostic:", json.dumps({
+                            **peer_js(sync_details_script, peer_owner, document_id, asynchronous=True),
+                            "cursor": pre_open_cursor(peer_data),
+                            "receiver_focused": js("return document.hasFocus()"),
+                        }), flush=True)
+                    except Exception:
+                        print("M3 peer open diagnostic unavailable.", flush=True)
+                    raise
+                require(peer_js("return document.querySelector('.cm-content').cmTile.root.view.state.doc.toString()") == opened_text, "peer editor did not open original source")
+                with sqlite3.connect(f"file:{client_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
+                    local_device = db.execute("SELECT device_id FROM client_registrations WHERE status='active'").fetchone()
+                with sqlite3.connect(f"file:{peer_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
+                    peer_device = db.execute("SELECT device_id FROM client_registrations WHERE status='active'").fetchone()
+                require(local_device is not None and peer_device is not None and local_device != peer_device, "client stores do not have independent device registrations")
+                test_stage = "receiver draft setup"
+                saved = None
+                original_outbox = outbox_snapshot()
+                require(not original_outbox, "receiving client started with an unexpected outbox")
+                if args.remote_change == "dirty":
+                    marker = "\nSynthetic local edit 한글\n"
+                    js("""
+                        const element=document.querySelector('.cm-content');
+                        element.dispatchEvent(new CompositionEvent('compositionstart', {bubbles:true}));
+                        const view=element.cmTile.root.view;
+                        view.dispatch({changes:{from:view.state.doc.length,insert:arguments[0]},userEvent:'input.type'});
+                    """, marker)
+                    saved = wait(lambda: (row if (row := checkpoint()) and marker.encode() in row[1] else None), seconds=45, description="remote change durable draft")
+                    require(saved[2] == original and operation_count() == 0, "local draft was sent or lost its original base")
+                else:
+                    js("document.querySelector('.cm-content').cmTile.root.view.dispatch({selection:{anchor:10}})")
+
+                updated_text = opened_text.replace("Original source.", "Remote   source.")
+                require(updated_text != opened_text and len(updated_text) == len(opened_text), "synthetic peer edit is invalid")
+                updated = b"\xef\xbb\xbf" + updated_text.encode()
+                test_stage = "peer editor save"
+                peer_js("""
+                    const view=document.querySelector('.cm-content').cmTile.root.view;
+                    const from=view.state.doc.toString().indexOf('Original source.');
+                    view.dispatch({changes:{from,to:from+'Original source.'.length,insert:'Remote   source.'},userEvent:'input.type'});
+                """)
+
+                def peer_acknowledged():
+                    with sqlite3.connect(f"file:{peer_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
+                        row = db.execute("""
+                            SELECT o.status, o.operation_seq, s.ack_through FROM client_outbox o
+                            JOIN client_registrations r ON r.id=o.registration_id
+                            JOIN outbox_streams s ON s.registration_id=r.id
+                            WHERE r.status='active' AND o.document_id=? AND o.terminal_kind IS NULL
+                            ORDER BY o.operation_seq DESC LIMIT 1
+                        """, (document_id,)).fetchone()
+                    return row is not None and row[0] == 'committed' and row[2] >= row[1]
+
+                wait(lambda: (notes / "Test Folder" / "Example.md").read_bytes() == updated and peer_acknowledged(), seconds=60, description="peer editor save and acknowledgement")
+                peer_head = int(server_request("GET", "/v1/server-info", headers=authorization)["head_seq"])
+                peer_node = server_request("GET", f"/v1/nodes/{document_id}", headers=authorization)
+                test_stage = "receiver focus restore"
+                print("M3 resume focus before restore:", json.dumps({
+                    "receiver_focused": js("return document.hasFocus()"),
+                    "peer_focused": peer_js("return document.hasFocus()"),
+                    "cursor": remote_cursor(), "head": peer_head,
+                }), flush=True)
+                saved_focus, remote_focus = remote_focus, None
+                restore_open_race_focus(saved_focus)
+                wait(lambda: js("return document.hasFocus()"), seconds=10, description="receiver WebView focus restoration")
+                test_stage = "receiver resume metadata catch-up"
+
+                def remote_status():
+                    return js("""
+                        const done=arguments[arguments.length-1];
+                        const allowed=['connecting','ready','offline','auth_required','gateway_auth_required','needs_review'];
+                        window.__TAURI_INTERNALS__.invoke('workspace_sync_status', {request:{renderer_session_id:arguments[0]}})
+                          .then(value=>done(allowed.includes(value.status) ? value.status : 'unknown'))
+                          .catch(()=>done('unavailable'));
+                    """, owner, asynchronous=True)
+
+                def remote_metadata_snapshot():
+                    with sqlite3.connect(f"file:{client_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
+                        row = db.execute("""
+                            SELECT n.state, i.cursor FROM remote_nodes n
+                            JOIN remote_index i ON i.registration_id=n.registration_id
+                            JOIN client_registrations r ON r.id=n.registration_id
+                            WHERE r.status='active' AND n.node_id=?
+                        """, (document_id,)).fetchone()
+                    return {
+                        "cursor": int(row[1]) if row else None,
+                        "revision_matches": row is not None and json.loads(row[0])["content_rev"] == peer_node["content_rev"],
+                    }
+
+                def remote_metadata_applied():
+                    snapshot = remote_metadata_snapshot()
+                    return snapshot["cursor"] is not None and snapshot["cursor"] >= peer_head and snapshot["revision_matches"]
+
+                try:
+                    wait(remote_metadata_applied, seconds=45, description="peer metadata applied after receiver resume")
+                finally:
+                    try:
+                        print("M3 resume metadata diagnostic:", json.dumps({
+                            **remote_metadata_snapshot(), "head": peer_head,
+                            "receiver_focused": js("return document.hasFocus()"), "status": remote_status(),
+                        }), flush=True)
+                    except Exception:
+                        print("M3 resume metadata diagnostic unavailable.", flush=True)
+                require((notes / "Test Folder" / "Example.md").read_bytes() == updated, "peer update did not reach synthetic server file")
+                test_stage = "receiver editor result"
+                if args.remote_change == "clean":
+                    wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && document.querySelector('.cm-content')?.cmTile.root.view.state.doc.toString() === arguments[1]", document_id, updated_text), seconds=45, description="clean editor peer update")
+                    require(js("return document.querySelector('.cm-content').cmTile.root.view.state.selection.main.anchor") == 10, "clean editor did not preserve selection before changed text")
+                    require(checkpoint() is None and operation_count() == 0, "clean remote refresh created a local draft or operation")
+                    test_stage = "receiver first edit after remote refresh"
+                    first_edit = "\n합성 한글 편집\n"
+                    expected_bytes = updated + first_edit.encode()
+                    js("""
+                        const element=document.querySelector('.cm-content');
+                        element.dispatchEvent(new CompositionEvent('compositionstart', {bubbles:true}));
+                        const view=element.cmTile.root.view;
+                        view.dispatch({changes:{from:view.state.doc.length,insert:arguments[0]},userEvent:'input.type'});
+                    """, first_edit)
+                    first_checkpoint = wait(lambda: (row if (row := checkpoint()) and row[1] == expected_bytes else None), seconds=45, description="first post-refresh checkpoint")
+                    with sqlite3.connect(f"file:{client_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
+                        base_revision = db.execute("""
+                            SELECT b.revision FROM registered_documents d
+                            JOIN client_registrations r ON r.id=d.registration_id
+                            JOIN draft_bases b ON b.document_id=d.storage_id
+                            WHERE r.status='active' AND d.document_id=?
+                        """, (document_id,)).fetchone()
+                    require(first_checkpoint[0] == 1 and first_checkpoint[2] == updated and base_revision == (peer_node["content_rev"],), "first post-refresh checkpoint did not retain the peer base")
+                    require(operation_count() == 0 and (notes / "Test Folder" / "Example.md").read_bytes() == updated, "composition sent the post-refresh edit early")
+                    js("document.querySelector('.cm-content').dispatchEvent(new CompositionEvent('compositionend', {bubbles:true}))")
+                    test_stage = "receiver first edit acknowledgement"
+                    wait(lambda: (notes / "Test Folder" / "Example.md").read_bytes() == expected_bytes and acknowledged(first_checkpoint[0]), seconds=60, description="first post-refresh edit and acknowledgement")
+                    require(operation_count() == 1, "first post-refresh edit created an unexpected number of operations")
+                else:
+                    require(js("return document.querySelector('.cm-content').cmTile.root.view.state.doc.toString()") == opened_text + marker, "peer update replaced local editor text")
+                    require(checkpoint() == saved and outbox_snapshot() == original_outbox, "peer update changed the local draft, base or outbox")
+                    wait(lambda: js("return document.body.textContent.includes('다른 기기에서 변경됨')"), seconds=45, description="dirty editor peer change notice")
+                    require(js("return document.querySelector('.cm-content').cmTile.root.view.state.doc.toString()") == opened_text + marker, "dirty editor changed after peer notice")
+                    require(checkpoint() == saved and outbox_snapshot() == original_outbox, "dirty draft changed after peer notice")
+                print(f"M3 WebView resume catch-up passed: {args.remote_change} editor and synthetic peer.", flush=True)
+                return
+            if args.resync_race:
+                def document_change_count():
+                    with sqlite3.connect(f"file:{state / 'state.db'}?mode=ro", uri=True) as db:
+                        return db.execute("SELECT COUNT(*) FROM node_changes WHERE node_id=?", (document_id,)).fetchone()[0]
+
+                test_stage = "resync local checkpoint"
+                original_change_count = document_change_count()
+                resync_proxy.hold_put.set()
+                marker = "\nM3 synthetic sync race 한글\n"
+                js("""
+                    const view=document.querySelector('.cm-content').cmTile.root.view;
+                    view.dispatch({changes:{from:view.state.doc.length,insert:arguments[0]},userEvent:'input.type'});
+                """, marker)
+                saved = wait(lambda: (row if (row := checkpoint()) and marker.encode() in row[1] else None), seconds=45, description="resync durable checkpoint")
+                resync_proxy.mark("checkpoint_observed")
+                require(saved[2] == original, "initial checkpoint changed the base")
+                require(resync_proxy.put_response_held.wait(45), "PUT response was not held")
+                resync_proxy.mark("put_hold_observed")
+                require(not resync_proxy.failure.is_set(), "test proxy failed before resync")
+                require(operation_count() == 1 and checkpoint() == saved, "held PUT changed local checkpoint or outbox")
+                held_outbox = outbox_snapshot()
+                require((notes / "Test Folder" / "Example.md").read_bytes() == saved[1], "held PUT did not reach the synthetic server")
+                resync_proxy.mark("local_snapshot_checked")
+                test_stage = "resync head and 410"
+                previous_head = int(server_request("GET", "/v1/server-info", headers=authorization)["head_seq"])
+                resync_proxy.mark("pre_peer_head_read")
+                with resync_proxy.lock:
+                    resync_proxy.expected_head = previous_head + 1
+                    resync_proxy.inject_changes.set()
+                create(operation_id(), folder_id, "Remote change", "folder", 6)
+                resync_proxy.mark("peer_mutation_complete")
+                peer_head = int(server_request("GET", "/v1/server-info", headers=authorization)["head_seq"])
+                resync_proxy.mark("peer_head_read")
+                require(peer_head == previous_head + 1, "unexpected head change during synthetic peer mutation")
+                require(resync_proxy.head_delivered.wait(45), "peer head hint was not delivered to the client")
+                require(resync_proxy.changes_injected.wait(45), "changes request did not receive synthetic 410")
+                require(resync_proxy.inventory_held.wait(45), "rebootstrap inventory did not start")
+                resync_proxy.mark("inventory_hold_observed")
+                wait(lambda: js("return document.querySelector('#workspace-sync-status')?.textContent.includes('서버 동기화 중')"), seconds=45, description="resync connecting UI")
+                resync_proxy.mark("connecting_ui_observed")
+                require(sync_status() == "connecting", "resync did not expose its connecting state")
+                require(checkpoint() == saved and outbox_snapshot() == held_outbox, "resync changed checkpoint, base or outbox")
+                resync_proxy.mark("inventory_release")
+                resync_proxy.release_inventory.set()
+                test_stage = "resync bootstrap completion"
+
+                def resync_ready():
+                    cursor = sync_cursor()
+                    if cursor is None or cursor < peer_head:
+                        return False
+                    resync_proxy.mark("cursor_observed")
+                    if sync_status() != "ready":
+                        return False
+                    resync_proxy.mark("ready_native_observed")
+                    if not js("return !document.querySelector('#workspace-sync-status')"):
+                        return False
+                    resync_proxy.mark("ready_ui_observed")
+                    return True
+
+                wait(resync_ready, seconds=60, description="resync ready after bootstrap")
+                require(checkpoint() == saved and outbox_snapshot() == held_outbox, "bootstrap changed checkpoint, base or outbox")
+                resync_proxy.mark("margin_checked")
+                require(resync_proxy.put_started_at is not None and time.monotonic() - resync_proxy.put_started_at < 20,
+                        "resync exceeded the held PUT timeout margin")
+                resync_proxy.release_put.set()
+                test_stage = "resync late PUT response"
+                require(resync_proxy.put_response_delivered.wait(5), "held PUT response was not delivered")
+                require(resync_proxy.retry_lookup.wait(45), "scheduler did not recheck the held operation")
+                wait(lambda: acknowledged(saved[0]) and checkpoint()[1:] == (saved[1], saved[1]), seconds=60, description="resync operation acknowledgement")
+                resync_proxy.mark("acknowledgement_observed")
+                require(operation_count() == 1 and (notes / "Test Folder" / "Example.md").read_bytes() == saved[1], "operation was duplicated or server content changed")
+                with sqlite3.connect(f"file:{state / 'state.db'}?mode=ro", uri=True) as db:
+                    committed = db.execute("""
+                        SELECT COUNT(*) FROM change_sets c JOIN node_changes n ON n.seq=c.seq
+                        WHERE c.operation_id=? AND n.node_id=?
+                    """, (resync_proxy.operation_id, document_id)).fetchone()[0]
+                require(committed == 1 and document_change_count() == original_change_count + 1,
+                        "server journal did not record exactly one document change")
+                require(not resync_proxy.failure.is_set(), "test proxy failed during resync")
+                test_stage = "resync renderer reload"
+                wd("POST", f"/session/{session_id}/refresh", {})
+                wait(lambda: js("return !!document.querySelector('[data-document=\"' + arguments[0] + '\"]:not(:disabled)')", document_id), seconds=45, description="resync document list after reload")
+                js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", document_id)
+                wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", document_id), seconds=45, description="resync document reopen")
+                reopened = js("return document.querySelector('.cm-content').cmTile.root.view.state.doc.toString()")
+                require(marker in reopened and checkpoint()[1:] == (saved[1], saved[1]) and operation_count() == 1, "renderer reload changed the result")
+                print("M3 WebView resync race passed: held PUT, 410, bootstrap, operation recheck, ACK and renderer reload.")
+                return
             if not args.measure and not args.recovery_dialogs:
                 oversized = js("""
                     const view=document.querySelector('.cm-content').cmTile.root.view;
@@ -1363,18 +2121,42 @@ print(json.dumps({'sha256':hashlib.sha256(data).hexdigest(), 'length':len(data),
                 print("Recovery verification passed: copied source, dialog cancellation, new file bytes and existing file preservation.")
             print("M2 workspace WebView integration passed: synthetic pairing, image preview, server acknowledgement, reload, oversized read-only source, IPC isolation, offline draft and restart recovery.")
         finally:
-            if session_id:
+            if args.resync_race and resync_proxy:
+                print("M3 resync timing:", json.dumps(resync_proxy.diagnostics(), sort_keys=True), flush=True)
+            if peer_session and peer_wd:
                 try:
-                    wd("DELETE", f"/session/{session_id}")
+                    peer_wd("DELETE", f"/session/{peer_session}")
                 except Exception:
                     pass
-            stop(driver)
-            stop(server)
-            if remote_probe:
-                remote_probe.shutdown()
-                remote_probe.server_close()
-            if remote_thread:
-                remote_thread.join(timeout=5)
+            if remote_focus:
+                remote_focus[0].XCloseDisplay(remote_focus[1])
+            try:
+                stop(peer_driver)
+            finally:
+                try:
+                    restore_open_race_focus(race_focus)
+                except (OSError, ValueError):
+                    print("Isolated focus restoration failed.", file=sys.stderr, flush=True)
+                if session_id:
+                    try:
+                        wd("DELETE", f"/session/{session_id}")
+                    except Exception:
+                        pass
+                try:
+                    stop(driver)
+                finally:
+                    try:
+                        if resync_proxy:
+                            resync_proxy.close()
+                    finally:
+                        try:
+                            stop(server)
+                        finally:
+                            if remote_probe:
+                                remote_probe.shutdown()
+                                remote_probe.server_close()
+                            if remote_thread:
+                                remote_thread.join(timeout=5)
 
 
 if __name__ == "__main__":

@@ -121,6 +121,25 @@ pub struct InventoryPage {
     pub next_after_id: Option<NodeId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct ChangesPage {
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub workspace_epoch: WorkspaceEpoch,
+    #[schemars(with = "String", regex(pattern = "^[0-9]+$"))]
+    #[ts(type = "string")]
+    pub from_exclusive: ChangeSeq,
+    #[schemars(with = "String", regex(pattern = "^[0-9]+$"))]
+    #[ts(type = "string")]
+    pub through_seq: ChangeSeq,
+    #[schemars(with = "String", regex(pattern = "^[0-9]+$"))]
+    #[ts(type = "string")]
+    pub covered_through: ChangeSeq,
+    pub has_more: bool,
+    pub nodes: Vec<NodeState>,
+}
+
 // Schemars' required attribute removes Option nullability; schema_with keeps the key required.
 pub(crate) fn nullable_string_schema(
     generator: &mut schemars::SchemaGenerator,

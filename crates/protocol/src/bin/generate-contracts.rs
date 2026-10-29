@@ -2,19 +2,71 @@ use std::{collections::BTreeMap, error::Error, fs, path::PathBuf};
 
 use notryx_protocol::{
     AbandonRequest, AckRequest, AckResponse, AdminRecoverySummary, AdminRequest, AdminResponse,
-    AdminResult, ApiError, ClientStartupMode, ClientStartupStatus, CreateNodeRequest, HeadHint,
-    InventoryPage, M0CloseRequest, M0OpenRequest, M0OpenedDocument, M0SaveRequest,
-    M0SavedCheckpoint, MigrationDraft, MigrationInventory, MigrationInventoryRequest,
-    MigrationOperation, MigrationSource, MigrationSourceKind, MigrationSourceRequest,
-    MoveNodeRequest, NodeKind, NodeMetadata, NodeState, OperationError, OperationReceipt,
-    PairRequest, PairResponse, RestoreNodeRequest, ServerInfo, TrashNode, TrashPage,
-    UploadResponse, WorkspaceAbandonRequest, WorkspaceAbandonState, WorkspaceDocumentOutboxState,
-    WorkspaceDraft, WorkspaceDraftRequest, WorkspaceExternalLinkRequest, WorkspaceInventoryRequest,
-    WorkspaceLocalRequest, WorkspaceOpenRequest, WorkspaceOpenedDocument, WorkspaceOutboxEntry,
-    WorkspaceOutboxFailure, WorkspaceOutboxPage, WorkspaceOutboxRequest, WorkspaceOutboxStatus,
-    WorkspacePairRequest, WorkspacePairStatus, WorkspacePreviewImage, WorkspacePreviewImageRequest,
-    WorkspaceQueueRequest, WorkspaceQueuedOperation, WorkspaceRecoveryRequest,
-    WorkspaceRegistration, WorkspaceRole, WorkspaceSendResult, WorkspaceSendStatus,
+    AdminResult, AdminUnsupportedItem, ApiError, ChangesPage, ClientStartupMode,
+    ClientStartupStatus, CreateNodeRequest, DeviceCurrentRole, DeviceIdentity, HeadHint,
+    InventoryPage, JournalAccounting, M0CloseRequest, M0OpenRequest, M0OpenedDocument,
+    M0SaveRequest, M0SavedCheckpoint, MigrationDraft, MigrationInventory,
+    MigrationInventoryRequest, MigrationOperation, MigrationOperationKind, MigrationSource,
+    MigrationSourceKind, MigrationSourceRequest, MoveNodeRequest, NodeKind, NodeMetadata,
+    NodeState, OperationError, OperationReceipt, PairRequest, PairResponse, RestoreNodeRequest,
+    ServerInfo, TrashNode, TrashPage, UnsupportedItemReason, UploadResponse,
+    WorkspaceAbandonRequest, WorkspaceAbandonState, WorkspaceCacheWarning, WorkspaceConflictChoice,
+    WorkspaceConflictResolutionRequest, WorkspaceConflictResolutionResponse,
+    WorkspaceConflictResolutionState, WorkspaceContentConflictBlock,
+    WorkspaceContentConflictChooseRemoteRequest, WorkspaceContentConflictChooseRemoteResponse,
+    WorkspaceContentConflictCopyContentStatus, WorkspaceContentConflictCopyCreateFailure,
+    WorkspaceContentConflictCopyCreateStatus, WorkspaceContentConflictCopyProgressRequest,
+    WorkspaceContentConflictCopyProgressResponse, WorkspaceContentConflictCopyRequest,
+    WorkspaceContentConflictCopyResponse, WorkspaceContentConflictCopyRetryRequest,
+    WorkspaceContentConflictCopyStatus, WorkspaceContentConflictCopyStatusResponse,
+    WorkspaceContentConflictMergeFollowup, WorkspaceContentConflictMergeFollowupApprovalRequest,
+    WorkspaceContentConflictMergeFollowupStatusResponse, WorkspaceContentConflictMergeOperation,
+    WorkspaceContentConflictMergeStatusRequest, WorkspaceContentConflictMergeStatusResponse,
+    WorkspaceContentConflictProgressRequest, WorkspaceContentConflictProgressResponse,
+    WorkspaceContentConflictRef, WorkspaceContentConflictReopenRequest,
+    WorkspaceContentConflictReopenResponse, WorkspaceContentConflictRequest,
+    WorkspaceContentConflictSnapshot, WorkspaceCreateAbandonRequest, WorkspaceCreateEntry,
+    WorkspaceCreateListRequest, WorkspaceCreatePage, WorkspaceCreateParentsPage,
+    WorkspaceCreateParentsRequest, WorkspaceCreateQueueRequest, WorkspaceCreateStatus,
+    WorkspaceCredentialState, WorkspaceCredentialStatus, WorkspaceDeleteAbandonRequest,
+    WorkspaceDeleteEntry, WorkspaceDeleteListRequest, WorkspaceDeletePage,
+    WorkspaceDeleteQueueRequest, WorkspaceDeleteStatus, WorkspaceDeletedDraftCopyBlockingFollowup,
+    WorkspaceDeletedDraftCopyConfirmRequest, WorkspaceDeletedDraftCopyConfirmResult,
+    WorkspaceDeletedDraftCopyConfirmStatus, WorkspaceDeletedDraftCopyFollowupAbandonRequest,
+    WorkspaceDeletedDraftCopyFollowupAbandonResult, WorkspaceDeletedDraftCopyProgressRequest,
+    WorkspaceDeletedDraftCopyProgressResult, WorkspaceDeletedDraftCopyReconfirmRequest,
+    WorkspaceDeletedDraftCopyReopenRequest, WorkspaceDeletedDraftCopyReopenResponse,
+    WorkspaceDeletedDraftCopySnapshot, WorkspaceDeletedDraftCopySnapshotRequest,
+    WorkspaceDeletedDraftCopyStatus, WorkspaceDeletedDraftCopyStatusRequest,
+    WorkspaceDirtyRemoteRequest, WorkspaceDirtyRemoteState, WorkspaceDocumentOutboxState,
+    WorkspaceDraft, WorkspaceDraftRequest, WorkspaceExternalLinkRequest,
+    WorkspaceFrozenContentApplyChoice, WorkspaceFrozenContentApplyRequest,
+    WorkspaceFrozenContentApplyResponse, WorkspaceFrozenContentCrossEpochApplyRequest,
+    WorkspaceFrozenContentCrossEpochInspection, WorkspaceFrozenContentCrossEpochTarget,
+    WorkspaceFrozenContentDecision, WorkspaceFrozenContentDecisionStatusRequest,
+    WorkspaceFrozenContentDecisionStatusResponse, WorkspaceFrozenContentDismissRequest,
+    WorkspaceFrozenContentDismissed, WorkspaceFrozenContentInspectRequest,
+    WorkspaceFrozenContentInspection, WorkspaceFrozenContentLocalDismissRequest,
+    WorkspaceFrozenContentLocalInspectRequest, WorkspaceFrozenContentLocalInspection,
+    WorkspaceFrozenContentRemoteEvidence, WorkspaceFrozenCreateChoice,
+    WorkspaceFrozenCreateDecisionRequest, WorkspaceFrozenCreateEntry,
+    WorkspaceFrozenCreateListRequest, WorkspaceFrozenCreatePage, WorkspaceFrozenDeleteChoice,
+    WorkspaceFrozenDeleteDecisionRequest, WorkspaceFrozenDeleteEntry,
+    WorkspaceFrozenDeleteListRequest, WorkspaceFrozenDeletePage, WorkspaceFrozenMoveChoice,
+    WorkspaceFrozenMoveDecisionRequest, WorkspaceFrozenMoveEntry, WorkspaceFrozenMoveListRequest,
+    WorkspaceFrozenMovePage, WorkspaceInventoryRequest, WorkspaceLocalRequest,
+    WorkspaceMoveAbandonRequest, WorkspaceMoveEntry, WorkspaceMoveListRequest, WorkspaceMovePage,
+    WorkspaceMoveQueueRequest, WorkspaceMoveStatus, WorkspaceOpenNotice, WorkspaceOpenRequest,
+    WorkspaceOpenedDocument, WorkspaceOutboxEntry, WorkspaceOutboxFailure, WorkspaceOutboxPage,
+    WorkspaceOutboxRequest, WorkspaceOutboxStatus, WorkspacePairRequest, WorkspacePairStatus,
+    WorkspacePreviewImage, WorkspacePreviewImageRequest, WorkspaceQueueRequest,
+    WorkspaceQueuedOperation, WorkspaceRecoveryRequest, WorkspaceRegistration,
+    WorkspaceRemoteRefreshCandidate, WorkspaceRemoteRefreshCommitRequest,
+    WorkspaceRemoteRefreshRequest, WorkspaceRestoreAbandonRequest, WorkspaceRestoreEntry,
+    WorkspaceRestoreListRequest, WorkspaceRestorePage, WorkspaceRestoreQueueRequest,
+    WorkspaceRestoreStatus, WorkspaceRole, WorkspaceSearchCancelRequest, WorkspaceSearchPage,
+    WorkspaceSearchRequest, WorkspaceSearchResult, WorkspaceSearchScope, WorkspaceSearchSource,
+    WorkspaceSendResult, WorkspaceSendStatus, WorkspaceSyncState, WorkspaceSyncStatus,
 };
 use schemars::{JsonSchema, schema_for};
 use ts_rs::{Config, TS};
@@ -55,12 +107,211 @@ fn main() -> Result<(), Box<dyn Error>> {
     add_type::<WorkspacePairRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceInventoryRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceOpenRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceRemoteRefreshRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceRemoteRefreshCandidate>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceRemoteRefreshCommitRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDirtyRemoteRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeletedDraftCopySnapshotRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeletedDraftCopySnapshot>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeletedDraftCopyConfirmRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeletedDraftCopyConfirmResult>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeletedDraftCopyConfirmStatus>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeletedDraftCopyStatusRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeletedDraftCopyStatus>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeletedDraftCopyBlockingFollowup>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceDeletedDraftCopyFollowupAbandonRequest>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceDeletedDraftCopyFollowupAbandonResult>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceDeletedDraftCopyProgressRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeletedDraftCopyProgressResult>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeletedDraftCopyReopenRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeletedDraftCopyReopenResponse>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeletedDraftCopyReconfirmRequest>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceContentConflictRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceContentConflictSnapshot>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenContentInspectRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenContentInspection>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenContentApplyChoice>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenContentApplyRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenContentApplyResponse>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenContentCrossEpochTarget>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenContentCrossEpochInspection>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceFrozenContentCrossEpochApplyRequest>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceFrozenContentDismissRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenContentDismissed>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenContentRemoteEvidence>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenContentLocalInspection>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenContentLocalInspectRequest>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceFrozenContentLocalDismissRequest>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceFrozenContentDecision>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenContentDecisionStatusRequest>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceFrozenContentDecisionStatusResponse>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceContentConflictChooseRemoteRequest>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceContentConflictChooseRemoteResponse>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceContentConflictCopyRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceContentConflictCopyResponse>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceContentConflictCopyProgressResponse>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceContentConflictCopyProgressRequest>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceContentConflictCopyRetryRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceContentConflictCopyCreateStatus>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceContentConflictCopyCreateFailure>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceContentConflictCopyContentStatus>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceContentConflictCopyStatus>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceContentConflictCopyStatusResponse>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceContentConflictProgressRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceContentConflictMergeOperation>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceContentConflictMergeFollowup>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceContentConflictMergeFollowupApprovalRequest>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceContentConflictMergeFollowupStatusResponse>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceContentConflictMergeStatusRequest>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceContentConflictMergeStatusResponse>(
+        &config,
+        &mut declarations,
+        &mut schemas,
+    )?;
+    add_type::<WorkspaceContentConflictProgressResponse>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceContentConflictReopenRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceContentConflictReopenResponse>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceConflictChoice>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceConflictResolutionRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceConflictResolutionResponse>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceConflictResolutionState>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDirtyRemoteState>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceCacheWarning>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceOpenNotice>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceOpenedDocument>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceRegistration>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceSearchScope>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceSearchSource>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceSearchRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceSearchCancelRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceSearchResult>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceSearchPage>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceRestoreAbandonRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceRestoreQueueRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceRestoreListRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceRestoreStatus>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceRestoreEntry>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceRestorePage>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeleteQueueRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeleteListRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeleteAbandonRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeleteStatus>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeleteEntry>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceDeletePage>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceMoveQueueRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceMoveListRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceMoveAbandonRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceMoveStatus>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceMoveEntry>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceMovePage>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceCreateAbandonRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceCreateQueueRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceCreateParentsRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceCreateParentsPage>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenDeleteChoice>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenDeleteDecisionRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenDeleteEntry>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenDeleteListRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenDeletePage>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenMoveChoice>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenMoveDecisionRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenMoveEntry>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenMoveListRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenMovePage>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenCreateChoice>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenCreateDecisionRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenCreateEntry>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenCreateListRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceFrozenCreatePage>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceCreateListRequest>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceCreateStatus>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceCreateEntry>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceCreatePage>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceDraft>(&config, &mut declarations, &mut schemas)?;
     add_type::<ClientStartupMode>(&config, &mut declarations, &mut schemas)?;
     add_type::<ClientStartupStatus>(&config, &mut declarations, &mut schemas)?;
     add_type::<MigrationDraft>(&config, &mut declarations, &mut schemas)?;
+    add_type::<MigrationOperationKind>(&config, &mut declarations, &mut schemas)?;
     add_type::<MigrationOperation>(&config, &mut declarations, &mut schemas)?;
     add_type::<MigrationInventory>(&config, &mut declarations, &mut schemas)?;
     add_type::<MigrationInventoryRequest>(&config, &mut declarations, &mut schemas)?;
@@ -68,6 +319,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     add_type::<MigrationSourceRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<MigrationSource>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspacePairStatus>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceSyncStatus>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceSyncState>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceCredentialStatus>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceCredentialState>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceLocalRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceDraftRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspacePreviewImageRequest>(&config, &mut declarations, &mut schemas)?;
@@ -79,6 +334,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     add_type::<WorkspaceQueuedOperation>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceSendStatus>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceSendResult>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceContentConflictBlock>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceContentConflictRef>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceOutboxStatus>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceAbandonState>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceOutboxFailure>(&config, &mut declarations, &mut schemas)?;
@@ -90,6 +347,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     add_type::<NodeKind>(&config, &mut declarations, &mut schemas)?;
     add_type::<PairRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<PairResponse>(&config, &mut declarations, &mut schemas)?;
+    add_type::<DeviceIdentity>(&config, &mut declarations, &mut schemas)?;
+    add_type::<DeviceCurrentRole>(&config, &mut declarations, &mut schemas)?;
     add_type::<ServerInfo>(&config, &mut declarations, &mut schemas)?;
     add_type::<UploadResponse>(&config, &mut declarations, &mut schemas)?;
     add_type::<NodeMetadata>(&config, &mut declarations, &mut schemas)?;
@@ -98,6 +357,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     add_type::<RestoreNodeRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<NodeState>(&config, &mut declarations, &mut schemas)?;
     add_type::<InventoryPage>(&config, &mut declarations, &mut schemas)?;
+    add_type::<ChangesPage>(&config, &mut declarations, &mut schemas)?;
     add_type::<TrashNode>(&config, &mut declarations, &mut schemas)?;
     add_type::<TrashPage>(&config, &mut declarations, &mut schemas)?;
     declarations.push_str("export type CreatedNode = NodeState;\n");
@@ -113,6 +373,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     add_type::<AbandonRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<AdminRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<AdminRecoverySummary>(&config, &mut declarations, &mut schemas)?;
+    add_type::<AdminUnsupportedItem>(&config, &mut declarations, &mut schemas)?;
+    add_type::<UnsupportedItemReason>(&config, &mut declarations, &mut schemas)?;
+    add_type::<JournalAccounting>(&config, &mut declarations, &mut schemas)?;
     add_type::<AdminResult>(&config, &mut declarations, &mut schemas)?;
     add_type::<AdminResponse>(&config, &mut declarations, &mut schemas)?;
 

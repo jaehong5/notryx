@@ -33,7 +33,9 @@ fn upload_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String
     Ok(value)
 }
 
-fn content_hash<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+pub(crate) fn content_hash<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
     let value = String::deserialize(deserializer)?;
     if !value.strip_prefix("sha256:").is_some_and(|hash| {
         hash.len() == 64

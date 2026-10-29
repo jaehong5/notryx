@@ -1,4 +1,4 @@
-use notryx_domain::{OperationId, WorkspaceEpoch, WorkspaceId};
+use notryx_domain::{ChangeSeq, OperationId, WorkspaceEpoch, WorkspaceId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -11,6 +11,15 @@ use crate::{WorkspaceRole, http::decimal_u64};
 pub enum AdminRequest {
     // Internally tagged unit variants ignore unknown fields even with deny_unknown_fields.
     Status {},
+    JournalStatus {},
+    UnsupportedItems {
+        #[serde(deserialize_with = "crate::node::required_nullable")]
+        #[schemars(schema_with = "crate::node::nullable_string_schema")]
+        #[ts(type = "string | null")]
+        snapshot_id: Option<String>,
+        offset: u16,
+        limit: u8,
+    },
     RecoveryList {
         #[serde(deserialize_with = "crate::node::required_nullable")]
         #[schemars(schema_with = "crate::node::nullable_string_schema")]
@@ -78,6 +87,40 @@ pub enum AdminResponse {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[ts(tag = "kind", rename_all = "snake_case")]
 pub enum AdminResult {
+    JournalStatus {
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        workspace_epoch: WorkspaceEpoch,
+        #[schemars(with = "String", regex(pattern = "^[0-9]+$"))]
+        #[ts(type = "string")]
+        head_seq: ChangeSeq,
+        #[schemars(with = "String", regex(pattern = "^[0-9]+$"))]
+        #[ts(type = "string")]
+        journal_floor_seq: ChangeSeq,
+        #[serde(deserialize_with = "decimal_u64")]
+        #[schemars(regex(pattern = "^[0-9]+$"))]
+        logical_bytes: String,
+        #[serde(deserialize_with = "decimal_u64")]
+        #[schemars(regex(pattern = "^[0-9]+$"))]
+        budget_bytes: String,
+        budget_exceeded: bool,
+        accounting: JournalAccounting,
+    },
+    UnsupportedItems {
+        #[serde(deserialize_with = "crate::node::required_nullable")]
+        #[schemars(schema_with = "crate::node::nullable_string_schema")]
+        #[ts(type = "string | null")]
+        snapshot_id: Option<String>,
+        #[serde(deserialize_with = "crate::node::required_nullable")]
+        #[schemars(schema_with = "crate::node::nullable_string_schema")]
+        #[ts(type = "string | null")]
+        previous_snapshot_id: Option<String>,
+        entries: Vec<AdminUnsupportedItem>,
+        coverage_complete: bool,
+        stale: bool,
+        truncated: bool,
+        next_offset: Option<u16>,
+    },
     RecoveryList {
         entries: Vec<AdminRecoverySummary>,
         #[serde(deserialize_with = "crate::node::required_nullable")]
@@ -126,6 +169,35 @@ pub enum AdminResult {
         expires_at: String,
     },
     Done {},
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum JournalAccounting {
+    SqliteBlobLengthsV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum UnsupportedItemReason {
+    Symlink,
+    HardLink,
+    SpecialFile,
+    InvalidName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct AdminUnsupportedItem {
+    pub parent_path: String,
+    pub name_hex: String,
+    #[serde(deserialize_with = "crate::node::required_nullable")]
+    #[schemars(schema_with = "crate::node::nullable_string_schema")]
+    #[ts(type = "string | null")]
+    pub name_utf8: Option<String>,
+    pub reason: UnsupportedItemReason,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]

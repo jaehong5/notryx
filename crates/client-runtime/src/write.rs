@@ -9,6 +9,7 @@ use notryx_protocol::{
 };
 use reqwest::{Response, StatusCode, header};
 use sha2::{Digest, Sha256};
+use std::future::Future;
 
 #[derive(Clone)]
 pub struct ContentMutation {
@@ -61,6 +62,14 @@ impl ContentMutation {
     }
 
     fn verify_receipt(&self, receipt: &OperationReceipt) -> Result<(), Error> {
+        if let OperationReceipt::PreconditionFailed {
+            current_content_rev,
+            ..
+        } = receipt
+            && current_content_rev == &self.expected_revision
+        {
+            return Err(Error::Contract);
+        }
         ReceiptProof {
             binding: &self.binding,
             operation_id: self.operation_id,
@@ -186,7 +195,7 @@ fn receipt_status_matches(status: StatusCode, code: &str, receipt: &OperationRec
     }
 }
 
-fn api_error(status: StatusCode, error: &ApiError) -> Error {
+pub(crate) fn api_error(status: StatusCode, error: &ApiError) -> Error {
     match (status.as_u16(), error.code.as_str()) {
         (404, "not_found") => Error::OperationNotFound,
         (410, "operation_retired") => Error::OperationRetired,
@@ -200,7 +209,7 @@ fn api_error(status: StatusCode, error: &ApiError) -> Error {
     }
 }
 
-async fn response_body(response: Response) -> Result<(StatusCode, Vec<u8>), Error> {
+pub(crate) async fn response_body(response: Response) -> Result<(StatusCode, Vec<u8>), Error> {
     let status = response.status();
     let media_type = content_type(&response)?;
     let gateway_response = status.is_redirection()
@@ -282,6 +291,13 @@ impl Session {
     }
 
     pub async fn put_content(&self, request: &ContentMutation) -> Result<OperationReceipt, Error> {
+        self.prepare_put_content(request)?.await
+    }
+
+    pub fn prepare_put_content<'a>(
+        &'a self,
+        request: &'a ContentMutation,
+    ) -> Result<impl Future<Output = Result<OperationReceipt, Error>> + 'a, Error> {
         request.validate(self)?;
         let etag = StrongEtag::from_content_revision(&request.expected_revision)
             .map_err(|_| Error::InvalidRequest)?;
@@ -290,7 +306,7 @@ impl Session {
             STANDARD.encode(Sha256::digest(&request.bytes))
         );
         let path = format!("/v1/nodes/{}/content", request.node_id);
-        let response = self
+        let prepared = self
             .client
             .put(self.origin.join(&path).map_err(|_| Error::InvalidRequest)?)
             .header(header::AUTHORIZATION, self.authorization.clone())
@@ -308,31 +324,38 @@ impl Session {
             .header("x-operation-seq", request.operation_seq.to_string())
             .header("idempotency-key", request.operation_id.to_string())
             .body(request.bytes.clone())
-            .send()
-            .await
-            .map_err(|_| Error::Network)?;
-        let (status, body) = response_body(response).await?;
-        let receipt = if status == StatusCode::OK {
-            let receipt =
-                serde_json::from_slice::<OperationReceipt>(&body).map_err(|_| Error::Contract)?;
-            if !matches!(
-                receipt,
-                OperationReceipt::Committed { .. } | OperationReceipt::Abandoned { .. }
-            ) {
-                return Err(Error::Contract);
-            }
-            receipt
-        } else if let Ok(error) = serde_json::from_slice::<OperationError>(&body) {
-            if !receipt_status_matches(status, &error.code, &error.operation) {
-                return Err(Error::Contract);
-            }
-            error.operation
-        } else {
-            let error = serde_json::from_slice::<ApiError>(&body).map_err(|_| Error::Contract)?;
-            return Err(api_error(status, &error));
-        };
-        request.verify_receipt(&receipt)?;
-        Ok(receipt)
+            .build()
+            .map_err(|_| Error::InvalidRequest)?;
+        Ok(async move {
+            let response = self
+                .client
+                .execute(prepared)
+                .await
+                .map_err(|_| Error::Network)?;
+            let (status, body) = response_body(response).await?;
+            let receipt = if status == StatusCode::OK {
+                let receipt = serde_json::from_slice::<OperationReceipt>(&body)
+                    .map_err(|_| Error::Contract)?;
+                if !matches!(
+                    receipt,
+                    OperationReceipt::Committed { .. } | OperationReceipt::Abandoned { .. }
+                ) {
+                    return Err(Error::Contract);
+                }
+                receipt
+            } else if let Ok(error) = serde_json::from_slice::<OperationError>(&body) {
+                if !receipt_status_matches(status, &error.code, &error.operation) {
+                    return Err(Error::Contract);
+                }
+                error.operation
+            } else {
+                let error =
+                    serde_json::from_slice::<ApiError>(&body).map_err(|_| Error::Contract)?;
+                return Err(api_error(status, &error));
+            };
+            request.verify_receipt(&receipt)?;
+            Ok(receipt)
+        })
     }
 
     pub async fn operation(&self, request: &ContentMutation) -> Result<OperationLookup, Error> {

@@ -22,6 +22,7 @@ async fn exact_retry_receipt_lookup_conflict_and_ack_use_the_real_server() {
     let document = workspace.adopt_root_document("Example.md").await.unwrap();
     workspace.close().await.unwrap();
     let config = Config {
+        sync: Default::default(),
         server: ServerConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
             admin_socket: directory.path().join("admin.sock"),

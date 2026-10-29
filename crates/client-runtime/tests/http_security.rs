@@ -107,7 +107,7 @@ async fn gateway_auth_is_distinct_from_a_valid_app_auth_error() {
                 "Content-Type: application/json\r\n",
                 &forbidden,
             ),
-            Error::Unauthorized,
+            Error::Forbidden,
         ),
         (
             response("403 Forbidden", "Content-Type: text/html\r\n", "sign in"),

@@ -41,6 +41,7 @@ async fn paired_client_reads_inventory_and_exact_committed_bytes() {
     );
     workspace.close().await.unwrap();
     let config = Config {
+        sync: Default::default(),
         server: ServerConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
             admin_socket: directory.path().join("admin.sock"),

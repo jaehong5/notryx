@@ -337,10 +337,22 @@ impl LiteralMatcher {
     }
 }
 
+fn small_ascii_match(source: &str, query: &str) -> Option<bool> {
+    // Keep large documents on the cooperative scan path so cancellation stays bounded.
+    if source.len() > 64 * 1024 || !source.is_ascii() {
+        return None;
+    }
+    let pattern: String = query.nfc().collect();
+    Some(!pattern.is_empty() && source.contains(&pattern))
+}
+
 pub fn search_contains(bytes: &[u8], query: &str) -> bool {
     let Ok(source) = std::str::from_utf8(bytes) else {
         return false;
     };
+    if let Some(matched) = small_ascii_match(source, query) {
+        return matched;
+    }
     let Some(mut matcher) = LiteralMatcher::new(query) else {
         return false;
     };
@@ -358,6 +370,9 @@ pub async fn search_contains_cancellable(
     let Ok(source) = std::str::from_utf8(bytes) else {
         return (!cancelled.load(Ordering::Acquire)).then_some(false);
     };
+    if let Some(matched) = small_ascii_match(source, query) {
+        return (!cancelled.load(Ordering::Acquire)).then_some(matched);
+    }
     let Some(mut matcher) = LiteralMatcher::new(query) else {
         return (!cancelled.load(Ordering::Acquire)).then_some(false);
     };
@@ -533,25 +548,32 @@ impl ClientStore {
                 return Ok(false);
             }
         }
-        let matches: i64 = match candidate.source {
-            SearchSource::Draft => sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM registered_documents d
+        // Borrow the row bytes to avoid copying a whole document into SQL bind buffers.
+        let current = match candidate.source {
+            SearchSource::Draft => sqlx::query(
+                "SELECT c.bytes FROM registered_documents d
                     JOIN draft_checkpoints c ON c.document_id=d.storage_id
-                    WHERE d.registration_id=? AND d.document_id=? AND c.bytes=?)",
+                    WHERE d.registration_id=? AND d.document_id=? AND length(c.bytes)=?",
             ),
-            SearchSource::Cache => sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM cached_content
-                    WHERE registration_id=? AND node_id=? AND bytes=?)",
+            SearchSource::Cache => sqlx::query(
+                "SELECT bytes FROM cached_content
+                    WHERE registration_id=? AND node_id=? AND length(bytes)=?",
             ),
         }
         .bind(registration)
         .bind(candidate.node_id.to_string())
-        .bind(&candidate.bytes)
-        .fetch_one(&mut *tx)
+        .bind(candidate.bytes.len() as i64)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(storage_error)?;
+        let matches = match current {
+            Some(row) => {
+                row.try_get::<&[u8], _>("bytes").map_err(storage_error)? == candidate.bytes
+            }
+            None => false,
+        };
         tx.commit().await.map_err(storage_error)?;
-        Ok(matches == 1)
+        Ok(matches)
     }
 
     pub async fn search_candidates(

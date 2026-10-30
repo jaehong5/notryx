@@ -281,6 +281,10 @@ fn literal_nfc_matching_handles_korean_and_invalid_source() {
 async fn cancellable_literal_matching_preserves_nfc_across_yield_boundaries() {
     let cancelled = AtomicBool::new(false);
     let sources = [
+        "ASCII K, case-sensitive text and 100%_".to_owned(),
+        format!("{} K %_", "x".repeat(32 * 1024)),
+        format!("{} K %_", "x".repeat(64 * 1024 - 5)),
+        format!("{} K %_", "x".repeat(64 * 1024)),
         "e\u{301} K 각 가나 100%_".to_owned(),
         format!("{}e\u{301}각a\u{315}\u{300}x", "x".repeat(4095)),
         format!("{}각{}", "ab".repeat(4096), "z".repeat(4096)),
@@ -289,6 +293,8 @@ async fn cancellable_literal_matching_preserves_nfc_across_yield_boundaries() {
         "é",
         "e",
         "K",
+        "K",
+        "k",
         "각",
         "각",
         "가나",

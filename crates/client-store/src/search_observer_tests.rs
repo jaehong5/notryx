@@ -94,6 +94,83 @@ async fn observation_with_pause(
 }
 
 #[tokio::test]
+async fn candidate_revalidation_checks_exact_draft_and_cache_bytes() {
+    let (_directory, mut store, binding, _) = seeded().await;
+    let page = store.search_candidates(&binding, None, 100).await.unwrap();
+    let draft = &page.candidates[0];
+    assert_eq!(draft.source, SearchSource::Draft);
+    let node = draft.node().unwrap().clone();
+    let storage_id: String =
+        sqlx::query_scalar("SELECT storage_id FROM registered_documents WHERE document_id=?")
+            .bind(DOCUMENT)
+            .fetch_one(&mut store.connection)
+            .await
+            .unwrap();
+    for bytes in [b"drafx".as_slice(), b"draft!", b"draft"] {
+        sqlx::query("UPDATE draft_checkpoints SET bytes=? WHERE document_id=?")
+            .bind(bytes)
+            .bind(&storage_id)
+            .execute(&mut store.connection)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .search_candidate_is_current(&binding, draft)
+                .await
+                .unwrap(),
+            bytes == b"draft"
+        );
+    }
+    sqlx::query("DELETE FROM draft_bases WHERE document_id=?")
+        .bind(&storage_id)
+        .execute(&mut store.connection)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM draft_checkpoints WHERE document_id=?")
+        .bind(&storage_id)
+        .execute(&mut store.connection)
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .search_candidate_is_current(&binding, draft)
+            .await
+            .unwrap()
+    );
+
+    assert!(store.cache_content(&binding, &node, b"base").await.unwrap());
+    let page = store.search_candidates(&binding, None, 100).await.unwrap();
+    let cached = &page.candidates[0];
+    assert_eq!(cached.source, SearchSource::Cache);
+    for bytes in [b"basx".as_slice(), b"bases", b"base"] {
+        sqlx::query("UPDATE cached_content SET bytes=? WHERE node_id=?")
+            .bind(bytes)
+            .bind(DOCUMENT)
+            .execute(&mut store.connection)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .search_candidate_is_current(&binding, cached)
+                .await
+                .unwrap(),
+            bytes == b"base"
+        );
+    }
+    sqlx::query("DELETE FROM cached_content WHERE node_id=?")
+        .bind(DOCUMENT)
+        .execute(&mut store.connection)
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .search_candidate_is_current(&binding, cached)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn paused_search_observation_does_not_block_checkpoint_or_publish_stale_draft() {
     let (_directory, store, binding, edit_session) = seeded().await;
     let observer = store.search_observer().unwrap();

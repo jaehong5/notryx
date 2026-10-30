@@ -489,7 +489,7 @@ def main():
     parser.add_argument("--resync-race", action="store_true")
     parser.add_argument("--open-race", action="store_true")
     parser.add_argument("--open-race-delete", action="store_true")
-    parser.add_argument("--remote-change", choices=("clean", "dirty"))
+    parser.add_argument("--remote-change", choices=("clean", "dirty", "reopen"))
     args = parser.parse_args()
     require(not (args.measure and args.recovery_dialogs), "performance and dialog verification must run separately")
     require(not args.paste_probe or args.measure, "paste probe requires the release measurement setup")
@@ -1053,13 +1053,11 @@ def main():
                     except Exception:
                         print("M3 receiver pre-open diagnostic unavailable.", flush=True)
                     raise
-            test_stage = "initial synchronization before document open"
+            test_stage = "document button ready after initial synchronization"
             wait(lambda: js("""
-                const done=arguments[arguments.length-1];
-                window.__TAURI_INTERNALS__.invoke('m0_renderer_session')
-                  .then(owner=>window.__TAURI_INTERNALS__.invoke('workspace_sync_status', {request:{renderer_session_id:owner}}))
-                  .then(state=>done(state.status === 'ready')).catch(()=>done(false));
-            """, asynchronous=True), seconds=45, description="initial synchronization before document open")
+                const button=document.querySelector('[data-document="' + arguments[0] + '"]');
+                return !!button && !button.disabled;
+            """, document_id), seconds=45, description="document button ready after initial synchronization")
             test_stage = "open selected document"
             js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", document_id)
             try:
@@ -1132,6 +1130,46 @@ def main():
                 test_stage = "receiver focus setup"
                 remote_focus = capture_remote_change_focus()
                 wait(lambda: js("return document.hasFocus()"), seconds=10, description="receiver WebView initial focus")
+
+                def checkpoint_base_revision():
+                    with sqlite3.connect(f"file:{client_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
+                        return db.execute("""
+                            SELECT b.revision FROM registered_documents d
+                            JOIN client_registrations r ON r.id=d.registration_id
+                            JOIN draft_bases b ON b.document_id=d.storage_id
+                            WHERE r.status='active' AND d.document_id=?
+                        """, (document_id,)).fetchone()
+
+                def confirmed_content(generation):
+                    with sqlite3.connect(f"file:{client_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
+                        row = db.execute("""
+                            SELECT o.expected_revision, o.bytes FROM client_outbox o
+                            JOIN client_registrations r ON r.id=o.registration_id
+                            JOIN outbox_streams s ON s.registration_id=r.id
+                            WHERE r.status='active' AND o.document_id=? AND o.generation=?
+                              AND o.operation_kind='content' AND o.status='committed'
+                              AND o.terminal_kind IS NULL AND s.confirmed_through>=o.operation_seq
+                        """, (document_id, generation)).fetchone()
+                    return row if row and acknowledged(generation) else None
+
+                if args.remote_change == "reopen":
+                    test_stage = "receiver initial save and confirmed ACK"
+                    initial_revision = server_request("GET", f"/v1/nodes/{document_id}", headers=authorization)["content_rev"]
+                    initial_edit = "\nPreviously saved on this device.\n"
+                    opened_text += initial_edit
+                    initial_bytes = b"\xef\xbb\xbf" + opened_text.encode()
+                    js("""const view=document.querySelector('.cm-content').cmTile.root.view;
+                        view.dispatch({changes:{from:view.state.doc.length,insert:arguments[0]},userEvent:'input.type'});
+                        document.querySelector('#save').click();""", initial_edit)
+                    initial_checkpoint = wait(lambda: (row if (row := checkpoint()) and row[1] == initial_bytes else None), seconds=45, description="receiver initial checkpoint")
+                    initial_operation = wait(lambda: confirmed_content(initial_checkpoint[0]), seconds=60, description="receiver initial confirmed ACK")
+                    require(initial_operation == (initial_revision, initial_bytes) and operation_count() == 1, "initial save used an unexpected base or operation")
+                    confirmed_checkpoint = checkpoint()
+                    confirmed_revision = checkpoint_base_revision()
+                    confirmed_outbox = outbox_snapshot()
+                    require(confirmed_checkpoint[1:] == (initial_bytes, initial_bytes) and (notes / "Test Folder" / "Example.md").read_bytes() == initial_bytes, "initial save did not establish a confirmed checkpoint")
+                    print("M3 reopen: receiver saved its own checkpoint with confirmed server ACK.", flush=True)
+
                 test_stage = "peer client setup"
                 peer_data, peer_xdg_data, peer_xdg_cache, peer_xdg_config = (
                     root / name for name in ("peer-client", "peer-xdg-data", "peer-xdg-cache", "peer-xdg-config")
@@ -1238,7 +1276,10 @@ def main():
                 test_stage = "receiver draft setup"
                 saved = None
                 original_outbox = outbox_snapshot()
-                require(not original_outbox, "receiving client started with an unexpected outbox")
+                if args.remote_change == "reopen":
+                    require(original_outbox == confirmed_outbox, "peer setup changed the confirmed outbox")
+                else:
+                    require(not original_outbox, "receiving client started with an unexpected outbox")
                 if args.remote_change == "dirty":
                     marker = "\nSynthetic local edit 한글\n"
                     js("""
@@ -1325,10 +1366,22 @@ def main():
                         print("M3 resume metadata diagnostic unavailable.", flush=True)
                 require((notes / "Test Folder" / "Example.md").read_bytes() == updated, "peer update did not reach synthetic server file")
                 test_stage = "receiver editor result"
-                if args.remote_change == "clean":
+                if args.remote_change in ("clean", "reopen"):
                     wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && document.querySelector('.cm-content')?.cmTile.root.view.state.doc.toString() === arguments[1]", document_id, updated_text), seconds=45, description="clean editor peer update")
                     require(js("return document.querySelector('.cm-content').cmTile.root.view.state.selection.main.anchor") == 10, "clean editor did not preserve selection before changed text")
-                    require(checkpoint() is None and operation_count() == 0, "clean remote refresh created a local draft or operation")
+                    if args.remote_change == "reopen":
+                        require(checkpoint() == confirmed_checkpoint and checkpoint_base_revision() == confirmed_revision and outbox_snapshot() == confirmed_outbox, "remote refresh changed the confirmed checkpoint, base or outbox")
+                        test_stage = "close and reopen confirmed document"
+                        js("document.querySelector('[data-testid=close-document]').click()")
+                        wait(lambda: js("return !document.querySelector('.cm-content') && !document.querySelector('[data-document][aria-current=page]')"), description="document closed")
+                        wait(lambda: js("return !!document.querySelector('[data-document=\"'+arguments[0]+'\"]:not(:disabled)')", document_id), description="document ready to reopen")
+                        js("document.querySelector('[data-document=\"'+arguments[0]+'\"]').click()", document_id)
+                        wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document===arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", document_id), description="editable reopened document")
+                        require(js("return document.querySelector('.cm-content').cmTile.root.view.state.doc.toString()") == updated_text, "reopened editor did not show the latest peer content")
+                        require(checkpoint() == confirmed_checkpoint and checkpoint_base_revision() == confirmed_revision and outbox_snapshot() == confirmed_outbox, "reopening changed the confirmed checkpoint, base or outbox")
+                        print("M3 reopen: latest peer content reopened editable; previous checkpoint, base and outbox preserved.", flush=True)
+                    else:
+                        require(checkpoint() is None and operation_count() == 0, "clean remote refresh created a local draft or operation")
                     test_stage = "receiver first edit after remote refresh"
                     first_edit = "\n합성 한글 편집\n"
                     expected_bytes = updated + first_edit.encode()
@@ -1339,19 +1392,16 @@ def main():
                         view.dispatch({changes:{from:view.state.doc.length,insert:arguments[0]},userEvent:'input.type'});
                     """, first_edit)
                     first_checkpoint = wait(lambda: (row if (row := checkpoint()) and row[1] == expected_bytes else None), seconds=45, description="first post-refresh checkpoint")
-                    with sqlite3.connect(f"file:{client_data / 'drafts.sqlite3'}?mode=ro", uri=True) as db:
-                        base_revision = db.execute("""
-                            SELECT b.revision FROM registered_documents d
-                            JOIN client_registrations r ON r.id=d.registration_id
-                            JOIN draft_bases b ON b.document_id=d.storage_id
-                            WHERE r.status='active' AND d.document_id=?
-                        """, (document_id,)).fetchone()
-                    require(first_checkpoint[0] == 1 and first_checkpoint[2] == updated and base_revision == (peer_node["content_rev"],), "first post-refresh checkpoint did not retain the peer base")
-                    require(operation_count() == 0 and (notes / "Test Folder" / "Example.md").read_bytes() == updated, "composition sent the post-refresh edit early")
+                    expected_generation = confirmed_checkpoint[0] + 1 if args.remote_change == "reopen" else 1
+                    prior_operations = 1 if args.remote_change == "reopen" else 0
+                    require(first_checkpoint[0] == expected_generation and first_checkpoint[2] == updated and checkpoint_base_revision() == (peer_node["content_rev"],), "first post-refresh checkpoint did not retain the peer base")
+                    require(operation_count() == prior_operations and (notes / "Test Folder" / "Example.md").read_bytes() == updated, "composition sent the post-refresh edit early")
                     js("document.querySelector('.cm-content').dispatchEvent(new CompositionEvent('compositionend', {bubbles:true}))")
                     test_stage = "receiver first edit acknowledgement"
                     wait(lambda: (notes / "Test Folder" / "Example.md").read_bytes() == expected_bytes and acknowledged(first_checkpoint[0]), seconds=60, description="first post-refresh edit and acknowledgement")
-                    require(operation_count() == 1, "first post-refresh edit created an unexpected number of operations")
+                    confirmed = wait(lambda: confirmed_content(first_checkpoint[0]), seconds=45, description="post-refresh confirmed content operation")
+                    require(confirmed == (peer_node["content_rev"], expected_bytes), "post-refresh PUT did not use the latest peer revision and edited bytes")
+                    require(operation_count() == prior_operations + 1, "first post-refresh edit created an unexpected number of operations")
                 else:
                     require(js("return document.querySelector('.cm-content').cmTile.root.view.state.doc.toString()") == opened_text + marker, "peer update replaced local editor text")
                     require(checkpoint() == saved and outbox_snapshot() == original_outbox, "peer update changed the local draft, base or outbox")
@@ -2094,9 +2144,26 @@ print(json.dumps({'sha256':hashlib.sha256(data).hexdigest(), 'length':len(data),
             js("const view=document.querySelector('.cm-content').cmTile.root.view; view.dispatch({changes:{from:view.state.doc.length,insert:arguments[0]}})", offline)
             offline_saved = wait(lambda: (row if (row := checkpoint()) and offline.encode() in row[1] else None))
             require(offline_saved[0] > saved[0] and offline_saved[2] == synced_bytes, "offline checkpoint or base was not preserved")
-            failed = native_result("workspace_inventory", {"request": {"renderer_session_id": owner, "after_id": None}})
-            require(not failed["ok"] and checkpoint() == offline_saved, "network failure changed the local draft")
+            cached_document = js("""
+                const [owner, documentId, done] = arguments;
+                window.__TAURI_INTERNALS__.invoke('workspace_inventory', {request:{renderer_session_id:owner, after_id:null}})
+                  .then(page=>done(page.nodes.some(node=>node.node_id === documentId))).catch(()=>done(false));
+            """, owner, document_id, asynchronous=True)
+            require(cached_document, "network failure hid the cached document list")
+            require(checkpoint() == offline_saved, "offline inventory changed the local draft")
             require((notes / "Test Folder" / "Example.md").read_bytes() == synced_bytes, "offline edits unexpectedly changed the server file")
+            test_stage = "offline renderer reload with retained network session"
+            wd("POST", f"/session/{session_id}/refresh", {})
+            wait(lambda: js("return !!document.querySelector('[data-document=\"' + arguments[0] + '\"]:not(:disabled)')", document_id),
+                 seconds=45, description="cached document list after offline renderer reload")
+            reloaded_owner = js("const done=arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke('m0_renderer_session').then(done)", asynchronous=True)
+            require(reloaded_owner != owner, "offline renderer reload retained the old renderer owner")
+            js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", document_id)
+            wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document === arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", document_id),
+                 description="cached document open after offline renderer reload")
+            require(checkpoint() == offline_saved, "offline renderer reload changed the saved draft bytes")
+            require(js("return document.querySelector('.cm-content').cmTile.root.view.state.doc.toString()") == offline_saved[1].decode("utf-8-sig"),
+                    "offline renderer reload did not display the exact draft text")
             wd("DELETE", f"/session/{session_id}")
             session_id = None
 

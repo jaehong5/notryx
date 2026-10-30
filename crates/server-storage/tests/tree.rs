@@ -88,7 +88,13 @@ fn recovery_observes_absence_files_and_empty_folders_without_mutating_them() {
     );
     store.sync_folder("Folder", &folder).unwrap();
     assert_eq!(store.sync_absent("Folder"), Err(StorageError::Changed));
+    let folder_file = std::fs::File::open(directory.path().join("notes/Folder")).unwrap();
+    let modified = folder_file.metadata().unwrap().modified().unwrap();
     std::fs::write(directory.path().join("notes/Folder/file.md"), b"external").unwrap();
+    // Fast filesystems can keep both directory operations within one timestamp tick.
+    folder_file
+        .set_modified(modified + std::time::Duration::from_secs(1))
+        .unwrap();
     assert!(matches!(
         store.observe_entry("Folder").unwrap(),
         ObservedEntry::Folder { empty: false, .. }
@@ -396,6 +402,8 @@ mod faults {
             }),
             Err(StorageError::Changed)
         );
+        let folder_file = std::fs::File::open(directory.path().join("notes/Parent/Empty")).unwrap();
+        let modified = folder_file.metadata().unwrap().modified().unwrap();
         assert_eq!(
             store.sync_folder_with_hook("Parent/Empty", &folder, |stage| {
                 if stage == StorageStage::AfterRecoveryFolderSync {
@@ -404,6 +412,9 @@ mod faults {
                         b"external",
                     )
                     .unwrap();
+                    folder_file
+                        .set_modified(modified + std::time::Duration::from_secs(1))
+                        .unwrap();
                 }
                 Ok(())
             }),

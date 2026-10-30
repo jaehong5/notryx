@@ -1053,6 +1053,13 @@ def main():
                     except Exception:
                         print("M3 receiver pre-open diagnostic unavailable.", flush=True)
                     raise
+            test_stage = "initial synchronization before document open"
+            wait(lambda: js("""
+                const done=arguments[arguments.length-1];
+                window.__TAURI_INTERNALS__.invoke('m0_renderer_session')
+                  .then(owner=>window.__TAURI_INTERNALS__.invoke('workspace_sync_status', {request:{renderer_session_id:owner}}))
+                  .then(state=>done(state.status === 'ready')).catch(()=>done(false));
+            """, asynchronous=True), seconds=45, description="initial synchronization before document open")
             test_stage = "open selected document"
             js("document.querySelector('[data-document=\"' + arguments[0] + '\"]').click()", document_id)
             try:
@@ -2107,8 +2114,22 @@ print(json.dumps({'sha256':hashlib.sha256(data).hexdigest(), 'length':len(data),
             wd("POST", f"/session/{session_id}/timeouts", {"script": 30000})
             wait(lambda: js("return !!document.querySelector('[data-draft-document=\"' + arguments[0] + '\"]:not(:disabled)')", document_id))
             new_owner = js("const done=arguments[arguments.length-1]; window.__TAURI_INTERNALS__.invoke('m0_renderer_session').then(done)", asynchronous=True)
-            disconnected = native_result("workspace_inventory", {"request": {"renderer_session_id": new_owner, "after_id": None}})
-            require(not disconnected["ok"] and disconnected.get("failure") == "not_connected", "authentication unexpectedly survived the process restart")
+            # Inventory can come from the local cache without an authenticated session.
+            offline_state = js("""
+                const [owner, documentId, done] = arguments;
+                Promise.all([
+                    window.__TAURI_INTERNALS__.invoke('workspace_inventory', {request:{renderer_session_id:owner, after_id:null}}),
+                    window.__TAURI_INTERNALS__.invoke('workspace_credential_status', {request:{renderer_session_id:owner}}),
+                ]).then(([inventory, credential]) => done({
+                    cachedDocument:inventory.nodes.some(node => node.node_id === documentId),
+                    credentialStatus:credential.status,
+                })).catch(error => done({failure:String(error)}));
+            """, new_owner, document_id, asynchronous=True)
+            require("failure" not in offline_state, "offline restart state query failed")
+            require(offline_state["credentialStatus"] in {"registration_required", "unavailable"},
+                    f"unexpected credential status after offline restart: {offline_state['credentialStatus']}")
+            require(offline_state["cachedDocument"] and checkpoint() == offline_saved,
+                    "offline restart did not preserve the cached document and checkpoint")
             js("document.querySelector('[data-draft-document=\"' + arguments[0] + '\"]').click()", document_id)
             wait(lambda: js("return document.querySelector('[data-draft-document=\"' + arguments[0] + '\"]')?.getAttribute('aria-current') === 'page' && !!document.querySelector('.cm-content[contenteditable=true]')", document_id))
             recovered = js("return document.querySelector('.cm-content').cmTile.root.view.state.doc.toString()")

@@ -195,10 +195,39 @@ async fn frozen_content_command_preserves_boundary_and_non_utf8_remote_bytes() {
         vec![b'c'; 25 * 1024 * 1024],
     ] {
         let node = set_remote_bytes(&rig, &bytes).await;
-        let result =
-            inspect_frozen_content_command_for_renderer(&rig.runtime, frozen_command_request(&rig))
+        // The watcher can start another object check after publishing the new bytes.
+        let result = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                match inspect_frozen_content_command_for_renderer(
+                    &rig.runtime,
+                    frozen_command_request(&rig),
+                )
                 .await
-                .unwrap();
+                {
+                    Ok(result) => break result,
+                    Err(error) if error == "resync_required" => {
+                        let snapshot = rig.runtime.0.lock().await.gate.snapshot("owner").unwrap();
+                        match crate::sync_catchup::catch_up_metadata(
+                            &rig.runtime,
+                            &snapshot,
+                            &rig.session,
+                        )
+                        .await
+                        {
+                            Ok(_) => {}
+                            Err(error) if error == "server_not_ready" => {}
+                            Err(error) => {
+                                panic!("catch-up failed for {} bytes: {error}", bytes.len())
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(error) => panic!("inspection failed for {} bytes: {error}", bytes.len()),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("inspection did not settle for {} bytes", bytes.len()));
         assert_eq!(
             decoded(&result.remote_bytes_base64, &result.remote_hash),
             bytes

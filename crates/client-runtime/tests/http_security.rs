@@ -89,6 +89,62 @@ fn node() -> NodeState {
 }
 
 #[tokio::test]
+async fn transient_read_failures_are_unavailable() {
+    for status in ["429 Too Many Requests", "503 Service Unavailable"] {
+        let reply = response(status, "Content-Type: application/json\r\n", "{}");
+        let (session, server) = session_with_reply(reply.clone()).await;
+        assert_eq!(session.inventory(None).await, Err(Error::Unavailable));
+        server.await.unwrap();
+
+        let (session, server) = session_with_reply(reply).await;
+        assert_eq!(session.content(&node()).await, Err(Error::Unavailable));
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn read_failures_keep_authentication_and_contract_errors_distinct() {
+    let forbidden = serde_json::json!({
+        "code": "forbidden", "message": "permission denied", "request_id": Uuid::now_v7().to_string()
+    })
+    .to_string();
+    for (reply, expected) in [
+        (
+            response(
+                "403 Forbidden",
+                "Content-Type: application/json\r\n",
+                &forbidden,
+            ),
+            Error::Forbidden,
+        ),
+        (
+            response(
+                "503 Service Unavailable",
+                "Content-Type: text/html\r\n",
+                "sign in",
+            ),
+            Error::GatewayAuthRequired,
+        ),
+        (
+            response("404 Not Found", "Content-Type: application/json\r\n", "{}"),
+            Error::Response,
+        ),
+        (
+            response("200 OK", "Content-Type: application/json\r\n", "{}"),
+            Error::Contract,
+        ),
+    ] {
+        let (session, server) = session_with_reply(reply.clone()).await;
+        assert_eq!(session.inventory(None).await, Err(expected));
+        server.await.unwrap();
+
+        let (session, server) = session_with_reply(reply).await;
+        assert_eq!(session.content(&node()).await, Err(expected));
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn gateway_auth_is_distinct_from_a_valid_app_auth_error() {
     let unauthorized = serde_json::json!({"code":"unauthorized", "message":"authentication required", "request_id":Uuid::now_v7().to_string()}).to_string();
     let forbidden = serde_json::json!({"code":"forbidden", "message":"permission denied", "request_id":Uuid::now_v7().to_string()}).to_string();

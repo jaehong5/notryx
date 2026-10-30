@@ -1667,7 +1667,7 @@ async fn finish_workspace_open(
     }
     let (bytes, from_cache) = match bytes {
         Ok(bytes) => (bytes, false),
-        Err(notryx_client_runtime::Error::Network) => {
+        Err(notryx_client_runtime::Error::Network | notryx_client_runtime::Error::Unavailable) => {
             let cached = state
                 .store
                 .read_cached_content(&binding, remote.node.node_id)

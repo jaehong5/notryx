@@ -684,7 +684,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap(),
-            Err("Response".into())
+            Err("Unavailable".into())
         );
         let mut state = fixture.runtime.0.lock().await;
         let (cursor, nodes) = state

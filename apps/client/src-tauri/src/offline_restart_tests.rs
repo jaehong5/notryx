@@ -2,6 +2,191 @@ use super::*;
 use notryx_protocol::NodeState;
 use tempfile::TempDir;
 
+async fn check_http_failure_cache(
+    status: &'static str,
+    body: &'static str,
+    inventory: bool,
+    expected_error: Option<&str>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (directory, server, runtime, session, document) = sync_bootstrap::tests::setup().await;
+    let snapshot = runtime.0.lock().await.gate.snapshot("owner").unwrap();
+    sync_bootstrap::bootstrap_metadata(&runtime, &snapshot, &session)
+        .await
+        .unwrap();
+    let binding = registration_binding(session.binding());
+    let expected = session.inventory(None).await.unwrap();
+    let node = expected
+        .nodes
+        .iter()
+        .find(|node| node.name == "move.md")
+        .unwrap();
+    let (draft_before, outbox_before) = {
+        let mut state = runtime.0.lock().await;
+        assert!(
+            state
+                .store
+                .cache_content(&binding, node, b"move source\n")
+                .await
+                .unwrap()
+        );
+        let draft = state
+            .store
+            .read_registered_checkpoint(&binding, &document)
+            .await
+            .unwrap();
+        let outbox = state.store.list_outbox(&binding, 0, 100).await.unwrap();
+        state.store.reset_edit_sessions();
+        state.product_sessions.clear();
+        state.remote_refresh_candidates.clear();
+        search_native::replace_renderer(&mut state, "reloaded-owner".into());
+        (draft, outbox)
+    };
+    let address = server.local_addr();
+    server.shutdown().await.unwrap();
+    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+    let response = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0; 4096];
+        while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+            let count = stream.read(&mut buffer).await.unwrap();
+            assert_ne!(count, 0);
+            request.extend_from_slice(&buffer[..count]);
+            assert!(request.len() <= 16 * 1024);
+        }
+        assert!(request.starts_with(b"GET /v1/nodes"));
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+
+    if inventory {
+        let result = inventory_for_renderer(&runtime, "reloaded-owner", None).await;
+        if let Some(error) = expected_error {
+            assert_eq!(result.unwrap_err(), error);
+        } else {
+            let page = result.expect("temporary HTTP failures must preserve cached inventory");
+            assert_eq!(page.workspace_epoch, expected.workspace_epoch);
+            assert_eq!(page.nodes, expected.nodes);
+            assert_eq!(page.next_after_id, expected.next_after_id);
+        }
+    } else {
+        let request = WorkspaceOpenRequest {
+            renderer_session_id: "reloaded-owner".into(),
+            node: node.clone(),
+        };
+        let WorkspaceOpenStart::Remote(remote) = begin_workspace_open(&runtime, &request, None)
+            .await
+            .unwrap()
+        else {
+            panic!("the cached unedited document must attempt its conditional HTTP read");
+        };
+        let bytes = remote.session.content(node).await;
+        let result = finish_workspace_open(
+            &runtime,
+            remote,
+            binding.clone(),
+            node.node_id.to_string(),
+            node.content_rev.as_ref().unwrap().as_str().to_owned(),
+            bytes,
+        )
+        .await;
+        if let Some(error) = expected_error {
+            assert_eq!(result.unwrap_err(), error);
+        } else {
+            let opened = result.expect("temporary HTTP failures must open verified cached content");
+            assert_eq!(
+                STANDARD.decode(&opened.bytes_base64).unwrap(),
+                b"move source\n"
+            );
+            assert!(!opened.local_draft);
+            assert!(!opened.readonly);
+        }
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), response)
+        .await
+        .expect("the HTTP fault must have been served")
+        .unwrap();
+    let mut state = runtime.0.lock().await;
+    assert!(Arc::ptr_eq(state.session.as_ref().unwrap(), &session));
+    assert_eq!(
+        state
+            .store
+            .read_registered_checkpoint(&binding, &document)
+            .await
+            .unwrap(),
+        draft_before
+    );
+    assert_eq!(
+        state.store.list_outbox(&binding, 0, 100).await.unwrap(),
+        outbox_before
+    );
+    assert!(
+        state
+            .store
+            .read_registered_checkpoint(&binding, &node.node_id.to_string())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        state
+            .store
+            .read_cached_content(&binding, node.node_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        b"move source\n"
+    );
+    assert_eq!(
+        std::fs::read(directory.path().join("notes/move.md")).unwrap(),
+        b"move source\n"
+    );
+    assert_eq!(
+        std::fs::read(directory.path().join("notes/example.md")).unwrap(),
+        b"server source\n"
+    );
+}
+
+#[tokio::test]
+async fn http_busy_reload_uses_cached_inventory() {
+    check_http_failure_cache("429 Too Many Requests", "{}", true, None).await;
+}
+
+#[tokio::test]
+async fn http_unavailable_reload_uses_cached_inventory() {
+    check_http_failure_cache("503 Service Unavailable", "{}", true, None).await;
+}
+
+#[tokio::test]
+async fn http_busy_opens_verified_cached_content() {
+    check_http_failure_cache("429 Too Many Requests", "{}", false, None).await;
+}
+
+#[tokio::test]
+async fn http_unavailable_opens_verified_cached_content() {
+    check_http_failure_cache("503 Service Unavailable", "{}", false, None).await;
+}
+
+#[tokio::test]
+async fn http_forbidden_does_not_fall_back_to_cached_inventory_or_content() {
+    for inventory in [true, false] {
+        check_http_failure_cache(
+            "403 Forbidden",
+            r#"{"code":"forbidden","message":"synthetic","request_id":"01900000-0000-7000-8000-000000000001"}"#,
+            inventory,
+            Some("Forbidden"),
+        )
+        .await;
+    }
+}
+
 #[tokio::test]
 async fn offline_reload_with_live_session_reads_inventory_without_changing_drafts() {
     let (_directory, server, runtime, session, document) = sync_bootstrap::tests::setup().await;

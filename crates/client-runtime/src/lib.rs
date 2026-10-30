@@ -189,6 +189,7 @@ async fn check_response(response: Response) -> Result<Response, Error> {
     match status.as_u16() {
         200 => Ok(response),
         412 => Err(Error::Changed),
+        429 | 503 => Err(Error::Unavailable),
         _ => Err(Error::Response),
     }
 }

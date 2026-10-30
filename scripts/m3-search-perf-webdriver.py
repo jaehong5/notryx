@@ -412,6 +412,7 @@ class Watchdog:
                 data = per_pid.setdefault(process["pid"], {"name": process["name"], "first": process["ticks"],
                                                             "last": process["ticks"], "first_rss_kib": process["rss_kib"], "peak_rss_kib": 0})
                 data["last"] = process["ticks"]
+                data["last_rss_kib"] = process["rss_kib"]
                 data["peak_rss_kib"] = max(data["peak_rss_kib"], process["rss_kib"])
         elapsed = max(.001, samples[-1]["time"] - samples[0]["time"])
         ticks = os.sysconf("SC_CLK_TCK")
@@ -423,6 +424,7 @@ class Watchdog:
                 "io_psi": psi,
                 "peak_wal_bytes": max(item["wal_bytes"] for item in samples),
                 "processes": [{"name": item["name"], "peak_rss_kib": item["peak_rss_kib"],
+                               "first_rss_kib": item["first_rss_kib"], "last_rss_kib": item["last_rss_kib"],
                                "rss_growth_from_first_sample_kib": max(0, item["peak_rss_kib"] - item["first_rss_kib"]),
                                "cpu_core_percent_over_sampled_run": max(0, item["last"] - item["first"]) / ticks / elapsed * 100}
                               for item in per_pid.values()],
@@ -638,7 +640,7 @@ def seed_fixture(path, watchdog):
     with sqlite3.connect(path, timeout=30) as db:
         db.execute("PRAGMA foreign_keys=ON")
         ensure(db.execute("PRAGMA application_id").fetchone()[0] == 1314148952, "unexpected ClientStore application id")
-        ensure(db.execute("PRAGMA user_version").fetchone()[0] == 9, "unexpected ClientStore schema version")
+        ensure(db.execute("PRAGMA user_version").fetchone()[0] == 23, "unexpected ClientStore schema version")
         ensure(db.execute("SELECT count(*) FROM client_registrations").fetchone()[0] == 0, "fresh fixture store is not empty")
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -1240,10 +1242,15 @@ def checkpoint_trial(browser, watchdog, path, runs, next_request_id, timeout):
                     else:
                         search_outcomes["finished_without_invalidation"] += 1
                 except RuntimeError:
-                    search_outcomes["timed_out"] += 1
-                    cancel_task(browser, request_id)
-                    wait(lambda: (value if (value := task_state(browser)) and value["done"] else None),
-                         "search cancellation after checkpoint", watchdog, timeout)
+                    if not watchdog.abort.is_set():
+                        try:
+                            cancel_task(browser, request_id)
+                            wait(lambda: (value if (value := task_state(browser)) and value["done"] else None),
+                                 "search cancellation after checkpoint", watchdog, timeout)
+                        except Exception:
+                            # Preserve the measurement failure; outer cleanup stops the browser.
+                            pass
+                    raise
     closed = browser.js("""
       const done=arguments[arguments.length-1];
       window.__TAURI_INTERNALS__.invoke('workspace_close',{request:{document_id:arguments[0],edit_session_id:arguments[1]}})
@@ -1455,8 +1462,10 @@ def main():
                         sample_start = len(watchdog.samples)
                         condition = {"cache_percent": coverage, "available_cache_rows": COUNT * coverage // 100,
                                      "queries": {}, "ui_render_opportunity": {}, "cancellation": {}, "resources": {},
+                                     "resource_phases": {},
                                      "priority": browser.priority}
                         report["conditions"].append(condition)
+                        phase_start = sample_start
                         for key, query in QUERIES.items():
                             print(f"UI render opportunities: {key}.", flush=True)
                             progress, first_result, first_page = [], [], []
@@ -1477,6 +1486,8 @@ def main():
                                                           "missing_progress_opportunities": args.runs-len(progress),
                                                           "limitation": "double requestAnimationFrame, not compositor paint confirmation"}
                         close_search_panel(browser)
+                        condition["resource_phases"]["ui_search"] = watchdog.result(phase_start)
+                        phase_start = len(watchdog.samples)
                         expected_cached = {doc_id(index) for index in range(COUNT * coverage // 100)}
                         for key, query in QUERIES.items():
                             print(f"Native search futures: {key}.", flush=True)
@@ -1496,6 +1507,8 @@ def main():
                             condition["queries"][key] = {"first_page": summary(first), "complete_wall_including_polling": summary(full),
                                                            "complete_native_future_sum": summary(native),
                                                            "oracle_match_count": len(expected), "oracle_status": "matched"}
+                        condition["resource_phases"]["native_search"] = watchdog.result(phase_start)
+                        phase_start = len(watchdog.samples)
                         report["phase"] = {"stage": "recovery", "cache_percent": coverage}
                         recovery_times = []
                         for attempt in range(args.runs):
@@ -1517,8 +1530,11 @@ def main():
                         ensure(sqlite_snapshot(path) == before, "search changed synthetic drafts, bases or outbox")
                         ensure(run_fixture("verify", path, watchdog, coverage) == fingerprint, "search changed cached bytes or metadata")
                         condition["search_preservation"] = "cache hashes and draft, base and pending outbox bytes unchanged"
+                        condition["resource_phases"]["recovery_cancel_verify"] = watchdog.result(phase_start)
+                        phase_start = len(watchdog.samples)
                         report["phase"] = {"stage": "checkpoint", "cache_percent": coverage}
                         condition["checkpoint"] = checkpoint_trial(browser, watchdog, path, args.runs, next_request_id, args.timeout)
+                        condition["resource_phases"]["checkpoint"] = watchdog.result(phase_start)
                         condition["resources"] = watchdog.result(sample_start)
                         browser.close()
                         browser = None

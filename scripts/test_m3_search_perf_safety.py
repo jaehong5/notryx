@@ -455,5 +455,86 @@ class CleanupSafety(unittest.TestCase):
         self.assertEqual(diagnostics["cleanup"], "not_available")
 
 
+class CheckpointSearchFailure(unittest.TestCase):
+    def setUp(self):
+        self.browser = mock.Mock()
+        self.browser.js.side_effect = [
+            {"id": module.doc_id(0), "session": "synthetic", "generation": "0", "readonly": False},
+            {"ok": True, "ms": 1}, {"ok": True, "ms": 2}, True,
+        ]
+        self.watchdog = mock.Mock()
+        self.watchdog.abort.is_set.return_value = False
+        db = mock.MagicMock()
+        db.__enter__.return_value.execute.return_value.fetchone.side_effect = [
+            (1, b"Aase", b"base"), (2, b"Base", b"base"),
+        ]
+        self.patch(module, "content", return_value=b"base")
+        self.patch(module, "state", return_value={})
+        self.patch(module, "sqlite_snapshot", return_value={"outbox_hash": "unchanged"})
+        self.patch(module.sqlite3, "connect", return_value=db)
+        self.patch(module, "start_page")
+        self.patch(module, "start_save")
+        self.patch(module.time, "sleep")
+        self.cancel = self.patch(module, "cancel_task")
+        self.task = self.patch(module, "task_state", side_effect=[
+            {"done": False}, {"done": True, "error": True, "expected_invalidation": True},
+        ])
+        self.wait = self.patch(module, "wait", side_effect=lambda check, *args: check())
+
+    def patch(self, target, name, **kwargs):
+        patcher = mock.patch.object(target, name, **kwargs)
+        self.addCleanup(patcher.stop)
+        return patcher.start()
+
+    def run_trial(self):
+        return module.checkpoint_trial(self.browser, self.watchdog, Path("/tmp/synthetic-unused.db"),
+                                       1, lambda: 1, 5)
+
+    def unrelated_error(self):
+        self.task.side_effect = [
+            {"done": False}, {"done": True, "error": True, "expected_invalidation": False},
+            {"done": True},
+        ]
+
+    def test_expected_search_invalidation_is_completed(self):
+        result = self.run_trial()
+        self.assertEqual(result["search_outcomes"]["invalidated"], 1)
+        self.assertEqual(result["search_outcomes"]["timed_out"], 0)
+        self.cancel.assert_not_called()
+
+    def test_unrelated_search_error_fails_after_cancellation(self):
+        self.unrelated_error()
+        with self.assertRaisesRegex(RuntimeError, "unrelated error during checkpoint"):
+            self.run_trial()
+        self.cancel.assert_called_once_with(self.browser, "1")
+
+    def test_search_timeout_is_rethrown_after_cancellation(self):
+        primary = RuntimeError("timeout: search after checkpoint")
+        def wait(check, description, *args):
+            if description == "search after checkpoint":
+                raise primary
+            return check()
+        self.wait.side_effect = wait
+        self.task.side_effect = [{"done": False}, {"done": True}]
+        with self.assertRaises(RuntimeError) as raised:
+            self.run_trial()
+        self.assertIs(raised.exception, primary)
+        self.cancel.assert_called_once_with(self.browser, "1")
+
+    def test_cleanup_error_does_not_replace_search_failure(self):
+        self.unrelated_error()
+        self.cancel.side_effect = RuntimeError("synthetic cleanup failure")
+        with self.assertRaisesRegex(RuntimeError, "unrelated error during checkpoint"):
+            self.run_trial()
+
+    def test_watchdog_abort_skips_browser_cleanup_and_preserves_failure(self):
+        self.unrelated_error()
+        self.watchdog.abort.is_set.return_value = True
+        with self.assertRaisesRegex(RuntimeError, "unrelated error during checkpoint"):
+            self.run_trial()
+        self.cancel.assert_not_called()
+        self.assertEqual(self.browser.js.call_count, 3)
+
+
 if __name__ == "__main__":
     unittest.main()

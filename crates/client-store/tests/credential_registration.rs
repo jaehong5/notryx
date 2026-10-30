@@ -438,7 +438,7 @@ async fn credential_v8_migration_preserves_data_and_rolls_back_on_schema_collisi
             .fetch_one(&mut db)
             .await
             .unwrap(),
-        21
+        23
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pragma_foreign_key_check")

@@ -1070,6 +1070,23 @@ async fn inventory_for_renderer(
             }
             local_inventory(&mut state, &binding, after).await
         }
+        Err(notryx_client_runtime::Error::Network | notryx_client_runtime::Error::Unavailable) => {
+            let binding = registration_binding(session.binding());
+            if state.transmission_gate.response_generation(&binding) != generation {
+                return Err("stale_sync".into());
+            }
+            if state
+                .store
+                .current_registration()
+                .await
+                .map_err(|error| error.to_string())?
+                .as_ref()
+                != Some(&binding)
+            {
+                return Err("stale_registration".into());
+            }
+            local_inventory(&mut state, &binding, after).await
+        }
         Err(error) => Err(format!("{error:?}")),
     }
 }

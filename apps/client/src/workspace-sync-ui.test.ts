@@ -85,6 +85,16 @@ test("sync events re-read current status and preserve the selected inventory pag
   fakes.listeners.get("workspace-metadata-changed")?.();
   await vi.waitFor(() => expect(fakes.inventory).toHaveBeenCalledWith("id0512"));
   expect(document.querySelector('[data-document="id0513"]')).not.toBeNull();
+  fakes.inventory.mockClear();
+  fakes.status = "ready";
+  fakes.listeners.get("workspace-sync-status-changed")?.();
+  await vi.waitFor(() => expect(fakes.inventory).toHaveBeenCalledWith("id0512"));
+  expect(document.querySelector('[data-document="id0513"]')).not.toBeNull();
+  fakes.inventory.mockClear();
+  const statusReads = fakes.sync.mock.calls.length;
+  fakes.listeners.get("workspace-sync-status-changed")?.();
+  await vi.waitFor(() => expect(fakes.sync).toHaveBeenCalledTimes(statusReads + 1));
+  expect(fakes.inventory).not.toHaveBeenCalled();
 });
 
 test("an old status response during re-pair cannot replace the new registration status", async () => {
@@ -111,4 +121,50 @@ test("an old status response during re-pair cannot replace the new registration 
   await vi.waitFor(() => expect(document.querySelector("#workspace-sync-status")).toBeNull());
   finishOldStatus({ binding: { server_origin: "https://old.invalid", workspace_id: "old", workspace_epoch: "old", device_id: "old", device_stream_id: "old" }, status: "needs_review" });
   await vi.waitFor(() => expect(document.querySelector("#workspace-sync-status")).toBeNull());
+});
+
+const cachedNode = {
+  node_id: "019a1000-0000-7000-8000-000000000002", parent_id: null,
+  name: "cached.md", kind: "file", deleted: false, content_rev: "c",
+  content_etag: "c", meta_rev: "m", meta_etag: "m", node_etag: "n",
+  content_hash: "hash", size: "1", children_generation: null, last_change_seq: "1",
+};
+
+test("document buttons wait for initial synchronization while offline cache remains accessible", async () => {
+  fakes.status = "connecting";
+  fakes.inventory.mockReset();
+  fakes.inventory.mockResolvedValue({ nodes: [cachedNode], next_after_id: null });
+  document.body.innerHTML = '<div id="root"></div>';
+  await import("./main");
+  await vi.waitFor(() => expect(document.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(false));
+  const button = () => document.querySelector<HTMLButtonElement>(`[data-document="${cachedNode.node_id}"]`);
+  expect(button()).not.toBeNull();
+  expect(button()!.disabled).toBe(true);
+  expect(document.querySelector("#workspace-sync-status")?.textContent).toContain("서버 동기화 중");
+
+  fakes.status = "ready";
+  fakes.listeners.get("workspace-sync-status-changed")?.();
+  await vi.waitFor(() => expect(button()!.disabled).toBe(false));
+
+  fakes.status = "offline";
+  fakes.listeners.get("workspace-sync-status-changed")?.();
+  await vi.waitFor(() => expect(document.querySelector("#workspace-sync-status")?.textContent).toContain("서버에 연결되지 않음"));
+  expect(button()!.disabled).toBe(false);
+});
+
+test("reconnection retries a failed inventory even when no metadata change event arrives", async () => {
+  fakes.status = "offline";
+  fakes.inventory.mockReset();
+  fakes.inventory.mockRejectedValueOnce(new Error("Network"));
+  fakes.inventory.mockResolvedValue({ nodes: [cachedNode], next_after_id: null });
+  document.body.innerHTML = '<div id="root"></div>';
+  await import("./main");
+  await vi.waitFor(() => expect(document.body.textContent).toContain("Network"));
+  expect(document.querySelector(`[data-document="${cachedNode.node_id}"]`)).toBeNull();
+
+  fakes.status = "ready";
+  fakes.listeners.get("workspace-sync-status-changed")?.();
+  await vi.waitFor(() => expect(document.querySelector(`[data-document="${cachedNode.node_id}"]`)).not.toBeNull());
+  expect(fakes.inventory).toHaveBeenCalledTimes(2);
+  expect(document.body.textContent).not.toContain("Network");
 });

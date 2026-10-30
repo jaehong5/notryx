@@ -27,11 +27,12 @@ export function advanceSearchRequestId(current: number): number | null {
   return current + 1;
 }
 
-export function SearchPanel({ binding, ports, open, label }: {
+export function SearchPanel({ binding, ports, open, label, revision = 0 }: {
   binding: WorkspaceRegistration;
   ports: SearchPanelPorts;
   open(result: SearchResult): void;
   label?(result: SearchResult): string;
+  revision?: number;
 }) {
   const bindingKey = JSON.stringify(binding);
   const attempt = useRef(0);
@@ -53,8 +54,6 @@ export function SearchPanel({ binding, ports, open, label }: {
 
   useEffect(() => {
     invalidate();
-    setQuery("");
-    setScope("");
     setMessage("");
     return () => {
       attempt.current++;
@@ -62,7 +61,12 @@ export function SearchPanel({ binding, ports, open, label }: {
       active.current = null;
       if (previous) void ports.cancel(previous.binding, previous.id).catch(() => {});
     };
-  }, [bindingKey, ports]);
+  }, [bindingKey, ports, revision]);
+
+  useEffect(() => {
+    setQuery("");
+    setScope("");
+  }, [bindingKey]);
 
   async function load(after: string | null, continuation: boolean) {
     if (!query || !scope || (continuation && (!active.current || busy))) return;

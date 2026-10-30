@@ -10,7 +10,8 @@ import { EditorController, initialEditorState } from "./editor-controller";
 import { openDocument, saveDocument, closeDocument, pairWorkspace, workspaceInventory, workspaceCreateParents, workspaceFrozenCreates, resolveWorkspaceFrozenCreate, workspaceFrozenDeletes, resolveWorkspaceFrozenDelete, workspaceFrozenMoves, resolveWorkspaceFrozenMove, workspaceSyncState, openWorkspaceDocument, prepareWorkspaceRemoteRefresh, commitWorkspaceRemoteRefresh, inspectWorkspaceRemoteChange, saveWorkspaceDocument, closeWorkspaceDocument, localDrafts, openLocalDraft, adoptPendingPair, discardPendingPair, pendingPairStatus, queueWorkspaceDocument, sendNextWorkspaceOperation, previewWorkspaceImage, workspaceDocumentOutbox, openWorkspaceExternal, recoverWorkspaceSource, workspaceTrash, queueWorkspaceRestore, workspaceRestoreStatus, requestWorkspaceRestoreAbandon, queueWorkspaceCreate, workspaceCreateStatus, requestWorkspaceCreateAbandon, queueWorkspaceDelete, workspaceDeleteStatus, requestWorkspaceDeleteAbandon, queueWorkspaceMove, workspaceMoveStatus, requestWorkspaceMoveAbandon, workspaceSearch, cancelWorkspaceSearch, prepareWorkspaceContentConflict, chooseWorkspaceRemoteContentConflict, confirmWorkspaceContentConflictCopy, retryWorkspaceContentConflictCopy, workspaceContentConflictCopyStatus, progressWorkspaceContentConflictCopy, continueWorkspaceRemoteContentConflict, completeWorkspacePendingRemoteContentConflict, workspaceContentConflictResolutionStatus, reopenWorkspaceContentConflictCheckpoint, confirmWorkspaceContentConflictMerge, queueWorkspaceContentConflictMerge, workspaceContentConflictMergeStatus, workspaceContentConflictMergeFollowupStatus, requestWorkspaceContentConflictMergeFollowupAbandon, prepareWorkspaceDeletedDraftCopy, confirmWorkspaceDeletedDraftCopy, workspaceDeletedDraftCopyStatus, progressWorkspaceDeletedDraftCopy, reopenWorkspaceDeletedDraftCopy, requestWorkspaceDeletedDraftCopyFollowupAbandon, reconfirmWorkspaceDeletedDraftCopy } from "./ipc";
 import { MarkdownPreview } from "./preview";
 import { PreviewImageQueue } from "./preview-image-queue";
-import { WorkspaceListLoader, workspacePath, draftKey, draftSelectionId } from "./workspace-list";
+import { workspacePath, draftKey, draftSelectionId } from "./workspace-list";
+import { WorkspaceController } from "./workspace-controller";
 import { resolveWorkspaceReference } from "./workspace-reference";
 import { collectPreviewReferences } from "./preview-references";
 import { compareMoveReferences } from "./move-reference-impact";
@@ -63,14 +64,13 @@ function App() {
   const modeRef = useRef<"fixture" | "workspace">("fixture");
   const nodesRef = useRef<NodeState[]>([]);
   const searchNodesRef = useRef(new Map<string, NodeState>());
-  const listLoader = useRef(new WorkspaceListLoader());
+  const workspace = useRef(new WorkspaceController());
   const metadataVersion = useRef(0);
   const inventoryVersion = useRef<number | null>(null);
   const inventoryBinding = useRef<string | null>(null);
   const sessionModes = useRef(new Map<string, { mode: "fixture" | "workspace"; documentId: string; uiId: string; scope?: TransmitScope; binding?: WorkspaceRegistration; orphanDraft?: boolean }>());
   const unqueuedEdits = useRef(new Map<string, string>());
   const syncRevision = useRef(0);
-  const workspaceSyncRevision = useRef(0);
   const credentialRevision = useRef(0);
   const credentialMounted = useRef(false);
   const workspacePageStartRef = useRef<string | null>(null);
@@ -92,9 +92,11 @@ function App() {
   const [workspaceNextPage, setWorkspaceNextPage] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<WorkspaceDraft[]>([]);
   const [connectionError, setConnectionError] = useState("");
+  const [inventoryError, setInventoryError] = useState("");
   const [queueErrors, setQueueErrors] = useState<QueueError[]>([]);
   const [pendingPair, setPendingPair] = useState(false);
   const [busy, setBusy] = useState(true);
+  const [workspaceConnecting, setWorkspaceConnecting] = useState(false);
   const [syncStatus, setSyncStatus] = useState("");
   const [workspaceSyncMessage, setWorkspaceSyncMessage] = useState("");
   const [credentialMessage, setCredentialMessage] = useState("");
@@ -1253,23 +1255,30 @@ function App() {
   async function refreshWorkspace(startAfter: string | null = null): Promise<void> {
     const metadata = metadataVersion.current;
     const binding = JSON.stringify(workspaceBindingRef.current);
-    const result = await listLoader.current.load(workspaceInventory, startAfter);
-    if (!listLoader.current.isCurrent(result.revision) || metadataVersion.current !== metadata || JSON.stringify(workspaceBindingRef.current) !== binding) throw new Error("stale_workspace_list");
-    nodesRef.current = result.nodes;
-    inventoryVersion.current = metadata;
-    inventoryBinding.current = binding;
-    setNodes(result.nodes);
-    setWorkspacePageStart(startAfter);
-    workspacePageStartRef.current = startAfter;
-    setWorkspaceNextPage(result.nextAfterId);
+    const isCurrent = () => metadataVersion.current === metadata && JSON.stringify(workspaceBindingRef.current) === binding;
+    try {
+      const result = await workspace.current.loadInventory(workspaceInventory, startAfter);
+      if (!workspace.current.isCurrentInventory(result.revision) || !isCurrent()) return;
+      nodesRef.current = result.nodes;
+      inventoryVersion.current = metadata;
+      inventoryBinding.current = binding;
+      setNodes(result.nodes);
+      setWorkspacePageStart(startAfter);
+      workspacePageStartRef.current = startAfter;
+      setWorkspaceNextPage(result.nextAfterId);
+      setInventoryError("");
+    } catch (cause) {
+      if (isCurrent() && !String(cause).includes("stale_workspace_list")) setInventoryError(String(cause));
+    }
   }
 
   async function refreshWorkspaceSync(): Promise<void> {
     void refreshCredentialStatus();
-    const revision = ++workspaceSyncRevision.current;
     const registration = registrationVersion.current;
-    const current = await workspaceSyncState();
-    if (revision !== workspaceSyncRevision.current || registration !== registrationVersion.current || modeRef.current !== "workspace") return;
+    const update = await workspace.current.readSync(workspaceSyncState, () => registration === registrationVersion.current && modeRef.current === "workspace");
+    if (!update) return;
+    const current = update.state;
+    setWorkspaceConnecting(workspace.current.connecting);
     const key = JSON.stringify(current.binding);
     if (workspaceBindingRef.current && JSON.stringify(workspaceBindingRef.current) !== key) {
       setRestorePermission(null);
@@ -1307,6 +1316,7 @@ function App() {
       case "gateway_auth_required": setWorkspaceSyncMessage("gateway 인증 필요"); break;
       case "needs_review": setWorkspaceSyncMessage("서버 상태 대조 필요"); break;
     }
+    if (update.refreshInventory) await refreshWorkspace(workspacePageStartRef.current);
   }
 
   async function refreshCredentialStatus(): Promise<void> {
@@ -1425,7 +1435,8 @@ function App() {
     if (secretInput instanceof HTMLInputElement) secretInput.value = "";
     connecting.current = true;
     registrationVersion.current++;
-    listLoader.current.invalidate();
+    workspace.current.invalidate();
+    setInventoryError("");
     setBusy(true);
     setConnectionError("");
     try {
@@ -1459,7 +1470,8 @@ function App() {
     if (connecting.current) return;
     connecting.current = true;
     registrationVersion.current++;
-    listLoader.current.invalidate();
+    workspace.current.invalidate();
+    setInventoryError("");
     setBusy(true);
     setConnectionError("");
     try {
@@ -1857,9 +1869,7 @@ function App() {
         void refreshSyncStatus().catch((cause) => setConnectionError(String(cause)));
         searchNodesRef.current.clear();
         setSearchRevision((current) => current + 1);
-        void refreshWorkspace(workspacePageStartRef.current).catch((cause) => {
-          if (!String(cause).includes("stale_workspace_list")) setConnectionError(String(cause));
-        });
+        void refreshWorkspace(workspacePageStartRef.current);
       }
     });
     void (async () => {
@@ -1892,7 +1902,7 @@ function App() {
       disposed = true;
       credentialMounted.current = false;
       credentialRevision.current++;
-      listLoader.current.invalidate();
+      workspace.current.invalidate();
       controller.current = null;
       transmitter.current = null;
       clearTimeout(previewTimer.current);
@@ -1947,8 +1957,8 @@ function App() {
   const nodeIndex = useMemo(() => new Map(nodes.map((node) => [node.node_id, node])), [nodes]);
   const workspaceButtons = useMemo(() => nodes.filter((node) => node.kind === "file" && !node.deleted).map((node) => {
     const path = workspacePath(node, nodeIndex);
-    return <div key={node.node_id} className="workspace-file-row"><button disabled={busy} data-document={node.node_id} aria-current={state.selected === node.node_id ? "page" : undefined} onClick={() => void controller.current?.open(node.node_id)}>{path}</button><button disabled={busy || moveTarget !== null || moveRequestsOpen} data-move-node={node.node_id} aria-label={`${path} 이름 변경 또는 이동`} onClick={() => setMoveTarget({ node, path })}>이동</button><button disabled={busy || deleteTarget !== null || deleteRequestsOpen} data-delete-node={node.node_id} aria-label={`${path} 삭제`} onClick={() => setDeleteTarget({ node, path })}>삭제</button></div>;
-  }), [nodes, nodeIndex, busy, state.selected, deleteTarget, deleteRequestsOpen, moveTarget, moveRequestsOpen]);
+    return <div key={node.node_id} className="workspace-file-row"><button disabled={busy || workspaceConnecting} data-document={node.node_id} aria-current={state.selected === node.node_id ? "page" : undefined} onClick={() => void controller.current?.open(node.node_id)}>{path}</button><button disabled={busy || moveTarget !== null || moveRequestsOpen} data-move-node={node.node_id} aria-label={`${path} 이름 변경 또는 이동`} onClick={() => setMoveTarget({ node, path })}>이동</button><button disabled={busy || deleteTarget !== null || deleteRequestsOpen} data-delete-node={node.node_id} aria-label={`${path} 삭제`} onClick={() => setDeleteTarget({ node, path })}>삭제</button></div>;
+  }), [nodes, nodeIndex, busy, workspaceConnecting, state.selected, deleteTarget, deleteRequestsOpen, moveTarget, moveRequestsOpen]);
   const hasWorkspaceDocument = [...sessionModes.current.values()].some((session) => session.mode === "workspace" && session.uiId === state.selected);
   const visibleSyncStatus = state.remoteDeleted && (syncStatus === "서버 반영됨" || syncStatus === "서버 저장됨, 영수증 확인 중") ? "" : syncStatus;
 
@@ -1989,12 +1999,12 @@ function App() {
           if (!workspaceBindingRef.current || JSON.stringify(workspaceBindingRef.current) !== binding) return;
           if (!transmitter.current?.resumeRestoreAfterCancel(binding, operationId)) transmitter.current?.kick();
         }} />}
-        {mode === "workspace" && <button disabled={busy} onClick={() => { setConnectionError(""); void refreshWorkspace().catch((cause) => { if (!String(cause).includes("stale_workspace_list")) setConnectionError(String(cause)); }); }}>목록 새로고침</button>}
+        {mode === "workspace" && <button disabled={busy} onClick={() => void refreshWorkspace()}>목록 새로고침</button>}
         {mode === "workspace" && (workspacePageStart !== null || workspaceNextPage !== null) && <p>목록을 나누어 표시합니다. 다른 구간에 있는 폴더나 첨부는 경로와 링크가 표시되지 않을 수 있습니다.</p>}
-        {mode === "workspace" && workspacePageStart !== null && <button disabled={busy} onClick={() => { setConnectionError(""); void refreshWorkspace().catch((cause) => { if (!String(cause).includes("stale_workspace_list")) setConnectionError(String(cause)); }); }}>처음 목록</button>}
-        {mode === "workspace" && workspaceNextPage !== null && <button disabled={busy} onClick={() => { setConnectionError(""); void refreshWorkspace(workspaceNextPage).catch((cause) => { if (!String(cause).includes("stale_workspace_list")) setConnectionError(String(cause)); }); }}>다음 목록</button>}
+        {mode === "workspace" && workspacePageStart !== null && <button disabled={busy} onClick={() => void refreshWorkspace()}>처음 목록</button>}
+        {mode === "workspace" && workspaceNextPage !== null && <button disabled={busy} onClick={() => void refreshWorkspace(workspaceNextPage)}>다음 목록</button>}
         {mode === "workspace" && workspaceBinding && <button disabled={busy} aria-expanded={searchOpen} onClick={() => setSearchOpen((current) => !current)}>본문 검색</button>}
-        {mode === "workspace" && workspaceBinding && searchOpen && <SearchPanel key={searchRevision} binding={workspaceBinding} ports={searchPorts} open={(result) => void openSearchResult(result).catch((cause) => { setConnectionError(String(cause)); setSearchRevision((current) => current + 1); })} label={(result) => {
+        {mode === "workspace" && workspaceBinding && searchOpen && <SearchPanel revision={searchRevision} binding={workspaceBinding} ports={searchPorts} open={(result) => void openSearchResult(result).catch((cause) => { setConnectionError(String(cause)); setSearchRevision((current) => current + 1); })} label={(result) => {
           const node = (result as SearchResult & { node: NodeState | null }).node;
           return node ? workspacePath(node, nodeIndex) : result.node_id;
         }} />}
@@ -2102,7 +2112,7 @@ function App() {
           <p>저장에 실패한 내용입니다. 앱을 닫지 말고 아래 텍스트를 직접 전체 선택해 복사한 뒤 안전한 곳에 보관하세요. BOM과 바이트의 동일성은 보장하지 않으며 자동 파일 내보내기는 되지 않습니다.</p>
           <textarea data-testid="memory-source-fallback" aria-label="복구할 메모리 텍스트" readOnly value={memoryRecovery.text} />
         </section>}
-        <QueueAlerts error={state.error || probeError || connectionError} queueErrors={queueErrors} />
+        <QueueAlerts error={state.error || probeError || connectionError || inventoryError} queueErrors={queueErrors} />
         <div className="document-content">
           <div id="editor" ref={parent} />
           {preview && <section className="preview-pane" aria-label="Markdown 미리보기">{new TextEncoder().encode(previewSource).length > 1024 * 1024

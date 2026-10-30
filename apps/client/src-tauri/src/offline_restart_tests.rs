@@ -2,6 +2,91 @@ use super::*;
 use notryx_protocol::NodeState;
 use tempfile::TempDir;
 
+#[tokio::test]
+async fn offline_reload_with_live_session_reads_inventory_without_changing_drafts() {
+    let (_directory, server, runtime, session, document) = sync_bootstrap::tests::setup().await;
+    let snapshot = runtime.0.lock().await.gate.snapshot("owner").unwrap();
+    sync_bootstrap::bootstrap_metadata(&runtime, &snapshot, &session)
+        .await
+        .unwrap();
+    let binding = registration_binding(session.binding());
+    let expected = session.inventory(None).await.unwrap();
+    let (draft_before, outbox_before) = {
+        let mut state = runtime.0.lock().await;
+        let node = expected
+            .nodes
+            .iter()
+            .find(|node| node.name == "move.md")
+            .unwrap();
+        assert!(
+            state
+                .store
+                .cache_content(&binding, node, b"move source\n")
+                .await
+                .unwrap()
+        );
+        let draft = state
+            .store
+            .read_registered_checkpoint(&binding, &document)
+            .await
+            .unwrap();
+        let outbox = state.store.list_outbox(&binding, 0, 100).await.unwrap();
+        state.store.reset_edit_sessions();
+        state.product_sessions.clear();
+        state.remote_refresh_candidates.clear();
+        search_native::replace_renderer(&mut state, "reloaded-owner".into());
+        (draft, outbox)
+    };
+    server.shutdown().await.unwrap();
+
+    let page = inventory_for_renderer(&runtime, "reloaded-owner", None)
+        .await
+        .expect("a renderer reload must keep the cached inventory available offline");
+    assert_eq!(page.workspace_epoch, expected.workspace_epoch);
+    assert_eq!(page.nodes, expected.nodes);
+    assert_eq!(page.next_after_id, expected.next_after_id);
+    let tail = inventory_for_renderer(&runtime, "reloaded-owner", Some(page.nodes[0].node_id))
+        .await
+        .unwrap();
+    assert_eq!(tail.nodes, expected.nodes[1..]);
+    assert!(tail.next_after_id.is_none());
+    assert_eq!(
+        inventory_for_renderer(&runtime, "owner", None)
+            .await
+            .unwrap_err(),
+        "stale_renderer_session"
+    );
+    let mut state = runtime.0.lock().await;
+    assert!(Arc::ptr_eq(state.session.as_ref().unwrap(), &session));
+    assert_eq!(
+        state
+            .store
+            .read_registered_checkpoint(&binding, &document)
+            .await
+            .unwrap(),
+        draft_before
+    );
+    assert_eq!(
+        state.store.list_outbox(&binding, 0, 100).await.unwrap(),
+        outbox_before
+    );
+    let cached_node = expected
+        .nodes
+        .iter()
+        .find(|node| node.name == "move.md")
+        .unwrap();
+    assert_eq!(
+        state
+            .store
+            .read_cached_content(&binding, cached_node.node_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        b"move source\n"
+    );
+}
+
 async fn restart_offline() -> (TempDir, Runtime, RegistrationBinding, NodeState, String) {
     let (directory, server, runtime, session, draft_document) =
         sync_bootstrap::tests::setup().await;

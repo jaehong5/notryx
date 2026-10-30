@@ -105,11 +105,15 @@ test("검색 버튼 표시 직후에도 단축키가 처리된다", async () => 
 });
 
 test("단축키로 검색을 열고 현재 목록에 없는 결과도 기존 편집기로 연다", async () => {
+  fakes.open.mockResolvedValue({ document_id:nodeId, edit_session_id:"search-open-session", generation:"0", bytes_base64:"YmFzZQ==", readonly:true, local_draft:false, has_session:true, cache_warning:null, binding });
   const panel = await startSearch();
   await vi.waitFor(() => expect(fakes.scan).toHaveBeenCalledOnce());
   await vi.waitFor(() => expect(panel.querySelector(`[data-search-node="${nodeId}"]`)).not.toBeNull());
   panel.querySelector<HTMLButtonElement>(`[data-search-node="${nodeId}"]`)!.click();
   await vi.waitFor(() => expect(fakes.open).toHaveBeenCalledWith(node));
+  await vi.waitFor(() => expect(document.querySelector(`[data-search-node="${nodeId}"]`)).toBeNull());
+  expect(document.querySelector<HTMLInputElement>('[aria-label="본문 검색"] input')?.value).toBe("가나");
+  expect(document.querySelector<HTMLSelectElement>('[aria-label="본문 검색"] select')?.value).toBe("workspace");
 });
 
 test("검색 화면을 닫으면 진행 중인 요청을 식별자로 취소하고 늦은 결과를 버린다", async () => {
@@ -137,4 +141,6 @@ test("다른 문서를 열어 캐시가 바뀔 수 있으면 이전 검색 결�
   await vi.waitFor(() => expect(document.querySelector(`[data-document="${other.node_id}"]`)?.getAttribute("aria-current")).toBe("page"));
   await vi.waitFor(() => expect(document.querySelector(`[data-search-node="${nodeId}"]`)).toBeNull());
   expect(document.querySelector('[aria-label="본문 검색"]')?.textContent).not.toContain("이번 구간에서 검색 가능한 문서");
+  expect(document.querySelector<HTMLInputElement>('[aria-label="본문 검색"] input')?.value).toBe("가나");
+  expect(document.querySelector<HTMLSelectElement>('[aria-label="본문 검색"] select')?.value).toBe("workspace");
 });

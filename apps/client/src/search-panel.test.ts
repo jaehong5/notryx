@@ -82,9 +82,41 @@ test("등록이 바뀌거나 검색을 취소하면 이전 결과를 표시하�
   const oldId = vi.mocked(api.scan).mock.calls[0][1].request_id;
   const replacement = { ...binding, workspace_epoch: "new-epoch" };
   await act(async () => { root.render(createElement(SearchPanel, { binding: replacement, ports: api, open: vi.fn() })); });
+  expect(container.querySelector("input")!.value).toBe("");
+  expect(container.querySelector("select")!.value).toBe("");
   expect(api.cancel).toHaveBeenCalledWith(binding, oldId);
   await act(async () => { resolveOld(first); });
   expect(container.querySelector('[data-search-node="first"]')).toBeNull();
+  await act(async () => { root.unmount(); });
+});
+
+test("문서 변경은 검색 입력을 보존하고 이전 결과와 진행 중인 요청만 무효화한다", async () => {
+  const api = ports(), open = vi.fn();
+  const container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
+  await act(async () => { root.render(createElement(SearchPanel, { binding, ports: api, open, revision: 0 })); });
+  await act(async () => { input(container, "가나"); scope(container, "workspace"); });
+  await act(async () => { submit(container); });
+  expect(container.querySelector('[data-search-node="first"]')).not.toBeNull();
+  const oldId = vi.mocked(api.scan).mock.calls[0][1].request_id;
+  let finish!: (page: SearchPage) => void;
+  vi.mocked(api.scan).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  await act(async () => { button(container, "다음 결과").click(); });
+  await act(async () => { root.render(createElement(SearchPanel, { binding, ports: api, open, revision: 1 })); });
+  expect(api.cancel).toHaveBeenCalledWith(binding, oldId);
+  expect(container.querySelector("input")!.value).toBe("가나");
+  expect(container.querySelector("select")!.value).toBe("workspace");
+  expect(container.querySelector('[data-search-node]')).toBeNull();
+  expect(container.textContent).not.toContain("이번 구간에서 검색 가능한 문서");
+  expect(container.textContent).not.toContain("검색 중");
+  await act(async () => { finish(second); });
+  expect(container.querySelector('[data-search-node]')).toBeNull();
+  await act(async () => { submit(container); });
+  expect(vi.mocked(api.scan).mock.calls[2][1]).toMatchObject({ query: "가나", scope: "workspace", after: null });
+  expect(vi.mocked(api.scan).mock.calls[2][1].request_id).not.toBe(oldId);
+  await act(async () => { scope(container, "recovery"); });
+  await act(async () => { root.render(createElement(SearchPanel, { binding, ports: api, open, revision: 2 })); });
+  expect(container.querySelector("input")!.value).toBe("가나");
+  expect(container.querySelector("select")!.value).toBe("recovery");
   await act(async () => { root.unmount(); });
 });
 

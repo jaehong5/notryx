@@ -17,7 +17,10 @@ fn frozen_content_local_dismiss_is_registered_for_local_main_only() {
     assert!(handler.contains(&format!("frozen_content_local_native::{command}")));
     assert_eq!(capability["windows"], json!(["main"]));
     assert!(capability.get("remote").is_none());
-    assert_eq!(config["app"]["security"]["capabilities"], json!(["main"]));
+    assert_eq!(
+        config["app"]["security"]["capabilities"],
+        json!(["main", "mermaid"])
+    );
     assert!(
         capability["permissions"]
             .as_array()

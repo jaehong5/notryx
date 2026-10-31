@@ -540,6 +540,154 @@ mod tests {
         id
     }
 
+    async fn open_refresh_after_concurrent_catch_up(invalidate_generation: bool) {
+        use std::time::Duration;
+
+        let mut fixture = proxy_fixture_with_points(vec!["GET /v1/changes?"]).await;
+        let node = fixture
+            .session
+            .inventory(None)
+            .await
+            .unwrap()
+            .nodes
+            .into_iter()
+            .find(|node| node.name == "example.md")
+            .unwrap();
+        let request = crate::WorkspaceOpenRequest {
+            renderer_session_id: "owner".into(),
+            node: node.clone(),
+        };
+        let crate::WorkspaceOpenStart::Remote(remote) =
+            crate::begin_workspace_open(&fixture.runtime, &request, None)
+                .await
+                .unwrap()
+        else {
+            panic!("the selected document must not open a local draft");
+        };
+        let writer = writer(&fixture).await;
+        let auth = format!("Bearer {}", writer.device_token);
+        let epoch = writer.workspace_epoch.to_string();
+        let operation = uuid::Uuid::now_v7().to_string();
+        let bytes = b"latest open source\n";
+        let digest = "sha-256=:nZ5HtlTiMg8SMqPN26+4Fpn3B7xVyHS4+7MJFNGh4fM=:";
+        notryx_protocol::verify_content_digest(digest, bytes).unwrap();
+        let updated = http::request(
+            fixture.server.local_addr(),
+            "PUT",
+            &format!("/v1/nodes/{}/content", node.node_id),
+            &[
+                ("Authorization", &auth),
+                ("X-Workspace-Epoch", &epoch),
+                ("X-Device-Stream", &writer.device_stream_id),
+                ("X-Operation-Seq", "1"),
+                ("Idempotency-Key", &operation),
+                ("If-Match", node.content_etag.as_deref().unwrap()),
+                ("Content-Type", "application/octet-stream"),
+                ("Content-Digest", digest),
+            ],
+            bytes,
+        )
+        .await;
+        assert_eq!(updated.status, 200);
+        assert_eq!(remote.session.content(&node).await, Err(Error::Changed));
+        let through = fixture.session.server_info().await.unwrap().head_seq;
+        let response = http::request(
+            fixture.server.local_addr(),
+            "GET",
+            &format!(
+                "/v1/changes?after={}&through={}",
+                fixture.cursor.get(),
+                through.get()
+            ),
+            &[("Authorization", &auth)],
+            &[],
+        )
+        .await;
+        assert_eq!(response.status, 200);
+        let page: notryx_protocol::ChangesPage = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(page.covered_through, through);
+        let expected = page
+            .nodes
+            .iter()
+            .find(|current| current.node_id == node.node_id)
+            .unwrap()
+            .clone();
+        let runtime = Runtime(fixture.runtime.0.clone());
+        let task = tokio::spawn(async move { crate::refresh_open_node(&runtime, &remote).await });
+        tokio::time::timeout(Duration::from_secs(10), fixture.observed.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let mut state = fixture.runtime.0.lock().await;
+            state
+                .store
+                .apply_changes(&fixture.binding, &page, through)
+                .await
+                .unwrap();
+            if invalidate_generation {
+                state
+                    .transmission_gate
+                    .block(&fixture.binding, TransmissionBlock::ProtocolMismatch);
+                assert!(
+                    state
+                        .transmission_gate
+                        .clear(&fixture.binding, TransmissionBlock::ProtocolMismatch)
+                );
+            }
+        }
+        fixture.release.send(()).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut state = fixture.runtime.0.lock().await;
+        assert_eq!(
+            state
+                .store
+                .sync_index(&fixture.binding)
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            through
+        );
+        let draft = state
+            .store
+            .read_registered_checkpoint(&fixture.binding, &fixture.document)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(draft.bytes, b"peer draft");
+        assert_eq!(draft.base_bytes, b"peer base");
+        assert_eq!(
+            state
+                .store
+                .read_outbox_operation(&fixture.binding, &fixture.operation.operation_id)
+                .await
+                .unwrap(),
+            Some(fixture.operation)
+        );
+        drop(state);
+        fixture.proxy.abort();
+        fixture.server.shutdown().await.unwrap();
+        if invalidate_generation {
+            assert_eq!(result, Err("stale_sync".into()));
+        } else {
+            assert_eq!(result, Ok(Some(expected)));
+        }
+    }
+
+    #[tokio::test]
+    async fn open_refresh_accepts_concurrent_cursor_progress() {
+        open_refresh_after_concurrent_catch_up(false).await;
+    }
+
+    #[tokio::test]
+    async fn open_refresh_rejects_invalidated_generation_after_cursor_progress() {
+        open_refresh_after_concurrent_catch_up(true).await;
+    }
+
     #[tokio::test]
     async fn paged_catch_up_uses_first_head_when_server_changes_between_pages() {
         use std::time::Duration;

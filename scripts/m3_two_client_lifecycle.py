@@ -11,6 +11,22 @@ def verify_lifecycle(helpers, clients, notes, state, root_id, folder_id,
     require = helpers.require
     deadline = time.monotonic() + 300
 
+    for js, *_ in clients:
+        js("""const bridge=window.__TAURI_INTERNALS__,invoke=bridge.invoke;
+            window.notryxLifecycleOpenLog=[];
+            bridge.invoke=async function(command,...args) {
+                if(!['workspace_open','workspace_open_draft','workspace_close'].includes(command))
+                    return invoke.call(this,command,...args);
+                const entry={command,status:'pending'};
+                window.notryxLifecycleOpenLog.push(entry);
+                window.notryxLifecycleOpenLog=window.notryxLifecycleOpenLog.slice(-8);
+                try { const result=await invoke.call(this,command,...args); entry.status='ok'; return result; }
+                catch(error) { entry.status='error';
+                    entry.code=/^[A-Za-z_]{1,80}$/.test(String(error))?String(error):'unclassified';
+                    throw error;
+                }
+            };""")
+
     def wait(check, description):
         until = min(deadline, time.monotonic() + 60)
         while time.monotonic() < until:
@@ -104,12 +120,27 @@ def verify_lifecycle(helpers, clients, notes, state, root_id, folder_id,
                 && document.querySelector('.cm-content[contenteditable=true]')?.cmTile.root.view.state.doc.toString()===arguments[1]""", node_id, text), "exact editable source")
         except helpers.TestFailure:
             diagnostic = clients[index][0]("""const editor=document.querySelector('.cm-content');
+                const button=document.querySelector('[data-document="'+arguments[0]+'"]');
+                const alerts=[...document.querySelectorAll('[role=alert]')]
+                    .map(e=>(e.textContent||'').trim().replace(/^Error:\\s*/,''));
+                const messages=[
+                    '한글 조합을 마친 뒤 문서를 전환해 주세요.',
+                    '최신 문서를 확인하지 못했습니다.',
+                    '동기화 상태를 확인한 뒤 문서를 다시 열어 주세요.',
+                    '문서가 계속 변경되고 있습니다. 목록을 갱신한 뒤 다시 열어 주세요.',
+                    '문서를 열지 못했습니다. 상태를 확인한 뒤 다시 시도해 주세요.',
+                    '문서 갱신 결과를 확인할 수 없습니다. 앱을 다시 열어 확인해 주세요.',
+                    '갱신한 문서를 표시하지 못했습니다. 앱을 다시 열어 확인해 주세요.'
+                ];
                 return {selected:document.querySelector('[aria-current=page]')?.dataset.document===arguments[0],
                     editable:editor?.getAttribute('contenteditable'),focused:document.hasFocus(),
+                    button_present:!!button,button_disabled:button?.disabled,
+                    composing:editor?.cmTile.root.view.composing,
                     actual_length:editor?.cmTile.root.view.state.doc.length,expected_length:arguments[1].length,
                     matches:editor?.cmTile.root.view.state.doc.toString()===arguments[1],
-                    alerts:[...document.querySelectorAll('[role=alert]')].map(e=>(e.textContent||'').trim())
-                        .filter(value=>/^[A-Za-z_]{1,80}$/.test(value))};""", node_id, text)
+                    alert_count:alerts.length,
+                    open_calls:window.notryxLifecycleOpenLog,
+                    alerts:alerts.filter(value=>/^[A-Za-z_]{1,80}$/.test(value)||messages.includes(value))};""", node_id, text)
             print(f'M3 lifecycle open diagnostic: client={index} {json.dumps(diagnostic)}', flush=True)
             raise
 

@@ -1242,7 +1242,8 @@ async fn refresh_open_node(
     remote: &WorkspaceRemoteOpen,
 ) -> Result<Option<notryx_protocol::NodeState>, String> {
     let binding = registration_binding(remote.session.binding());
-    {
+    // A concurrent catch-up can commit the page first. Retry only under the original identity and generation.
+    for attempt in 0..2 {
         let state =
             sync_bootstrap::checked_state(runtime, &remote.snapshot, &remote.session).await?;
         if !state
@@ -1251,15 +1252,20 @@ async fn refresh_open_node(
         {
             return Err("stale_sync".into());
         }
+        drop(state);
+        let result = sync_catchup::catch_up_for_generation(
+            runtime,
+            Some(&remote.snapshot),
+            &remote.session,
+            Some(remote.generation),
+        )
+        .await;
+        if attempt == 0 && matches!(result, Err(sync_catchup::CatchUpError::StaleSync)) {
+            continue;
+        }
+        result.map_err(|error| error.message())?;
+        break;
     }
-    sync_catchup::catch_up_for_generation(
-        runtime,
-        Some(&remote.snapshot),
-        &remote.session,
-        Some(remote.generation),
-    )
-    .await
-    .map_err(|error| error.message())?;
     let mut state =
         sync_bootstrap::checked_state(runtime, &remote.snapshot, &remote.session).await?;
     if !state

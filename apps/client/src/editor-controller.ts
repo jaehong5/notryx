@@ -242,6 +242,7 @@ export class EditorController {
   }
 
   async open(id: string): Promise<void> {
+    if (this.busy === "refreshing") await this.remoteRefresh;
     await this.openInternal(id);
   }
 

@@ -180,6 +180,27 @@ test("a metadata notification during refresh retries once after a stale candidat
   await controller.dispose();
 });
 
+test.each([true, false])("a document switch waits for an active remote commit (success: %s)", async (success) => {
+  const { controller, ports, states, views } = fixture();
+  const commit = deferred<boolean>();
+  ports.prepareRemoteRefresh = vi.fn(async () => ({ token: "refresh", bytes_base64: btoa("remote") }));
+  ports.commitRemoteRefresh = vi.fn(() => commit.promise);
+  await controller.open("a");
+  const refresh = controller.refreshRemote();
+  await vi.waitFor(() => expect(ports.commitRemoteRefresh).toHaveBeenCalledOnce());
+  const opening = controller.open("b");
+  expect(ports.openDocument).toHaveBeenCalledTimes(1);
+  expect(views[0].editable).toBe(false);
+  if (success) commit.resolve(true);
+  else commit.reject(new Error("commit outcome unknown"));
+  await Promise.all([refresh, opening]);
+  expect(states.at(-1)?.selected).toBe(success ? "b" : "a");
+  expect(ports.openDocument).toHaveBeenCalledTimes(success ? 2 : 1);
+  expect(ports.saveDocument).not.toHaveBeenCalled();
+  if (!success) expect(states.at(-1)?.error).toContain("문서 갱신 결과를 확인할 수 없습니다");
+  await controller.dispose();
+});
+
 test("remote refresh locks the editor during commit and updates the source without a local save", async () => {
   const { controller, ports, views } = fixture();
   const commit = deferred<boolean>();
@@ -189,8 +210,6 @@ test("remote refresh locks the editor during commit and updates the source witho
   const refresh = controller.refreshRemote();
   await vi.waitFor(() => expect(ports.commitRemoteRefresh).toHaveBeenCalledOnce());
   expect(views[0].editable).toBe(false);
-  await controller.open("b");
-  expect(ports.openDocument).toHaveBeenCalledTimes(1);
   commit.resolve(true);
   await refresh;
   expect(views[0].replaceSource).toHaveBeenCalledOnce();

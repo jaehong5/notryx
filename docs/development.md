@@ -1,6 +1,8 @@
 # Notryx 개발 환경
 
-이 문서는 Ubuntu 24.04 x86_64에서 Linux와 Android ARM64 개발에 사용하는 도구와 확인 명령을 정리한다. 현재 `0.1.0`의 클라이언트는 서버 연결, 편집과 기기 초안 저장을 제공하며 동기화 기능은 개발 중이다. Linux 서버는 실행, 로컬 관리, 기기 등록과 인증된 파일 및 폴더 관리를 제공한다. 원문 조회와 조건부 저장, 이름 변경과 이동, 삭제와 복원 및 기기별 작업 결과 관리를 지원한다. M3의 두 Linux 클라이언트 통합 검증은 아직 완료되지 않았다.
+이 문서는 Ubuntu 24.04 x86_64에서 Linux와 Android ARM64 개발에 사용하는 도구와 확인 명령을 정리한다. 현재 `0.1.0`은 M3 Linux 개인 시험판 준비 단계다. 클라이언트는 기기 초안, 서버 동기화와 재연결, 충돌 대조와 해결, 휴지통 복원 및 캐시 검색을 제공한다. 서버는 인증된 파일 및 폴더 관리, 변경 이력과 SSE, 조건부 저장, 기기별 작업 결과 관리 및 cold backup/restore를 지원한다.
+
+2026-10-31 기준으로 두 독립 Linux 앱의 정상 CRUD, 서버 재연결, 충돌 해결 및 기본 renderer 경계를 실제 서버와 기기 SQLite로 검증했다. CI에도 두 앱의 정상 사용과 재연결 시험을 연결했다. 기존 M2 성능과 AT-54 진행 표시 기준은 미통과다. 독립 백업 보관, 실제 사용자 키링 재시작과 현재 버전의 물리 IME 및 전원 장애는 미검증이며 M3 전체 게이트 통과로 표시하지 않는다.
 
 ## 버전과 설치 위치
 
@@ -103,6 +105,10 @@ npm run tauri -- dev
 
 웹 개발 서버는 `127.0.0.1:1420`에서 실행한다. 브라우저 단독 실행은 native 초안 저장을 제공하지 않으므로 실제 편집 시험에는 Tauri 앱을 사용한다.
 
+작업 공간에 연결하려면 아래의 서버 실행 및 기기 등록 절차를 따른다. 앱에 서버 주소, 작업 공간 ID와 일회용 등록 비밀을 입력한다. Linux Secret Service에 저장한 인증정보는 앱 재시작 시 기기 신원을 확인한 뒤 사용한다. 비밀 저장소가 없어 세션 전용으로 등록하면 앱에 안내가 표시되며 재시작 후 다시 등록해야 한다. 실제 사용자 키링을 사용하는 재시작 시험은 별도로 남아 있다.
+
+기기 자료는 기본 앱 데이터 디렉터리의 `org.notryx.m0`에 저장하며 Linux 기본 경로는 `${XDG_DATA_HOME:-$HOME/.local/share}/org.notryx.m0`다. `NOTRYX_M0_DATA_DIR`를 지정하면 그 경로를 사용한다. 서로 다른 시험 기기는 별도 데이터 경로를 사용한다. 재등록 후에도 이전 초안과 base/outbox는 보존하며, 복구 화면에서 대조하고 명시적으로 처리한다.
+
 ```bash
 bash scripts/check.sh
 npm run tauri -- build --debug --no-bundle
@@ -110,6 +116,7 @@ xvfb-run -a python3 scripts/m0-webdriver.py
 cargo build --locked -p notryx-server
 xvfb-run -a python3 scripts/m2-workspace-webdriver.py
 xvfb-run -a python3 scripts/m2-migration-recovery-webdriver.py
+scripts/m3-secret-no-service.sh xvfb-run -a python3 scripts/m2-workspace-webdriver.py --remote-change reopen --two-client-lifecycle
 xvfb-run -a python3 scripts/m0-webdriver.py --measure
 cargo run --locked -p notryx-client-store --example checkpoint_bench
 python3 scripts/m0-fsync.py
@@ -120,7 +127,7 @@ WebKitWebDriver를 별도 위치에 추출했다면 `--driver /path/to/WebKitWeb
 
 전체 검사는 TS build/lint/unit, Rust format/clippy/unit/integration, 생성 계약 drift, 순수 계층 의존성과 npm 보안 정보를 확인한다. 저장 시험은 독립 임시 DB를 만들고 실제 프로세스 강제 종료도 수행한다. TLS 시험은 OpenSSL CLI로 임시 자체 서명 인증서와 loopback 서버를 만든다. WebDriver 역시 임시 client store를 사용하며 결과와 화면을 `.artifacts/m0-webview`에 남긴다. 성능은 검사 프로세스 종료 코드와 구분해 측정 전에 정한 기준에 따라 판정한다.
 
-`.github/workflows/check.yml`은 Linux 검사와 Tauri WebDriver 시험, 합성 서버와 실제 클라이언트의 M2 통합 시험, 마이그레이션 복구 시험, 서버 Docker 이미지 빌드와 격리 실행 시험을 CI에 연결한다. M0 WebDriver 실패 자료와 Docker 시험 결과는 각각 7일간 보관한다. M2 시험은 credential과 본문을 로그나 결과 파일에 기록하지 않는다. CI는 이미지를 게시하거나 서버에 배포하지 않는다. 원격 GitHub Actions 실행은 소스를 올린 뒤 별도로 확인해야 한다. 프로토콜 파일은 `cargo run -p notryx-protocol --bin generate-contracts`로 생성하고 직접 수정하지 않는다.
+`.github/workflows/check.yml`은 Linux 검사와 Tauri WebDriver 시험, 합성 서버와 실제 클라이언트의 M2 통합 시험, 마이그레이션 복구, M3 두 클라이언트의 CRUD와 서버 재연결, 서버 Docker 이미지 빌드와 격리 실행 시험을 CI에 연결한다. M0 WebDriver 실패 자료, M3 통합 실패 로그와 Docker 시험 결과는 각각 7일간 보관한다. M3 시험은 한 PC에서 독립 기기 저장소와 Secret Service가 없는 격리 D-Bus를 사용하므로 실제 사용자 키링이나 두 물리 PC 검증이 아니다. credential과 본문을 로그나 결과 파일에 기록하지 않는다. CI는 이미지를 게시하거나 서버에 배포하지 않는다. 원격 GitHub Actions 실행은 소스를 올린 뒤 별도로 확인해야 한다. 프로토콜 파일은 `cargo run -p notryx-protocol --bin generate-contracts`로 생성하고 직접 수정하지 않는다.
 
 
 ## 개발 서버 실행과 조회
@@ -129,11 +136,11 @@ WebKitWebDriver를 별도 위치에 추출했다면 `--driver /path/to/WebKitWeb
 
 ### 중단 상태의 백업 시험
 
-합성 workspace의 서버와 외부 writer를 중지한 뒤, 아직 존재하지 않는 독립 경로에 사본을 만든다. 백업 경로의 상위 디렉터리는 현재 사용자 소유이고 group과 other에 접근 권한이 없어야 한다. POSIX access ACL이 있거나 이를 확인할 수 없는 파일시스템은 거절한다. 같은 UID의 다른 프로세스는 같은 권한을 가지므로 신뢰 범위에 포함된다. 백업 대상은 notes와 state 전체 및 지정한 서버 설정 파일이다. 이어서 manifest에 기록한 파일 집합과 내용 hash를 확인한다.
+외부 writer를 멈추고 서버가 마지막 변경과 진행 중 작업을 반영했는지 확인한 뒤 서버를 정상 종료한다. 읽기 오류나 미해결 복구 상태가 남으면 정상 백업으로 판정하지 않는다. 아래 명령은 아직 존재하지 않는 독립 경로에 사본을 만든다. 백업 경로의 상위 디렉터리는 현재 사용자 소유이고 group과 other에 접근 권한이 없어야 한다. POSIX access ACL이 있거나 이를 확인할 수 없는 파일시스템은 거절한다. 같은 UID의 다른 프로세스는 같은 권한을 가지므로 신뢰 범위에 포함된다. 백업 대상은 notes와 state 전체 및 지정한 서버 설정 파일이다. 이어서 manifest에 기록한 파일 집합과 내용 hash를 확인한다. 저장소 루트에서 빌드한 바이너리로 실행한다.
 
 ```bash
-notryx-server backup --config /path/to/server.toml /path/to/new-backup
-notryx-server backup-verify /path/to/new-backup
+target/debug/notryx-server backup --config /path/to/server.toml /path/to/new-backup
+target/debug/notryx-server backup-verify /path/to/new-backup
 ```
 
 백업은 workspace 잠금을 확인하고 복사본의 SQLite 무결성, 참조 객체, 미만료 ready upload와 live 문서의 경로 및 본문을 검사한다. 심볼릭 링크는 따라가지 않고 링크 자체를 보존한다. notes나 state 내부의 다른 mount, FIFO, socket과 장치 파일은 지원하지 않으며 발견하면 완료 백업을 만들지 않는다. notes와 state 루트 아래의 디렉터리 깊이는 최대 64단계이며 제외 디렉터리에도 이 제한을 적용한다. 더 깊으면 `backup_directory_depth_exceeded` 오류로 중단한다. manifest가 64 MiB를 넘으면 `backup_manifest_too_large` 오류로 중단한다. 프로세스의 파일 디스크립터 한도가 낮으면 그보다 얕은 트리에서도 오류가 날 수 있다. runtime lock은 백업하지 않는다. 백업 명령이 실패하면 출력 경로를 사용하지 않는다. 실패한 작업은 이름에 `.incomplete`가 포함된 디렉터리나 불완전한 대상 디렉터리를 남길 수 있다. 마지막 디렉터리 fsync와 완료 marker 정리가 모두 실패하면 `backup_publication_indeterminate`를 반환한다. 이때 marker가 남아 검증 명령이 성공하더라도 백업 명령의 성공이나 영속성을 증명하지 못한다. 실패한 출력은 별도로 격리하고 새 경로에서 백업을 다시 실행한다.
@@ -145,7 +152,7 @@ notryx-server backup-verify /path/to/new-backup
 서버와 외부 writer를 중지하고 검증된 백업을 아직 존재하지 않는 독립 경로에 복원한다. 복원 대상의 상위 디렉터리에도 백업과 같은 소유권, 권한과 ACL 제한이 적용된다. 원본 notes, state 또는 백업 내부에 대상 경로를 지정하지 않는다. 경로와 inode 검사로 감지할 수 없는 mount 별칭이 있을 수 있으므로 운영자가 독립된 경로인지 확인해야 한다.
 
 ```bash
-notryx-server restore /path/to/new-backup /path/to/new-restore
+target/debug/notryx-server restore /path/to/new-backup /path/to/new-restore
 ```
 
 복원은 격리 사본에서 본문과 서버 상태를 확인하고 새 workspace epoch를 발급한다. schema 9 백업은 원본 백업을 수정하지 않고 복원 사본을 검증한 뒤 schema 10으로 이전한다. 기존 device token과 미사용 pairing secret은 폐기하므로 기기를 다시 등록해야 한다. `config/server.toml`은 새 notes와 state, loopback 임시 주소, 복원 경로 안의 새 admin socket을 가리킨다. 생성할 Unix socket 절대 경로가 107 bytes를 초과하면 `restore_admin_socket_path_too_long` 오류가 발생한다. 이때는 복원 대상의 경로를 더 짧게 지정한다. `config/original-server.toml`은 원래 경로가 들어 있는 참고 사본이다. 참고 사본으로 서버를 실행하지 않는다. 실제 배포 설정과 공개 주소는 운영자가 별도로 정한다.
@@ -153,6 +160,17 @@ notryx-server restore /path/to/new-backup /path/to/new-restore
 복원 명령이 실패하면 출력 경로를 사용하지 않는다. 게시 후 상위 디렉터리 fsync가 실패하면 `restore_publication_indeterminate`가 반환되고 대상 경로가 이미 존재할 수 있다. 실패한 출력은 별도로 격리하고 새 경로에서 다시 복원한다. 기기의 미전송 초안과 outbox는 서버 백업에 포함되지 않으므로 각 기기의 저장소도 별도로 보존한다.
 
 파일 게시에는 로컬 파일시스템의 `O_TMPFILE` 지원도 필요하다. 새 파일은 이름 없는 파일을 완성한 뒤 최종 이름으로 연결한다. 지원하지 않는 환경에서 일반 임시 파일로 우회하지 않는다. 실제 배포 파일시스템에서 저장과 재시작 시험을 실행해야 한다.
+
+### 백업 보관과 기기 자료 준비
+
+백업 명령과 `backup-verify` 성공만으로 운영 준비가 끝나지는 않는다. 시험판에 실제 자료를 넣기 전에 다음을 확인한다.
+
+1. 원본과 다른 디스크 또는 원격 저장소에 보관할 위치를 정한다. 같은 디스크의 다른 디렉터리는 장치 손실에 대비한 독립 백업이 아니다. 원본 저장 위치를 바꾸면 백업 위치도 다시 확인한다. 디스크의 실제 mount, 쓰기 권한과 여유 공간을 확인하고 전용 비공개 디렉터리를 사용한다.
+2. notes/state와 서버 설정 외에 Compose 및 reverse proxy 설정 등 복구에 필요한 배포 설정을 별도로 보관한다. 현재 백업 명령은 배포 설정을 자동 수집하지 않는다. 백업에는 본문과 인증 상태가 포함되므로 공개 파일 공유 경로에 두지 않고 보관 사본을 암호화한다.
+3. 독립 보관본을 `backup-verify`로 확인하고 격리된 빈 경로에 복원한다. 복원본의 `config/server.toml`로 서버를 시작해 원문과 목록, 삭제 이력을 확인한다. 기존 기기는 새 epoch에 다시 등록하고 이전 초안이 보존되는지 대조한다.
+4. 각 기기의 미전송 자료는 앱에서 원문을 내보내거나, 앱을 완전히 종료한 뒤 위의 기기 데이터 디렉터리 전체를 별도로 복사한다. `drafts.sqlite3`뿐 아니라 남아 있는 WAL 등도 보존한다. 인증정보는 별도 비밀 저장소에 있으므로 데이터 디렉터리 사본만으로 인증 복원까지 보장하지 않는다. 이 절차의 안내를 기기 손실 후 복구 검증의 완료로 간주하지 않는다.
+
+현재 자동 시험은 같은 ext4 장치의 백업과 빈 경로 복원, 두 기존 기기의 재등록 후 draft/base/outbox 보존을 확인했다. 독립 보관본에서의 복원과 실제 사용자 키링 재시작은 별도 확인이 필요하다. M4에서는 서버 실행 중의 온라인 논리 백업과 복원을 구현한다.
 
 ### 새 저장소와 실행
 

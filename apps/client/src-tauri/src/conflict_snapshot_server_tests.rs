@@ -551,6 +551,24 @@ async fn write_external_and_observe(rig: &Rig, bytes: &[u8]) -> NodeState {
     .expect("watcher did not publish the external synthetic document")
 }
 
+async fn prepare_after_external_change(
+    rig: &Rig,
+) -> Result<crate::conflict_snapshot_native::ConflictSnapshot, String> {
+    // Inventory can publish the new revision before a concurrent object recheck finishes.
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            match prepare(rig).await {
+                Err(error) if error == "server_not_ready" => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                result => return result,
+            }
+        }
+    })
+    .await
+    .expect("server did not settle after the external synthetic change")
+}
+
 #[tokio::test]
 async fn conflict_snapshot_rejects_non_utf8_peer_document_without_changing_data() {
     let rig = rig().await;
@@ -558,7 +576,7 @@ async fn conflict_snapshot_rejects_non_utf8_peer_document_without_changing_data(
     let remote = write_external_and_observe(&rig, bytes).await;
     assert_ne!(remote.content_rev, rig.first_peer.content_rev);
     assert_eq!(
-        prepare(&rig).await.err().as_deref(),
+        prepare_after_external_change(&rig).await.err().as_deref(),
         Some("unsupported_content")
     );
     assert_preserved(&rig).await;
@@ -578,7 +596,7 @@ async fn conflict_snapshot_rejects_over_5_mib_peer_document_without_changing_dat
     let remote = write_external_and_observe(&rig, &bytes).await;
     assert_ne!(remote.content_rev, rig.first_peer.content_rev);
     assert_eq!(
-        prepare(&rig).await.err().as_deref(),
+        prepare_after_external_change(&rig).await.err().as_deref(),
         Some("unsupported_content")
     );
     assert_preserved(&rig).await;

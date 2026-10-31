@@ -67,9 +67,22 @@ async fn set_remote_bytes(rig: &Rig, bytes: &[u8]) -> NodeState {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     let snapshot = rig.runtime.0.lock().await.gate.snapshot("owner").unwrap();
-    crate::sync_catchup::catch_up_metadata(&rig.runtime, &snapshot, &rig.session)
-        .await
-        .unwrap();
+    // A published revision does not mean the server has finished its object rechecks.
+    tokio::time::timeout_at(until, async {
+        loop {
+            match crate::sync_catchup::catch_up_metadata(&rig.runtime, &snapshot, &rig.session)
+                .await
+            {
+                Err(error) if error == "server_not_ready" => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                result => break result,
+            }
+        }
+    })
+    .await
+    .expect("server did not settle after the external synthetic change")
+    .unwrap();
     node
 }
 

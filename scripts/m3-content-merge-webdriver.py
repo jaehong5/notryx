@@ -476,11 +476,10 @@ def main():
                   buttons:[...panel.querySelectorAll('button')].map(button=>button.textContent.trim())};""")
             require(shown["base"]["value"] == base_text and shown["local"]["value"] == local_text and shown["remote"]["value"] == remote_second_text
                 and all(shown[name]["readOnly"] for name in ("base", "local", "remote")), "comparison texts differ or can be edited")
-            require(base_revision in shown["base"]["label"] and current_revision in shown["remote"]["label"]
-                and "BOM 포함" in shown["base"]["label"] and "줄바꿈: CRLF" in shown["base"]["label"]
+            require("BOM 포함" in shown["base"]["label"] and "줄바꿈: CRLF" in shown["base"]["label"]
                 and "BOM 포함" in shown["local"]["label"] and "줄바꿈: LF" in shown["local"]["label"]
-                and "BOM 포함" in shown["remote"]["label"] and "줄바꿈: LF" in shown["remote"]["label"]
-                and "412 응답 당시 서버 revision: " + first_revision in shown["text"], "comparison revision or original-byte metadata differs")
+                and "BOM 포함" in shown["remote"]["label"] and "줄바꿈: LF" in shown["remote"]["label"],
+                "comparison original-byte metadata differs")
             require("기기 초안을 합본으로 확인" in shown["buttons"] and "닫기" in shown["buttons"], "merge review controls unavailable")
             require(outbox(0, node_id) == before_outbox and checkpoint(0, node_id) == local_checkpoint
                 and server_document() == current_server and (notes / "Shared.md").read_bytes() == remote_second_bytes

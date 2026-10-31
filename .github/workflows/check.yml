@@ -8,7 +8,7 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -25,12 +25,21 @@ jobs:
       - run: cargo build --locked -p notryx-server
       - run: xvfb-run -a python3 scripts/m2-workspace-webdriver.py
       - run: xvfb-run -a python3 scripts/m2-migration-recovery-webdriver.py
+      - name: Verify M3 two-client lifecycle
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          mkdir -p ci-artifacts
+          scripts/m3-secret-no-service.sh xvfb-run -a python3 scripts/m2-workspace-webdriver.py \
+            --remote-change reopen --two-client-lifecycle 2>&1 | tee ci-artifacts/m3-lifecycle.log
       - name: Upload WebDriver failure diagnostics
         if: failure()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: webdriver-failure
-          path: ci-artifacts/webdriver/
+          path: |
+            ci-artifacts/webdriver/
+            ci-artifacts/m3-lifecycle.log
           if-no-files-found: ignore
           retention-days: 7
   docker:

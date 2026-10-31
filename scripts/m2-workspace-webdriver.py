@@ -490,6 +490,8 @@ def main():
     parser.add_argument("--open-race", action="store_true")
     parser.add_argument("--open-race-delete", action="store_true")
     parser.add_argument("--remote-change", choices=("clean", "dirty", "reopen"))
+    parser.add_argument("--two-client-lifecycle", action="store_true",
+                        help="Extend --remote-change reopen with CRUD, server reconnect and renderer checks")
     args = parser.parse_args()
     require(not (args.measure and args.recovery_dialogs), "performance and dialog verification must run separately")
     require(not args.paste_probe or args.measure, "paste probe requires the release measurement setup")
@@ -500,6 +502,8 @@ def main():
     require(not args.open_race or not (args.measure or args.recovery_dialogs or args.boundary_25m or args.verify_5m or args.unscoped_recovery or args.resync_race), "open race verification must run separately")
     require(not args.open_race_delete or not (args.measure or args.recovery_dialogs or args.boundary_25m or args.verify_5m or args.unscoped_recovery or args.resync_race or args.open_race), "open deletion race verification must run separately")
     require(not args.remote_change or not (args.measure or args.recovery_dialogs or args.boundary_25m or args.verify_5m or args.unscoped_recovery or args.resync_race or args.open_race or args.open_race_delete), "remote change verification must run separately")
+    require(not args.two_client_lifecycle or args.remote_change == "reopen",
+            "two-client lifecycle requires --remote-change reopen")
     server_binary = str(Path(args.server).resolve())
     client_binary = str(Path(args.binary).resolve())
     if args.measure:
@@ -1409,6 +1413,31 @@ def main():
                     require(js("return document.querySelector('.cm-content').cmTile.root.view.state.doc.toString()") == opened_text + marker, "dirty editor changed after peer notice")
                     require(checkpoint() == saved and outbox_snapshot() == original_outbox, "dirty draft changed after peer notice")
                 print(f"M3 WebView resume catch-up passed: {args.remote_change} editor and synthetic peer.", flush=True)
+                if args.two_client_lifecycle:
+                    test_stage = "two-client lifecycle"
+                    from m3_two_client_lifecycle import verify_lifecycle
+
+                    def server_power(running):
+                        nonlocal server
+                        if not running:
+                            stop(server)
+                            server = None
+                            return
+                        server = subprocess.Popen(
+                            [server_binary, "serve", "--config", str(config)], stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, text=True, start_new_session=True,
+                        )
+                        ready, _, _ = select.select([server.stdout], [], [], 30)
+                        require(bool(ready) and server.stdout.readline().strip() == "server_started"
+                                and leader_running(server), "synthetic server did not restart")
+
+                    verify_lifecycle(
+                        sys.modules[__name__],
+                        [(js, wd, session_id, client_data, saved_focus[2]),
+                         (peer_js, peer_wd, peer_session, peer_data, peer_focus[2])],
+                        notes, state, info["root_id"], folder_id, server_power,
+                        remote_probe.server_port, remote_requests,
+                    )
                 return
             if args.resync_race:
                 def document_change_count():

@@ -1,4 +1,4 @@
-include!("conflict_merge_queue_native_tests.rs");
+use crate::conflict_snapshot_native::test_support::merge_queue::*;
 
 #[derive(Debug, PartialEq, Eq)]
 struct PendingMergeDiscovery {

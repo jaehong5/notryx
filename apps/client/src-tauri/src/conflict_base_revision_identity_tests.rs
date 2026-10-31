@@ -1,4 +1,4 @@
-include!("conflict_snapshot_server_tests.rs");
+use crate::conflict_snapshot_native::test_support::snapshot::*;
 
 const BASE_HASH: &str = "sha256:cd77865662cf343ac50bd06999bc7df6fef875e24724c69fa83276cfe0c93573";
 const LOCAL_HASH: &str = "sha256:90a02348f62b287c95bb84ef49e7bd7e5fa5a6867d0a0772eb1e296d9a6d45de";

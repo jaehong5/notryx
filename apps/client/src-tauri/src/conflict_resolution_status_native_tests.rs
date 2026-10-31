@@ -1,4 +1,4 @@
-include!("conflict_snapshot_server_tests.rs");
+use crate::conflict_snapshot_native::test_support::snapshot::*;
 
 async fn seed_pending_status(rig: &Rig) -> notryx_client_store::ContentConflictIntent {
     let shown = prepare(rig).await.unwrap();

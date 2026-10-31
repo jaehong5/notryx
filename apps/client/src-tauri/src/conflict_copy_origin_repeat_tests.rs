@@ -1,4 +1,4 @@
-include!("conflict_copy_origin_reconsider_tests.rs");
+use crate::conflict_snapshot_native::test_support::copy_progress::*;
 
 #[tokio::test]
 async fn saved_copy_survives_repeated_original_reconsideration_and_remote_completion() {

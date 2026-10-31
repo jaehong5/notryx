@@ -1,4 +1,4 @@
-include!("send_content_conflict_copy_content_tests.rs");
+use crate::conflict_snapshot_native::test_support::send_copy_content::*;
 
 use sqlx::Connection;
 

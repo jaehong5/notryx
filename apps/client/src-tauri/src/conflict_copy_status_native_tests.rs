@@ -1,22 +1,4 @@
-include!("conflict_copy_progress_native_tests.rs");
-
-fn copy_status_request(rig: &Rig) -> notryx_protocol::WorkspaceConflictResolutionRequest {
-    notryx_protocol::WorkspaceConflictResolutionRequest {
-        renderer_session_id: OWNER.into(),
-        binding: crate::to_contract(rig.binding.clone()),
-        document_id: rig.document.clone(),
-        operation_id: rig.operation.operation_id.clone(),
-    }
-}
-
-async fn copy_status(
-    rig: &Rig,
-    request: notryx_protocol::WorkspaceConflictResolutionRequest,
-) -> Result<serde_json::Value, String> {
-    let result =
-        crate::conflict_snapshot_native::copy_status_for_renderer(&rig.runtime, request).await?;
-    Ok(serde_json::to_value(result).unwrap())
-}
+use crate::conflict_snapshot_native::test_support::copy_status::*;
 
 #[tokio::test]
 async fn copy_status_recovers_target_and_states_across_all_confirmed_server_steps() {

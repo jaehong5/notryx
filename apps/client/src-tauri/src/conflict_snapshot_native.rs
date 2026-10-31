@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "conflict_test_support.rs"]
+pub(crate) mod test_support;
+
 use crate::{
     ProductSessionKind, Runtime, RuntimeState, registration_binding, sync_bootstrap, sync_catchup,
 };

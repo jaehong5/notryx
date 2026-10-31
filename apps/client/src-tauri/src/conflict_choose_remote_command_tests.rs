@@ -1,40 +1,4 @@
-include!("conflict_snapshot_server_tests.rs");
-
-const BASE_HASH: &str = "sha256:cd77865662cf343ac50bd06999bc7df6fef875e24724c69fa83276cfe0c93573";
-const LOCAL_HASH: &str = "sha256:90a02348f62b287c95bb84ef49e7bd7e5fa5a6867d0a0772eb1e296d9a6d45de";
-const FOLLOWUP_HASH: &str = "sha256:3617ea161bd9febb1c19b7411687c2c34c0f264b5efbd7339e0cbba453df8fe2";
-
-type Request = notryx_protocol::WorkspaceContentConflictChooseRemoteRequest;
-
-fn choice_request(rig: &Rig, generation: u64, version: Option<u64>) -> Request {
-    serde_json::from_value(serde_json::json!({
-        "renderer_session_id": OWNER,
-        "binding": crate::to_contract(rig.binding.clone()),
-        "document_id": rig.document,
-        "edit_session_id": rig.edit_session,
-        "operation_id": rig.operation.operation_id,
-        "generation": generation.to_string(),
-        "expected_intent_version": version.map(|v| v.to_string()),
-        "base_revision": rig.initial.content_rev.as_ref().unwrap().as_str(),
-        "conflict_revision": rig.first_peer.content_rev.as_ref().unwrap().as_str(),
-        "remote_revision": rig.first_peer.content_rev.as_ref().unwrap().as_str(),
-        "base_hash": BASE_HASH,
-        "local_hash": if generation == 1 { LOCAL_HASH } else { FOLLOWUP_HASH },
-        "remote_hash": rig.first_peer.content_hash.as_ref().unwrap(),
-    })).unwrap()
-}
-
-async fn choose(rig: &Rig, request: Request) -> Result<serde_json::Value, String> {
-    let result = crate::conflict_snapshot_native::choose_remote_for_renderer(&rig.runtime, request).await?;
-    Ok(serde_json::to_value(result).unwrap())
-}
-
-fn spawn_choice(rig: &Rig, request: Request) -> tokio::task::JoinHandle<bool> {
-    let runtime = Runtime(rig.runtime.0.clone());
-    tokio::spawn(async move {
-        crate::conflict_snapshot_native::choose_remote_for_renderer(&runtime, request).await.is_err()
-    })
-}
+use crate::conflict_snapshot_native::test_support::choose_remote::*;
 
 #[tokio::test]
 async fn confirmed_choice_records_pending_without_abandoning_followup_and_retries_idempotently() {

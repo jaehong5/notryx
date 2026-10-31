@@ -1,4 +1,4 @@
-include!("conflict_choose_remote_command_tests.rs");
+use crate::conflict_snapshot_native::test_support::choose_remote::*;
 
 async fn seed_reconsideration() -> (Rig, notryx_client_store::ContentConflictIntent, String) {
     let rig = rig_with_followup(true).await;

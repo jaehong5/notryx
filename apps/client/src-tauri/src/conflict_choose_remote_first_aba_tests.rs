@@ -1,4 +1,4 @@
-include!("conflict_choose_remote_command_tests.rs");
+use crate::conflict_snapshot_native::test_support::choose_remote::*;
 
 #[tokio::test]
 async fn first_choice_does_not_complete_or_reuse_newer_identical_decision_after_aba() {

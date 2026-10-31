@@ -1,4 +1,4 @@
-include!("conflict_copy_progress_native_tests.rs");
+use crate::conflict_snapshot_native::test_support::copy_progress::*;
 
 #[tokio::test]
 async fn original_conflict_can_be_reconsidered_after_copy_is_saved_without_erasing_copy_evidence() {

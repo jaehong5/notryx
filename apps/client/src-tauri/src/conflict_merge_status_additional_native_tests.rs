@@ -1,4 +1,4 @@
-include!("conflict_merge_recovery_native_tests.rs");
+use crate::conflict_snapshot_native::test_support::merge_recovery::*;
 
 #[tokio::test]
 async fn merge_status_returns_same_id_and_seq_after_later_ack_retires_payload() {

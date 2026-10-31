@@ -1,4 +1,4 @@
-include!("send_content_conflict_copy_status_tests.rs");
+use crate::conflict_snapshot_native::test_support::send_copy_status::*;
 
 #[tokio::test]
 async fn terminal_copy_conflict_without_local_ack_is_rejected_as_corrupt() {

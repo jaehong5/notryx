@@ -1,4 +1,4 @@
-include!("conflict_copy_status_native_tests.rs");
+use crate::conflict_snapshot_native::test_support::copy_status::*;
 
 fn approved_progress(
     rig: &Rig,

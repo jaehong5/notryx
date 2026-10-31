@@ -1,4 +1,4 @@
-include!("conflict_snapshot_server_tests.rs");
+use crate::conflict_snapshot_native::test_support::snapshot::*;
 
 async fn choose_confirmed(rig: &Rig) -> Result<(), String> {
     crate::conflict_snapshot_native::choose_remote_after_confirmation(

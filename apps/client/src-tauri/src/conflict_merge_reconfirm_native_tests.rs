@@ -1,4 +1,4 @@
-include!("conflict_merge_confirm_native_tests.rs");
+use crate::conflict_snapshot_native::test_support::merge_confirm::*;
 
 async fn initial_choice(
     rig: &Rig,

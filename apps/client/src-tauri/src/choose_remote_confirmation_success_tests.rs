@@ -1,4 +1,4 @@
-include!("conflict_snapshot_server_tests.rs");
+use crate::conflict_snapshot_native::test_support::snapshot::*;
 
 #[tokio::test]
 async fn confirmed_remote_choice_preserves_evidence_and_reopens_selected_checkpoint() {

@@ -1,4 +1,4 @@
-include!("send_content_conflict_copy_content_tests.rs");
+use crate::conflict_snapshot_native::test_support::send_copy_content::*;
 
 #[tokio::test]
 async fn copy_queue_waits_for_open_empty_session_then_reuses_untouched_registration() {

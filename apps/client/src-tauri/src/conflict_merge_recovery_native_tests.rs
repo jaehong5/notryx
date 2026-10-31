@@ -1,23 +1,4 @@
-include!("conflict_merge_queue_native_tests.rs");
-
-async fn read_queued_merge(
-    rig: &Rig,
-    owner: &str,
-    binding: &RegistrationBinding,
-    document_id: &str,
-    operation_id: &str,
-    version: u64,
-) -> Result<Option<OutboxOperation>, String> {
-    crate::conflict_snapshot_native::read_queued_merge_for_renderer(
-        &rig.runtime,
-        owner,
-        binding,
-        document_id,
-        operation_id,
-        version,
-    )
-    .await
-}
+use crate::conflict_snapshot_native::test_support::merge_recovery::*;
 
 #[tokio::test]
 async fn merge_recovery_status_before_queue_does_not_create_an_operation() {

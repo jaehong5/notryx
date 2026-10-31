@@ -1,4 +1,4 @@
-include!("conflict_snapshot_server_tests.rs");
+use crate::conflict_snapshot_native::test_support::snapshot::*;
 
 #[tokio::test]
 async fn unconfirmed_abandon_keeps_session_and_conflict_evidence() {

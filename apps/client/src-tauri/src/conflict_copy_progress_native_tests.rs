@@ -1,45 +1,4 @@
-include!("conflict_copy_confirm_native_tests.rs");
-
-fn progress_request(
-    rig: &Rig,
-    version: &str,
-) -> notryx_protocol::WorkspaceContentConflictProgressRequest {
-    notryx_protocol::WorkspaceContentConflictProgressRequest {
-        renderer_session_id: OWNER.into(),
-        binding: crate::to_contract(rig.binding.clone()),
-        document_id: rig.document.clone(),
-        edit_session_id: rig.edit_session.clone(),
-        operation_id: rig.operation.operation_id.clone(),
-        expected_intent_version: version.into(),
-    }
-}
-
-async fn progress_copy(
-    rig: &Rig,
-    request: notryx_protocol::WorkspaceContentConflictProgressRequest,
-) -> Result<serde_json::Value, String> {
-    let version = request.expected_intent_version.parse::<u64>().unwrap();
-    let approved = rig
-        .runtime
-        .0
-        .lock()
-        .await
-        .store
-        .inspect_content_conflict_copy_followup(&rig.binding, &request.operation_id, version)
-        .await
-        .ok()
-        .flatten()
-        .map(|item| item.operation_id);
-    let result = crate::conflict_snapshot_native::progress_copy_with_approval_for_renderer(
-        &rig.runtime,
-        notryx_protocol::WorkspaceContentConflictCopyProgressRequest {
-            progress: request,
-            approved_followup_operation_id: approved,
-        },
-    )
-    .await?;
-    Ok(serde_json::to_value(result).unwrap())
-}
+use crate::conflict_snapshot_native::test_support::copy_progress::*;
 
 #[tokio::test]
 async fn copy_progress_preserves_fifo_and_original_conflict_through_server_save() {

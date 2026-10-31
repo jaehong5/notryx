@@ -1,4 +1,4 @@
-include!("conflict_continue_remote_tests.rs");
+use crate::conflict_snapshot_native::test_support::continue_remote::*;
 
 #[tokio::test]
 async fn progress_reports_the_requested_followup_id_again_for_requested_or_sent_state() {

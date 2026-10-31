@@ -1,30 +1,4 @@
-include!("send_content_conflict_copy_tests.rs");
-
-async fn created_copy(
-    rig: &Rig,
-) -> (
-    notryx_client_store::ContentConflictCopyIntent,
-    notryx_client_store::CreateOutboxOperation,
-    NodeState,
-) {
-    let (copy, create) = queue_confirmed_copy(rig, "copy.md").await;
-    advance_followup(rig).await;
-    let result = crate::send::send_one(rig.runtime.0.clone(), OWNER)
-        .await
-        .unwrap();
-    assert_eq!(result.status, WorkspaceSendStatus::Committed);
-    let mut state = rig.runtime.0.lock().await;
-    let entries = state
-        .store
-        .list_create_operations(&rig.binding, 0, 100)
-        .await
-        .unwrap()
-        .entries;
-    let Some(OperationReceipt::Created { node, .. }) = entries[0].receipt.clone() else {
-        panic!("expected created receipt")
-    };
-    (copy, create, node)
-}
+use crate::conflict_snapshot_native::test_support::send_copy_content::*;
 
 #[tokio::test]
 async fn confirmed_copy_content_uses_created_revision_and_survives_lost_put_receipt() {

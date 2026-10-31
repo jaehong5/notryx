@@ -1,24 +1,4 @@
-include!("send_content_conflict_copy_content_tests.rs");
-
-use notryx_client_store::ContentConflictCopyContentState;
-use sqlx::Connection;
-
-async fn status(
-    rig: &Rig,
-    version: u64,
-) -> Result<ContentConflictCopyContentState, notryx_client_store::StoreError> {
-    rig.runtime
-        .0
-        .lock()
-        .await
-        .store
-        .read_content_conflict_copy_content_state(
-            &rig.binding,
-            &rig.operation.operation_id,
-            version,
-        )
-        .await
-}
+use crate::conflict_snapshot_native::test_support::send_copy_status::*;
 
 #[tokio::test]
 async fn copy_status_requires_valid_committed_evidence_and_confirmed_ack() {

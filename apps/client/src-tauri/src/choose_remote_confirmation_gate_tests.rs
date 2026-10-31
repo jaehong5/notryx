@@ -1,4 +1,4 @@
-include!("conflict_snapshot_server_tests.rs");
+use crate::conflict_snapshot_native::test_support::snapshot::*;
 
 #[tokio::test]
 async fn missing_gate_session_rejects_choice_before_durable_completion() {

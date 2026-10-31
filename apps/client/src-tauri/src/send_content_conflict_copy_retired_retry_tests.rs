@@ -1,4 +1,4 @@
-include!("send_content_conflict_copy_history_tests.rs");
+use crate::conflict_snapshot_native::test_support::send_copy_history::*;
 
 #[tokio::test]
 async fn saved_copy_queue_retry_preserves_original_operation_after_payload_retirement() {

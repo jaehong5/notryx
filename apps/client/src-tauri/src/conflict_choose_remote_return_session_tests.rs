@@ -1,4 +1,4 @@
-include!("conflict_choose_remote_command_tests.rs");
+use crate::conflict_snapshot_native::test_support::choose_remote::*;
 
 #[tokio::test]
 async fn pending_result_rejects_closed_or_replaced_edit_session() {

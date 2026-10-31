@@ -1,40 +1,4 @@
-include!("conflict_snapshot_server_tests.rs");
-
-async fn continue_rig() -> (Rig, notryx_client_store::ContentConflictIntent, String) {
-    let rig = rig_with_followup(true).await;
-    let request = notryx_client_store::ContentConflictIntentRequest {
-        generation: 2, remote_revision: rig.first_peer.content_rev.as_ref().unwrap().as_str().into(),
-        remote_hash: rig.first_peer.content_hash.clone().unwrap(), remote_bytes: REMOTE.to_vec(),
-        choice: notryx_client_store::ContentConflictChoice::ChooseRemote,
-    };
-    let (intent, followup) = {
-        let mut state = rig.runtime.0.lock().await;
-        let intent = state.store.record_content_conflict_intent(&rig.binding, &rig.document, &rig.operation.operation_id, &request).await.unwrap();
-        let followup = state.store.document_outbox_state(&rig.binding, &rig.document).await.unwrap().latest.unwrap().operation_id;
-        (intent, followup)
-    };
-    (rig, intent, followup)
-}
-
-async fn continue_choice(rig: &Rig, version: u64) -> Result<serde_json::Value, String> {
-    let result = crate::conflict_snapshot_native::continue_remote_choice_for_renderer(
-        &rig.runtime, OWNER, &rig.binding, &rig.document, &rig.edit_session, &rig.operation.operation_id, version,
-    ).await?;
-    Ok(serde_json::to_value(result).unwrap())
-}
-
-fn delayed_continue(rig: &Rig, version: u64, ready: Arc<Notify>, resume: Arc<Notify>) -> tokio::task::JoinHandle<bool> {
-    let runtime = Runtime(rig.runtime.0.clone());
-    let binding = rig.binding.clone();
-    let document = rig.document.clone();
-    let edit = rig.edit_session.clone();
-    let operation = rig.operation.operation_id.clone();
-    tokio::spawn(async move {
-        crate::conflict_snapshot_native::continue_remote_choice_for_renderer_with_hook(
-            &runtime, OWNER, &binding, &document, &edit, &operation, version, ready, resume,
-        ).await.is_err()
-    })
-}
+use crate::conflict_snapshot_native::test_support::continue_remote::*;
 
 #[tokio::test]
 async fn explicit_continuation_marks_one_followup_and_existing_sender_confirms_it_in_fifo() {

@@ -1,4 +1,4 @@
-include!("conflict_complete_pending_remote_tests.rs");
+use crate::conflict_snapshot_native::test_support::complete_pending::*;
 
 use sqlx::Connection;
 

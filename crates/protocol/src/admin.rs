@@ -12,6 +12,10 @@ pub enum AdminRequest {
     // Internally tagged unit variants ignore unknown fields even with deny_unknown_fields.
     Status {},
     JournalStatus {},
+    OnlineBackup {
+        config_path: String,
+        destination: String,
+    },
     UnsupportedItems {
         #[serde(deserialize_with = "crate::node::required_nullable")]
         #[schemars(schema_with = "crate::node::nullable_string_schema")]
@@ -87,6 +91,12 @@ pub enum AdminResponse {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[ts(tag = "kind", rename_all = "snake_case")]
 pub enum AdminResult {
+    BackupCreated {
+        #[schemars(with = "String", regex(pattern = "^[0-9]+$"))]
+        #[ts(type = "string")]
+        head_seq: ChangeSeq,
+        observation: String,
+    },
     JournalStatus {
         #[schemars(with = "String")]
         #[ts(type = "string")]

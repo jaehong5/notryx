@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod cold_backup;
 pub mod config;
 mod create;
 pub mod http;

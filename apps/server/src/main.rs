@@ -6,12 +6,13 @@ use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::PathBuf;
 
-mod cold_backup;
+use notryx_server::cold_backup;
 mod healthcheck;
 
 const HELP: &str = "사용법:
   notryx-server init|serve|migrate --config <설정 파일>
   notryx-server backup --config <설정 파일> <새 백업 경로>
+  notryx-server backup-online --config <설정 파일> <새 백업 경로>
   notryx-server backup-verify <백업 경로>
   notryx-server restore <백업 경로> <새 복원 경로>
   notryx-server healthcheck --address <IP:port>
@@ -41,6 +42,7 @@ enum Command {
     Migrate,
     Adopt(String),
     Backup(PathBuf),
+    OnlineBackup(PathBuf),
     Admin(AdminRequest),
 }
 
@@ -106,6 +108,7 @@ fn parse(arguments: &[OsString]) -> Result<(PathBuf, Command), &'static str> {
             Command::Adopt(name.to_owned())
         }
         (Some("backup"), [destination]) => Command::Backup(PathBuf::from(destination)),
+        (Some("backup-online"), [destination]) => Command::OnlineBackup(PathBuf::from(destination)),
         (Some("admin"), [action, values @ ..]) => {
             let request = match (action.to_str(), values) {
                 (Some("status"), []) => AdminRequest::Status {},
@@ -194,6 +197,7 @@ fn admin_error(code: &str) -> &'static str {
         "forbidden" => "forbidden",
         "not_found" => "not_found",
         "storage_error" => "storage_error",
+        "insufficient_storage" => "insufficient_storage",
         "busy" => "busy",
         "closed" => "closed",
         "recovery_required" => "recovery_required",
@@ -202,6 +206,16 @@ fn admin_error(code: &str) -> &'static str {
         "locked" => "locked",
         "external_change" => "external_change",
         "operation_pending" => "operation_pending",
+        "backup_target_exists" => "backup_target_exists",
+        "backup_timeout" => "backup_timeout",
+        "backup_snapshot_timeout" => "backup_snapshot_timeout",
+        "backup_invalid" => "backup_invalid",
+        "backup_cancelled" => "backup_cancelled",
+        "backup_recovery_required" => "backup_recovery_required",
+        "backup_insufficient_space" => "backup_insufficient_space",
+        "backup_publication_indeterminate" => "backup_publication_indeterminate",
+        "backup_failed" => "backup_failed",
+        "backup_manifest_too_large" => "backup_manifest_too_large",
         _ => "invalid_admin_response",
     }
 }
@@ -251,6 +265,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Command::Backup(destination) => {
             cold_backup::create(&config, &path, &destination).await?;
             println!("backup_created");
+        }
+        Command::OnlineBackup(destination) => {
+            let path = std::path::absolute(path)?;
+            let request = AdminRequest::OnlineBackup {
+                config_path: path.to_str().ok_or("invalid_request")?.to_owned(),
+                destination: destination.to_str().ok_or("invalid_request")?.to_owned(),
+            };
+            match notryx_server::admin::request(&config.server.admin_socket, &request).await? {
+                AdminResponse::Ok {
+                    result: result @ AdminResult::BackupCreated { .. },
+                } => print_json(&result)?,
+                AdminResponse::Error { code } => return Err(admin_error(&code).into()),
+                _ => return Err("invalid_admin_response".into()),
+            }
         }
         Command::Admin(request) => {
             let allow_pairing_output = matches!(request, AdminRequest::IssuePairing { .. });

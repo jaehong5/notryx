@@ -198,6 +198,7 @@ async fn connection(mut stream: UnixStream, handle: WorkspaceHandle) -> Result<(
 
 fn command_timeout(request: &AdminRequest) -> Duration {
     match request {
+        AdminRequest::OnlineBackup { .. } => Duration::from_secs(30 * 60 + 30),
         AdminRequest::RecoveryResolve { .. } => RECOVERY_TIMEOUT,
         _ => REQUEST_TIMEOUT,
     }

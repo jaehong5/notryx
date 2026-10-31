@@ -17,6 +17,7 @@ use std::sync::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot, watch};
 use uuid::Uuid;
 
+pub(crate) mod backup;
 pub(crate) mod events;
 #[cfg(test)]
 mod journal_retention_changes_tests;
@@ -55,6 +56,7 @@ pub enum RuntimeError {
     Closed,
     Busy,
     Worker,
+    Backup(&'static str),
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -98,6 +100,7 @@ impl RuntimeError {
             Self::Workspace(crate::Error::UploadUnavailable) => "upload_unavailable",
             Self::Workspace(_) => "storage_error",
             Self::Start | Self::Worker => "runtime_error",
+            Self::Backup(code) => code,
             Self::Closed => "closed",
             Self::Busy => "busy",
         }
@@ -138,6 +141,8 @@ type ExternalFolderPause = (
 #[derive(Clone)]
 pub struct WorkspaceHandle {
     commands: mpsc::Sender<Command>,
+    // Published objects have no collector yet; any future collector must share this barrier.
+    pub(crate) backup_permit: Arc<Semaphore>,
     stopping: Arc<AtomicBool>,
     uploads: Arc<UploadState>,
     notices: broadcast::Sender<()>,
@@ -298,6 +303,12 @@ struct RecheckJob {
 }
 
 enum Command {
+    BackupSnapshot {
+        target_state: std::fs::File,
+        control: backup::Control,
+        observation: String,
+        reply: oneshot::Sender<Result<backup::Snapshot, RuntimeError>>,
+    },
     WatchFolderPage {
         after: Option<NodeId>,
         reply: oneshot::Sender<Result<WatchFolderPage, RuntimeError>>,
@@ -2624,6 +2635,18 @@ impl WorkspaceHandle {
     }
 
     pub async fn admin(&self, request: AdminRequest) -> Result<AdminResult, RuntimeError> {
+        if let AdminRequest::OnlineBackup {
+            config_path,
+            destination,
+        } = &request
+        {
+            return crate::cold_backup::create_online(
+                self,
+                std::path::Path::new(config_path),
+                std::path::Path::new(destination),
+            )
+            .await;
+        }
         if let AdminRequest::UnsupportedItems {
             snapshot_id,
             offset,
@@ -2741,7 +2764,7 @@ async fn execute_admin(
                 accounting: JournalAccounting::SqliteBlobLengthsV1,
             })
         }
-        AdminRequest::UnsupportedItems { .. } => {
+        AdminRequest::UnsupportedItems { .. } | AdminRequest::OnlineBackup { .. } => {
             Err(RuntimeError::Workspace(crate::Error::InvalidRequest))
         }
         AdminRequest::RecoveryList {
@@ -3045,6 +3068,21 @@ async fn execute(
     journal_budget_bytes: u64,
 ) {
     match command {
+        Command::BackupSnapshot {
+            target_state,
+            control,
+            observation,
+            reply,
+        } => {
+            if !reply.is_closed() {
+                let result = if shutting_down {
+                    Err(RuntimeError::Closed)
+                } else {
+                    backup::capture(workspace, target_state, control, observation).await
+                };
+                let _ = reply.send(result);
+            }
+        }
         Command::ScanHead { reply } => {
             if !reply.is_closed() {
                 let result = if shutting_down {
@@ -4506,6 +4544,7 @@ impl WorkspaceRuntime {
         let mut runtime = Self {
             handle: WorkspaceHandle {
                 commands,
+                backup_permit: Arc::new(Semaphore::new(1)),
                 stopping,
                 uploads,
                 notices,

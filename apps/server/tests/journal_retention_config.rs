@@ -4,8 +4,7 @@ use notryx_server::{
 };
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
-#[path = "../src/cold_backup.rs"]
-mod cold_backup;
+use notryx_server::cold_backup;
 
 const MINIMAL: &str =
     "[workspace]\nnotes_root='/tmp/notryx-config-notes'\nstate_root='/tmp/notryx-config-state'\n";

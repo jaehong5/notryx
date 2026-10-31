@@ -1,5 +1,8 @@
+mod online;
+pub(crate) use online::create as create_online;
+
+use crate::config::Config;
 use base64::{Engine, engine::general_purpose::STANDARD};
-use notryx_server::config::Config;
 use notryx_server_storage::FileStore;
 use rustix::fs::{self as rfs, Dir, Mode, OFlags, ResolveFlags};
 use serde::{Deserialize, Serialize};
@@ -503,11 +506,8 @@ async fn database_info(
         return Err(invalid());
     }
     db.close().await?;
-    notryx_server::validate_backup_state_copy(
-        &copied,
-        expected_workspace.parse().map_err(|_| invalid())?,
-    )
-    .await?;
+    crate::validate_backup_state_copy(&copied, expected_workspace.parse().map_err(|_| invalid())?)
+        .await?;
     let mut db = SqliteConnection::connect_with(
         &SqliteConnectOptions::new()
             .filename(&copied)
@@ -1422,7 +1422,7 @@ async fn restore_inner(
     if !same_inode(&stage, &open_dir(&stage_path)?)? {
         return Err(invalid());
     }
-    notryx_server::validate_pinned_backup_workspace_copy(
+    crate::validate_pinned_backup_workspace_copy(
         &stage_path.join("notes"),
         &stage_path.join("state"),
         &notes,
@@ -1434,7 +1434,7 @@ async fn restore_inner(
         after_validation(&stage_path);
     }
     if version == 9 {
-        notryx_server::Workspace::migrate_restored_copy(
+        crate::Workspace::migrate_restored_copy(
             &stage_path.join("notes"),
             &stage_path.join("state"),
             &notes,
@@ -1504,7 +1504,7 @@ async fn restore_inner(
     if !same_inode(&stage, &open_dir(&stage_path)?)? {
         return Err(invalid());
     }
-    notryx_server::validate_pinned_backup_workspace_copy(
+    crate::validate_pinned_backup_workspace_copy(
         &stage_path.join("notes"),
         &stage_path.join("state"),
         &notes,
@@ -1605,7 +1605,7 @@ async fn restore_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notryx_server::Workspace;
+    use crate::Workspace;
 
     #[test]
     fn directory_depth_limit_applies_to_excluded_directories() {

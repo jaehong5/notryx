@@ -147,6 +147,27 @@
           "additionalProperties": false,
           "properties": {
             "command": {
+              "const": "online_backup",
+              "type": "string"
+            },
+            "config_path": {
+              "type": "string"
+            },
+            "destination": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command",
+            "config_path",
+            "destination"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
               "const": "unsupported_items",
               "type": "string"
             },
@@ -383,6 +404,28 @@
         },
         "AdminResult": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "head_seq": {
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "backup_created",
+                  "type": "string"
+                },
+                "observation": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "head_seq",
+                "observation"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -811,6 +854,28 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "head_seq": {
+              "pattern": "^[0-9]+$",
+              "type": "string"
+            },
+            "kind": {
+              "const": "backup_created",
+              "type": "string"
+            },
+            "observation": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "head_seq",
+            "observation"
+          ],
+          "type": "object"
+        },
         {
           "additionalProperties": false,
           "properties": {

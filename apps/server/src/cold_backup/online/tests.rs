@@ -25,6 +25,7 @@ fn control() -> JobControl {
     JobControl {
         deadline: Instant::now() + JOB_LIMIT,
         cancelled: Arc::new(AtomicBool::new(false)),
+        publication_failpoint: None,
     }
 }
 
@@ -184,6 +185,56 @@ async fn materialization_uses_snapshot_after_live_mutation_has_resumed() {
         b"before\r\n"
     );
     assert!(runtime.handle().health().await.unwrap().ready);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn publication_failures_preserve_completion_marker_contract() {
+    let (root, path, config, _) = fixture().await;
+    let runtime = WorkspaceRuntime::test_start_without_known_file_watch(config.workspace.clone())
+        .await
+        .unwrap();
+    for (name, failpoint, expected_error, marker_remains) in [
+        (
+            "failed-sync",
+            BackupFailpoint::CompletedDirectoryFsync,
+            "backup_injected_fsync_failure",
+            false,
+        ),
+        (
+            "failed-cleanup",
+            BackupFailpoint::MarkerCleanupFailure,
+            "backup_publication_indeterminate",
+            true,
+        ),
+    ] {
+        let destination = root.path().join(name);
+        let prepared = Prepared::new(&path, &destination).unwrap();
+        let snapshot = runtime
+            .handle()
+            .backup_snapshot(prepared.state.try_clone().unwrap())
+            .await
+            .unwrap();
+        let mut control = control();
+        control.publication_failpoint = Some(failpoint);
+        let error = match prepared.finish(snapshot, control).await {
+            Err(error) => error,
+            Ok(_) => panic!("failed publication reported success"),
+        };
+        assert_eq!(error.to_string(), expected_error);
+        assert!(destination.exists());
+        assert_eq!(destination.join("COMPLETE").exists(), marker_remains);
+        assert!(!destination.join(".COMPLETE.tmp").exists());
+        assert_eq!(verify(&destination).is_ok(), marker_remains);
+        assert_eq!(
+            fs::read(config.workspace.notes_root.join("Document.md")).unwrap(),
+            b"before\r\n"
+        );
+        assert!(runtime.handle().health().await.unwrap().ready);
+    }
+    let retry = root.path().join("retry");
+    create(&runtime.handle(), &path, &retry).await.unwrap();
+    verify(&retry).unwrap();
     runtime.shutdown().await.unwrap();
 }
 

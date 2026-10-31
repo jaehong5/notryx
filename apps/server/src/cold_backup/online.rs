@@ -28,6 +28,8 @@ fn mapped(error: Box<dyn std::error::Error>) -> RuntimeError {
 struct JobControl {
     deadline: Instant,
     cancelled: Arc<AtomicBool>,
+    #[cfg(test)]
+    publication_failpoint: Option<BackupFailpoint>,
 }
 
 struct CancelOnDrop(Arc<AtomicBool>);
@@ -240,42 +242,15 @@ impl Prepared {
         )? {
             return Err(invalid());
         }
-        rfs::renameat_with(
+        publish_backup(
             &self.parent,
-            &self.stage_name,
-            &self.parent,
-            self.destination.file_name().ok_or_else(invalid)?,
-            rfs::RenameFlags::NOREPLACE,
-        )?;
-        self.parent.sync_all()?;
-        let completion = write(
             &self.stage,
-            ".COMPLETE.tmp",
-            hex(&Sha256::digest(&bytes)).as_bytes(),
-        )
-        .and_then(|()| {
-            rfs::renameat_with(
-                &self.stage,
-                ".COMPLETE.tmp",
-                &self.stage,
-                "COMPLETE",
-                rfs::RenameFlags::NOREPLACE,
-            )?;
-            self.stage.sync_all()?;
-            Ok(())
-        });
-        if let Err(error) = completion {
-            for name in ["COMPLETE", ".COMPLETE.tmp"] {
-                match rfs::unlinkat(&self.stage, name, rfs::AtFlags::empty()) {
-                    Ok(()) | Err(rustix::io::Errno::NOENT) => {}
-                    Err(_) => return Err("backup_publication_indeterminate".into()),
-                }
-            }
-            self.stage
-                .sync_all()
-                .map_err(|_| "backup_publication_indeterminate")?;
-            return Err(error);
-        }
+            &self.stage_name,
+            self.destination.file_name().ok_or_else(invalid)?,
+            &hex(&Sha256::digest(&bytes)),
+            #[cfg(test)]
+            control.publication_failpoint,
+        )?;
         Ok(AdminResult::BackupCreated {
             head_seq: notryx_domain::ChangeSeq::new(head_seq.parse()?),
             observation: snapshot.observation,
@@ -426,6 +401,8 @@ pub(crate) async fn create(
     let control = JobControl {
         deadline: Instant::now() + JOB_LIMIT,
         cancelled: Arc::new(AtomicBool::new(false)),
+        #[cfg(test)]
+        publication_failpoint: None,
     };
     let _cancel = CancelOnDrop(Arc::clone(&control.cancelled));
     let config_path = config_path.to_owned();

@@ -831,6 +831,81 @@ enum BackupFailpoint {
     MarkerCleanupFailure,
 }
 
+fn publish_backup(
+    parent: &File,
+    stage: &File,
+    stage_name: &str,
+    destination_name: &std::ffi::OsStr,
+    hash: &str,
+    #[cfg(test)] failpoint: Option<BackupFailpoint>,
+) -> BackupResult<()> {
+    #[cfg(test)]
+    if failpoint == Some(BackupFailpoint::Rename) {
+        return Err("backup_injected_rename_failure".into());
+    }
+    rfs::renameat_with(
+        parent,
+        stage_name,
+        parent,
+        destination_name,
+        rfs::RenameFlags::NOREPLACE,
+    )?;
+    #[cfg(test)]
+    if failpoint == Some(BackupFailpoint::ParentFsync) {
+        return Err("backup_injected_fsync_failure".into());
+    }
+    parent.sync_all()?;
+    #[cfg(test)]
+    let marker = write_synced(
+        stage,
+        ".COMPLETE.tmp",
+        hash.as_bytes(),
+        failpoint == Some(BackupFailpoint::MarkerFsync),
+    );
+    #[cfg(not(test))]
+    let marker = write_synced(stage, ".COMPLETE.tmp", hash.as_bytes());
+    let marker = marker.and_then(|()| {
+        #[cfg(test)]
+        if failpoint == Some(BackupFailpoint::MarkerRename) {
+            return Err("backup_injected_rename_failure".into());
+        }
+        rfs::renameat_with(
+            stage,
+            ".COMPLETE.tmp",
+            stage,
+            "COMPLETE",
+            rfs::RenameFlags::NOREPLACE,
+        )?;
+        Ok(())
+    });
+    if let Err(error) = marker.and_then(|()| {
+        #[cfg(test)]
+        if matches!(
+            failpoint,
+            Some(BackupFailpoint::CompletedDirectoryFsync | BackupFailpoint::MarkerCleanupFailure)
+        ) {
+            return Err("backup_injected_fsync_failure".into());
+        }
+        stage.sync_all().map_err(Into::into)
+    }) {
+        #[cfg(test)]
+        if failpoint == Some(BackupFailpoint::MarkerCleanupFailure) {
+            return Err("backup_publication_indeterminate".into());
+        }
+        for name in ["COMPLETE", ".COMPLETE.tmp"] {
+            match rfs::unlinkat(stage, name, rfs::AtFlags::empty()) {
+                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+                Err(_) => return Err("backup_publication_indeterminate".into()),
+            }
+        }
+        if stage.sync_all().is_err() {
+            return Err("backup_publication_indeterminate".into());
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 async fn create_inner(
     config: &Config,
     config_path: &Path,
@@ -1046,70 +1121,15 @@ async fn create_with_manifest_limit(
     {
         return Err(invalid());
     }
-    #[cfg(test)]
-    if failpoint == Some(BackupFailpoint::Rename) {
-        return Err("backup_injected_rename_failure".into());
-    }
-    rfs::renameat_with(
+    publish_backup(
         &parent_fd,
-        &stage_name,
-        &parent_fd,
-        destination.file_name().ok_or_else(invalid)?,
-        rfs::RenameFlags::NOREPLACE,
-    )?;
-    #[cfg(test)]
-    if failpoint == Some(BackupFailpoint::ParentFsync) {
-        return Err("backup_injected_fsync_failure".into());
-    }
-    parent_fd.sync_all()?;
-    #[cfg(test)]
-    let marker = write_synced(
         &stage,
-        ".COMPLETE.tmp",
-        hash.as_bytes(),
-        failpoint == Some(BackupFailpoint::MarkerFsync),
-    );
-    #[cfg(not(test))]
-    let marker = write_synced(&stage, ".COMPLETE.tmp", hash.as_bytes());
-    let marker = marker.and_then(|()| {
+        &stage_name,
+        destination.file_name().ok_or_else(invalid)?,
+        &hash,
         #[cfg(test)]
-        if failpoint == Some(BackupFailpoint::MarkerRename) {
-            return Err("backup_injected_rename_failure".into());
-        }
-        rfs::renameat_with(
-            &stage,
-            ".COMPLETE.tmp",
-            &stage,
-            "COMPLETE",
-            rfs::RenameFlags::NOREPLACE,
-        )?;
-        Ok(())
-    });
-    if let Err(error) = marker.and_then(|()| {
-        #[cfg(test)]
-        if matches!(
-            failpoint,
-            Some(BackupFailpoint::CompletedDirectoryFsync | BackupFailpoint::MarkerCleanupFailure)
-        ) {
-            return Err("backup_injected_fsync_failure".into());
-        }
-        stage.sync_all().map_err(Into::into)
-    }) {
-        #[cfg(test)]
-        if failpoint == Some(BackupFailpoint::MarkerCleanupFailure) {
-            return Err("backup_publication_indeterminate".into());
-        }
-        for name in ["COMPLETE", ".COMPLETE.tmp"] {
-            match rfs::unlinkat(&stage, name, rfs::AtFlags::empty()) {
-                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
-                Err(_) => return Err("backup_publication_indeterminate".into()),
-            }
-        }
-        if stage.sync_all().is_err() {
-            return Err("backup_publication_indeterminate".into());
-        }
-        return Err(error);
-    }
+        failpoint,
+    )?;
     drop(files);
     Ok(())
 }

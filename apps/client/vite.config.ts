@@ -6,7 +6,8 @@ export default defineConfig({
   clearScreen: false,
   server: { host: "127.0.0.1", port: 1420, strictPort: true },
   build: {
+    license: { fileName: "third-party-licenses.md" },
     target: ["es2022", "chrome105", "safari15"],
-    rolldownOptions: { input: ["index.html", "isolation.html"] },
+    rolldownOptions: { input: ["index.html", "isolation.html", "mermaid.html"] },
   },
 });

@@ -71,6 +71,7 @@ mod frozen_create_native;
 mod frozen_delete_native;
 mod frozen_move_native;
 mod gate;
+mod mermaid_native;
 mod migration_native;
 mod move_native;
 #[cfg(test)]
@@ -101,6 +102,7 @@ mod sync_bootstrap;
 mod sync_catchup;
 mod sync_content;
 mod sync_lifecycle;
+mod theme_native;
 mod trash_native;
 mod workspace_open;
 
@@ -1341,8 +1343,16 @@ fn m0_exit(webview: Webview, app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn m0_open_isolation(webview: Webview, app: tauri::AppHandle) -> Result<(), String> {
+fn m0_open_isolation(
+    webview: Webview,
+    app: tauri::AppHandle,
+    mermaid: Option<bool>,
+) -> Result<(), String> {
     check_caller(&webview)?;
+    #[cfg(not(target_os = "android"))]
+    if mermaid == Some(true) {
+        return mermaid_native::open_probe(&app);
+    }
     #[cfg(not(target_os = "android"))]
     if app.get_webview_window("renderer-probe").is_none() {
         WebviewWindowBuilder::new(
@@ -1363,18 +1373,23 @@ fn m0_open_isolation(webview: Webview, app: tauri::AppHandle) -> Result<(), Stri
         .map_err(|_| "isolation_window_failed")?;
     }
     #[cfg(target_os = "android")]
-    let _ = app;
+    let _ = (app, mermaid);
     Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(mermaid_native::RenderJobs::default())
         .setup(|app| {
             let directory = std::env::var_os("NOTRYX_M0_DATA_DIR")
                 .map(std::path::PathBuf::from)
                 .unwrap_or(app.path().app_data_dir()?);
             std::fs::create_dir_all(&directory)?;
+            app.manage(theme_native::ThemeStore::new(
+                directory.clone(),
+                std::env::var("NOTRYX_SAFE_MODE").as_deref() == Ok("1"),
+            ));
             let path = directory.join("drafts.sqlite3");
             let startup = match tauri::async_runtime::block_on(ClientStore::open(&path)) {
                 Ok(store) => {
@@ -1405,6 +1420,11 @@ pub fn run() {
             Ok(())
         })
         .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
+            {
+                mermaid_native::cancel_all(webview.app_handle());
+            }
             if webview.label() == "main"
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
                 && let Some(startup) = webview.try_state::<migration_native::Startup>()
@@ -1447,6 +1467,12 @@ pub fn run() {
             m0_close,
             m0_exit,
             m0_open_isolation,
+            mermaid_native::mermaid_render,
+            mermaid_native::mermaid_complete,
+            theme_native::theme_status,
+            theme_native::theme_select,
+            theme_native::theme_import,
+            theme_native::theme_reset,
             workspace_pair,
             workspace_sync_status,
             workspace_credential_status,

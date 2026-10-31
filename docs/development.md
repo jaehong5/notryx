@@ -113,6 +113,8 @@ npm run tauri -- dev
 bash scripts/check.sh
 npm run tauri -- build --debug --no-bundle
 xvfb-run -a python3 scripts/m0-webdriver.py
+xvfb-run -a python3 scripts/m4-mermaid-webdriver.py
+xvfb-run -a python3 scripts/m4-theme-webdriver.py
 cargo build --locked -p notryx-server
 xvfb-run -a python3 scripts/m2-workspace-webdriver.py
 xvfb-run -a python3 scripts/m2-migration-recovery-webdriver.py
@@ -129,6 +131,60 @@ WebKitWebDriver를 별도 위치에 추출했다면 `--driver /path/to/WebKitWeb
 
 `.github/workflows/check.yml`은 Linux 검사와 Tauri WebDriver 시험, 합성 서버와 실제 클라이언트의 M2 통합 시험, 마이그레이션 복구, M3 두 클라이언트의 CRUD와 서버 재연결, 서버 Docker 이미지 빌드와 격리 실행 시험을 CI에 연결한다. M0 WebDriver 실패 자료, M3 통합 실패 로그와 Docker 시험 결과는 각각 7일간 보관한다. M3 시험은 한 PC에서 독립 기기 저장소와 Secret Service가 없는 격리 D-Bus를 사용하므로 실제 사용자 키링이나 두 물리 PC 검증이 아니다. credential과 본문을 로그나 결과 파일에 기록하지 않는다. CI는 이미지를 게시하거나 서버에 배포하지 않는다. 원격 GitHub Actions 실행은 소스를 올린 뒤 별도로 확인해야 한다. 프로토콜 파일은 `cargo run -p notryx-protocol --bin generate-contracts`로 생성하고 직접 수정하지 않는다.
 
+
+## Mermaid 미리보기
+
+Linux 앱의 Markdown 미리보기에서 `mermaid` fenced code block을 그림으로 표시한다. 현재 흐름도, 시퀀스, 클래스, 상태도와 ER 다이어그램을 지원한다. 다른 유형은 원문으로 표시한다. 외부 서비스 없이 번들에 포함한 Mermaid 12.2.0을 사용하며, 렌더링은 문서 본문과 초안을 변경하지 않는다. 그림 아래에서 원문을 펼쳐 볼 수 있다.
+
+다이어그램 하나의 입력은 UTF-8 기준 64 KiB, 연결 수는 500개까지다. 시퀀스는 메시지와 제어 요소를 합친 파서 항목 500개로 보수적으로 제한한다. 동시에 최대 두 개를 처리하고 화면 밖 다이어그램은 보일 때 처리한다. 렌더 결과가 2 MiB를 넘거나 15초 안에 완료되지 않으면 원문을 표시한다. 별도 WebView의 수명 제한이며 독립 프로세스나 강제 CPU 제한을 보장하지 않는다. 문서 전체의 기존 1 MiB 미리보기 상한도 유지한다.
+
+문서 안의 설정 frontmatter와 `init`/`config` 지시문, 외부 이미지와 능동 SVG 구조는 지원하지 않는다. 별도 WebView에서 `strict`, boolean `htmlLabels: false`로 렌더링하고, SVG 허용 목록을 검사한 뒤 수동 이미지로 표시한다. 실패 시 이유와 원문을 남긴다. Android와 브라우저 단독 실행에서는 원문으로 표시하며, Android의 Mermaid 렌더링 격리는 아직 검증하지 않았다.
+
+```bash
+npm test -- apps/client/src/mermaid-policy.test.ts apps/client/src/mermaid-engine.test.ts apps/client/src/mermaid-queue.test.ts apps/client/src/mermaid-preview.test.ts
+source scripts/dev-env.sh
+npm run tauri -- build --debug --no-bundle
+xvfb-run -a python3 scripts/m4-mermaid-webdriver.py
+```
+
+WebDriver 시험은 합성 원문으로 5종 그림 표시, 원문 보존, 오류와 상한 초과 시 원문 표시, 렌더러의 앱 명령과 외부 통신 차단, 재로드 시 창 정리를 확인한다. 이 시험은 Linux CI에도 연결한다. 물리 키보드 입력이나 Android 시험을 대신하지 않는다.
+
+빌드 시 `apps/client/dist/third-party-licenses.md`에 번들 의존성의 라이선스 전문을 생성하고, `third-party-sources.md`에 Mermaid와 간접 의존성 elkjs의 소스 위치를 포함한다. 이 고지는 프로젝트 자체의 라이선스 확정을 대신하지 않는다.
+
+## 사용자 JSON 테마
+
+Linux 앱 오른쪽 위의 **테마**에서 밝은 테마와 어두운 테마를 선택하거나 JSON 파일을 가져온다. 사용자 테마는 한 개를 보관하며 새 파일을 가져오면 교체한다. 내장 테마로 전환해도 가져온 사용자 테마는 남는다. 예제로 [차분한 바다](../examples/themes/ocean.json)를 제공한다.
+
+테마 파일은 UTF-8 JSON이며 최대 256 KiB다. `schemaVersion`은 `1`, `base`는 `light` 또는 `dark`다. `id`는 영문, 숫자, 점, 밑줄과 하이픈으로 구성한 1~64자이며 `name`은 제어 문자가 없는 1~80자의 이름이다. 공백만 있는 이름은 거절한다. `tokens`에서 지원하는 값은 아래와 같다. 선택 항목을 생략하면 `base`의 기본값을 사용한다.
+
+| 토큰 | 허용값 | 필수 여부 |
+|---|---|---|
+| `surface.background`, `text.primary`, `border.default`, `status.conflict` | `#RRGGBB` 색상 | 필수 |
+| `surface.raised`, `text.secondary`, `accent.background`, `accent.text`, `status.error`, `status.success` | `#RRGGBB` 색상 | 선택 |
+| `editor.fontFamily` | `system-monospace` 또는 `system-ui` | 선택 |
+| `editor.fontSize` | 12~24 정수, px 단위 | 선택 |
+| `spacing.scale` | 0.8~1.5 숫자 | 선택 |
+
+알 수 없는 필드, JavaScript, 임의 CSS, URL, 원격 폰트와 `@import`는 거절한다. Rust에서 검사하고 저장한 뒤 화면에 반영하며, 형식 오류나 저장 실패 시 이전 테마를 유지한다. 편집기의 본문, 선택 영역, undo 기록과 초안을 재생성하지 않는다. Mermaid 그림은 테마의 밝고 어두운 구분을 따른다.
+
+설정은 기기 데이터 디렉터리의 `theme.json`에 저장한다. 손상된 설정은 원본 파일을 남겨 두고 기본 테마로 시작한다. **기본 테마로 복구**를 누르면 사용자 테마를 제거하고 밝은 테마를 저장한다. 복구 메뉴는 사용자 색상과 별개로 읽을 수 있게 표시한다.
+
+저장한 테마를 적용하지 않고 실행하려면 앱을 종료한 뒤 안전 모드를 사용한다. 설정 파일은 복구 버튼을 누르기 전까지 보존한다. 아래 명령은 저장소에서 빌드한 Linux 앱의 실행 예시다. 기존에 별도 기기 데이터 경로를 사용했다면 같은 `NOTRYX_M0_DATA_DIR`를 지정한다.
+
+```bash
+NOTRYX_SAFE_MODE=1 target/debug/notryx-client
+```
+
+```bash
+npm test -- apps/client/src/theme.test.ts apps/client/src/theme-controls.test.ts
+source scripts/dev-env.sh
+cargo test --locked -p notryx-protocol theme::tests
+cargo test --locked -p notryx-client --lib theme_native::tests
+npm run tauri -- build --debug --no-bundle
+xvfb-run -a python3 scripts/m4-theme-webdriver.py
+```
+
+WebDriver는 실제 Linux 앱에서 테마 전환, 합성 File API 입력, 본문과 undo 및 checkpoint 보존, 재시작 복원, 잘못된 테마 거절과 안전 모드를 확인한다. OS 파일 선택 대화상자와 물리 IME는 이 자동 시험에 포함하지 않는다. 테마 저장과 복구는 현재 Linux 범위이며 Android는 미검증이다.
 
 ## 개발 서버 실행과 조회
 

@@ -4268,6 +4268,606 @@
       "title": "ServerInfo",
       "type": "object"
     },
+    "ThemeBase": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "light",
+        "dark"
+      ],
+      "title": "ThemeBase",
+      "type": "string"
+    },
+    "ThemeFont": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "system-monospace",
+        "system-ui"
+      ],
+      "title": "ThemeFont",
+      "type": "string"
+    },
+    "ThemePackage": {
+      "$defs": {
+        "ThemeBase": {
+          "enum": [
+            "light",
+            "dark"
+          ],
+          "type": "string"
+        },
+        "ThemeFont": {
+          "enum": [
+            "system-monospace",
+            "system-ui"
+          ],
+          "type": "string"
+        },
+        "ThemeTokens": {
+          "additionalProperties": false,
+          "properties": {
+            "accent.background": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accent.text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "border.default": {
+              "type": "string"
+            },
+            "editor.fontFamily": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ThemeFont"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "editor.fontSize": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "spacing.scale": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "status.conflict": {
+              "type": "string"
+            },
+            "status.error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status.success": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "surface.background": {
+              "type": "string"
+            },
+            "surface.raised": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text.primary": {
+              "type": "string"
+            },
+            "text.secondary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "surface.background",
+            "text.primary",
+            "border.default",
+            "status.conflict"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/ThemeBase"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint8",
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "tokens": {
+          "$ref": "#/$defs/ThemeTokens"
+        }
+      },
+      "required": [
+        "id",
+        "schemaVersion",
+        "name",
+        "base",
+        "tokens"
+      ],
+      "title": "ThemePackage",
+      "type": "object"
+    },
+    "ThemePreferences": {
+      "$defs": {
+        "ThemeBase": {
+          "enum": [
+            "light",
+            "dark"
+          ],
+          "type": "string"
+        },
+        "ThemeFont": {
+          "enum": [
+            "system-monospace",
+            "system-ui"
+          ],
+          "type": "string"
+        },
+        "ThemePackage": {
+          "additionalProperties": false,
+          "properties": {
+            "base": {
+              "$ref": "#/$defs/ThemeBase"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "schemaVersion": {
+              "format": "uint8",
+              "maximum": 1,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "tokens": {
+              "$ref": "#/$defs/ThemeTokens"
+            }
+          },
+          "required": [
+            "id",
+            "schemaVersion",
+            "name",
+            "base",
+            "tokens"
+          ],
+          "type": "object"
+        },
+        "ThemeSelection": {
+          "enum": [
+            "light",
+            "dark",
+            "custom"
+          ],
+          "type": "string"
+        },
+        "ThemeTokens": {
+          "additionalProperties": false,
+          "properties": {
+            "accent.background": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accent.text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "border.default": {
+              "type": "string"
+            },
+            "editor.fontFamily": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ThemeFont"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "editor.fontSize": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "spacing.scale": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "status.conflict": {
+              "type": "string"
+            },
+            "status.error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status.success": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "surface.background": {
+              "type": "string"
+            },
+            "surface.raised": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text.primary": {
+              "type": "string"
+            },
+            "text.secondary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "surface.background",
+            "text.primary",
+            "border.default",
+            "status.conflict"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "custom": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ThemePackage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "selection": {
+          "$ref": "#/$defs/ThemeSelection"
+        }
+      },
+      "required": [
+        "selection"
+      ],
+      "title": "ThemePreferences",
+      "type": "object"
+    },
+    "ThemeSelection": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "light",
+        "dark",
+        "custom"
+      ],
+      "title": "ThemeSelection",
+      "type": "string"
+    },
+    "ThemeStatus": {
+      "$defs": {
+        "ThemeBase": {
+          "enum": [
+            "light",
+            "dark"
+          ],
+          "type": "string"
+        },
+        "ThemeFont": {
+          "enum": [
+            "system-monospace",
+            "system-ui"
+          ],
+          "type": "string"
+        },
+        "ThemePackage": {
+          "additionalProperties": false,
+          "properties": {
+            "base": {
+              "$ref": "#/$defs/ThemeBase"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "schemaVersion": {
+              "format": "uint8",
+              "maximum": 1,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "tokens": {
+              "$ref": "#/$defs/ThemeTokens"
+            }
+          },
+          "required": [
+            "id",
+            "schemaVersion",
+            "name",
+            "base",
+            "tokens"
+          ],
+          "type": "object"
+        },
+        "ThemeSelection": {
+          "enum": [
+            "light",
+            "dark",
+            "custom"
+          ],
+          "type": "string"
+        },
+        "ThemeTokens": {
+          "additionalProperties": false,
+          "properties": {
+            "accent.background": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "accent.text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "border.default": {
+              "type": "string"
+            },
+            "editor.fontFamily": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ThemeFont"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "editor.fontSize": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "spacing.scale": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "status.conflict": {
+              "type": "string"
+            },
+            "status.error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status.success": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "surface.background": {
+              "type": "string"
+            },
+            "surface.raised": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text.primary": {
+              "type": "string"
+            },
+            "text.secondary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "surface.background",
+            "text.primary",
+            "border.default",
+            "status.conflict"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "custom": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ThemePackage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "safe_mode": {
+          "type": "boolean"
+        },
+        "selection": {
+          "$ref": "#/$defs/ThemeSelection"
+        },
+        "warning": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "selection",
+        "safe_mode"
+      ],
+      "title": "ThemeStatus",
+      "type": "object"
+    },
+    "ThemeTokens": {
+      "$defs": {
+        "ThemeFont": {
+          "enum": [
+            "system-monospace",
+            "system-ui"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "accent.background": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "accent.text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "border.default": {
+          "type": "string"
+        },
+        "editor.fontFamily": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ThemeFont"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "editor.fontSize": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "spacing.scale": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "status.conflict": {
+          "type": "string"
+        },
+        "status.error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status.success": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "surface.background": {
+          "type": "string"
+        },
+        "surface.raised": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text.primary": {
+          "type": "string"
+        },
+        "text.secondary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "surface.background",
+        "text.primary",
+        "border.default",
+        "status.conflict"
+      ],
+      "title": "ThemeTokens",
+      "type": "object"
+    },
     "TrashNode": {
       "$defs": {
         "NodeKind": {

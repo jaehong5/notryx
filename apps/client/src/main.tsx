@@ -9,6 +9,8 @@ import { listen } from "@tauri-apps/api/event";
 import { EditorController, initialEditorState } from "./editor-controller";
 import { openDocument, saveDocument, closeDocument, pairWorkspace, workspaceInventory, workspaceCreateParents, workspaceFrozenCreates, resolveWorkspaceFrozenCreate, workspaceFrozenDeletes, resolveWorkspaceFrozenDelete, workspaceFrozenMoves, resolveWorkspaceFrozenMove, workspaceSyncState, openWorkspaceDocument, prepareWorkspaceRemoteRefresh, commitWorkspaceRemoteRefresh, inspectWorkspaceRemoteChange, saveWorkspaceDocument, closeWorkspaceDocument, localDrafts, openLocalDraft, adoptPendingPair, discardPendingPair, pendingPairStatus, queueWorkspaceDocument, sendNextWorkspaceOperation, previewWorkspaceImage, workspaceDocumentOutbox, openWorkspaceExternal, recoverWorkspaceSource, workspaceTrash, queueWorkspaceRestore, workspaceRestoreStatus, requestWorkspaceRestoreAbandon, queueWorkspaceCreate, workspaceCreateStatus, requestWorkspaceCreateAbandon, queueWorkspaceDelete, workspaceDeleteStatus, requestWorkspaceDeleteAbandon, queueWorkspaceMove, workspaceMoveStatus, requestWorkspaceMoveAbandon, workspaceSearch, cancelWorkspaceSearch } from "./ipc";
 import { MarkdownPreview } from "./preview";
+import { ThemeControls, useTheme } from "./theme-controls";
+import { applyDocumentTheme, editorTheme } from "./theme";
 import { PreviewImageQueue } from "./preview-image-queue";
 import { workspacePath, draftKey, draftSelectionId } from "./workspace-list";
 import { WorkspaceController } from "./workspace-controller";
@@ -47,6 +49,15 @@ const documents = [
 ];
 
 function App() {
+  const themes = useTheme();
+  const currentTheme = useRef(themes.theme);
+  currentTheme.current = themes.theme;
+  const themedEditor = useRef<{ view: EditorView; compartment: Compartment } | null>(null);
+  useLayoutEffect(() => {
+    applyDocumentTheme(themes.theme);
+    const editor = themedEditor.current;
+    if (editor) editor.view.dispatch({ effects: editor.compartment.reconfigure(editorTheme(themes.theme)) });
+  }, [themes.theme]);
   const parent = useRef<HTMLDivElement>(null);
   const controller = useRef<EditorController | null>(null);
   const transmitter = useRef<AutoTransmit | null>(null);
@@ -909,6 +920,7 @@ function App() {
       },
       createEditor: ({ source, change, inputRejected, composition, save }) => {
         const editing = new Compartment();
+        const appearance = new Compartment();
         let compositionTimer: ReturnType<typeof setTimeout> | undefined;
         let compositionPending = false;
         let replacing = false;
@@ -917,6 +929,7 @@ function App() {
             selection,
             extensions: [
               lineNumbers(), history(), drawSelection(),
+              appearance.of(editorTheme(currentTheme.current)),
               keymap.of([{ key: "Mod-s", run: () => { save(); return true; } }, ...defaultKeymap, ...historyKeymap]),
               editing.of([EditorState.readOnly.of(current.readonly), EditorView.editable.of(!current.readonly)]),
               ...(current.readonly ? [] : [documentSizeGuard(current.bom, inputRejected)]),
@@ -935,9 +948,11 @@ function App() {
         return {
           show: () => {
             if (!parent.current) throw new Error("편집기 화면이 닫혔습니다.");
+            themedEditor.current = { view, compartment: appearance };
+            view.dispatch({ effects: appearance.reconfigure(editorTheme(currentTheme.current)) });
             parent.current.replaceChildren(view.dom);
           },
-          destroy: () => { clearTimeout(compositionTimer); view.destroy(); },
+          destroy: () => { clearTimeout(compositionTimer); if (themedEditor.current?.view === view) themedEditor.current = null; view.destroy(); },
           setEditable: (enabled) => view.dispatch({ effects: editing.reconfigure([EditorState.readOnly.of(!enabled), EditorView.editable.of(enabled)]) }),
           isComposing: () => view.composing || compositionPending,
           replaceSource: (current) => {
@@ -1082,7 +1097,7 @@ function App() {
   const visibleSyncStatus = state.remoteDeleted && (syncStatus === "서버 반영됨" || syncStatus === "서버 저장됨, 영수증 확인 중") ? "" : syncStatus;
 
   return <main>
-    <header><strong>Notryx</strong><span className="badge">{mode === "fixture" ? "M0" : "M2"}</span><span className="caption">{mode === "fixture" ? "로컬 편집 시험" : "작업 공간"}</span></header>
+    <header><strong>Notryx</strong><span className="badge">{mode === "fixture" ? "M0" : "M2"}</span><span className="caption">{mode === "fixture" ? "로컬 편집 시험" : "작업 공간"}</span><ThemeControls controller={themes} /></header>
     <div className="layout">
       <nav aria-label="문서 탐색">
         <form className="workspace-connect" onSubmit={(event) => void connect(event)}>
@@ -1236,7 +1251,7 @@ function App() {
           <div id="editor" ref={parent} />
           {preview && <section className="preview-pane" aria-label="Markdown 미리보기">{new TextEncoder().encode(previewSource).length > 1024 * 1024
             ? <p>큰 문서는 미리보기를 표시하지 않습니다.</p>
-            : <MarkdownPreview source={previewSource} fragment={previewAnchor?.documentId === state.selected ? previewAnchor : null} loadImage={mode === "workspace" ? loadPreviewImage : undefined} onOpenLink={mode === "workspace" ? (link) => {
+            : <MarkdownPreview source={previewSource} themeBase={themes.theme.base} fragment={previewAnchor?.documentId === state.selected ? previewAnchor : null} loadImage={mode === "workspace" ? loadPreviewImage : undefined} onOpenLink={mode === "workspace" ? (link) => {
               if (link.kind === "external") {
                 const found = [...sessionModes.current.entries()].find(([, session]) => session.uiId === state.selected && session.mode === "workspace");
                 if (!found) setConnectionError("문서를 다시 열어 주세요.");

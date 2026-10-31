@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-mermaid-complete"
+description = "Enables the mermaid_complete command without any pre-configured scope."
+commands.allow = ["mermaid_complete"]
+
+[[permission]]
+identifier = "deny-mermaid-complete"
+description = "Denies the mermaid_complete command without any pre-configured scope."
+commands.deny = ["mermaid_complete"]

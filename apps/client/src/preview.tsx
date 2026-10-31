@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { MermaidPreview } from "./mermaid-preview";
 
 export type PreviewLink =
   | { kind: "external"; target: string }
@@ -80,6 +81,7 @@ export function classifyPreviewLink(target: string): PreviewLink | null {
 
 export type MarkdownPreviewProps = {
   source: string;
+  themeBase?: "light" | "dark";
   onOpenLink?: (link: PreviewLink) => void;
   loadImage?: (target: string, signal: AbortSignal) => Promise<Uint8Array>;
   fragment?: { fragment: string } | null;
@@ -87,6 +89,7 @@ export type MarkdownPreviewProps = {
 
 const PreviewContext = createContext<{
   article: RefObject<HTMLElement | null>;
+  themeBase: "light" | "dark";
   onOpenLink?: MarkdownPreviewProps["onOpenLink"];
   loadImage?: MarkdownPreviewProps["loadImage"];
 } | null>(null);
@@ -127,11 +130,20 @@ function MarkdownLink({ href, children }: { href?: string; children?: ReactNode 
     : <span>{children}</span>;
 }
 
-export function MarkdownPreview({ source, onOpenLink, loadImage, fragment }: MarkdownPreviewProps) {
+function MarkdownCodeBlock({ node, children }: { node?: PreviewNode; children?: ReactNode }) {
+  const themeBase = useContext(PreviewContext)?.themeBase ?? "light";
+  const code = node?.children?.[0];
+  const classes = code?.properties?.className;
+  return node?.children?.length === 1 && code?.tagName === "code" && Array.isArray(classes) && classes.includes("language-mermaid")
+    ? <MermaidPreview source={textOf(code)} theme={themeBase} />
+    : <pre>{children}</pre>;
+}
+
+export function MarkdownPreview({ source, themeBase = "light", onOpenLink, loadImage, fragment }: MarkdownPreviewProps) {
   const article = useRef<HTMLElement>(null);
   useEffect(() => { if (fragment) scrollToHeading(article.current, fragment.fragment); }, [fragment]);
   return <article ref={article} className="markdown-preview">
-    <PreviewContext.Provider value={{ article, onOpenLink, loadImage }}>
+    <PreviewContext.Provider value={{ article, themeBase, onOpenLink, loadImage }}>
     <Markdown
       remarkPlugins={[remarkGfm]}
       rehypePlugins={[headingAnchors]}
@@ -140,6 +152,7 @@ export function MarkdownPreview({ source, onOpenLink, loadImage, fragment }: Mar
       components={{
         a: MarkdownLink,
         img: MarkdownImage,
+        pre: MarkdownCodeBlock,
       }}
     >{source}</Markdown>
     </PreviewContext.Provider>

@@ -14,7 +14,7 @@
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'",
       "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'",
-      "capabilities": ["main"]
+      "capabilities": ["main", "mermaid"]
     }
   },
   "bundle": { "active": false }

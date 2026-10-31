@@ -2,6 +2,13 @@
 // M0-prefixed types are spike IPC contracts, not the product HTTP API.
 // Admin-prefixed types are for the local Unix socket, not public HTTP endpoints.
 
+export type ThemeBase = "light" | "dark";
+export type ThemeFont = "system-monospace" | "system-ui";
+export type ThemeSelection = "light" | "dark" | "custom";
+export type ThemeTokens = { "surface.background": string, "text.primary": string, "border.default": string, "status.conflict": string, "surface.raised"?: string, "text.secondary"?: string, "accent.background"?: string, "accent.text"?: string, "status.error"?: string, "status.success"?: string, "editor.fontFamily"?: ThemeFont, "editor.fontSize"?: number, "spacing.scale"?: number, };
+export type ThemePackage = { id: string, schemaVersion: 1, name: string, base: ThemeBase, tokens: ThemeTokens, };
+export type ThemePreferences = { selection: ThemeSelection, custom: ThemePackage | null, };
+export type ThemeStatus = { selection: ThemeSelection, custom: ThemePackage | null, safe_mode: boolean, warning: string | null, };
 export type HeadHint = { workspace_epoch: string, head_seq: string, };
 export type M0OpenRequest = { document_id: string, renderer_session_id: string, };
 export type M0CloseRequest = { document_id: string, edit_session_id: string, };

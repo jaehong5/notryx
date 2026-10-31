@@ -1,0 +1,6 @@
+{
+  "identifier": "mermaid",
+  "description": "Deliver one result from an isolated diagram renderer",
+  "windows": ["mermaid-*"],
+  "permissions": ["allow-mermaid-complete"]
+}

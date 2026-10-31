@@ -14,6 +14,7 @@ pub mod identity;
 pub mod node;
 pub mod operation;
 pub mod structure;
+pub mod theme;
 pub mod upload;
 pub use admin::{
     AdminRecoverySummary, AdminRequest, AdminResponse, AdminResult, AdminUnsupportedItem,
@@ -27,6 +28,9 @@ pub use identity::{DeviceCurrentRole, DeviceIdentity, DeviceRenewal};
 pub use node::{ChangesPage, InventoryPage, NodeState};
 pub use operation::{AbandonRequest, AckRequest, AckResponse, OperationError, OperationReceipt};
 pub use structure::{MoveNodeRequest, RestoreNodeRequest, TrashNode, TrashPage};
+pub use theme::{
+    ThemeBase, ThemeFont, ThemePackage, ThemePreferences, ThemeSelection, ThemeStatus, ThemeTokens,
+};
 pub use upload::UploadResponse;
 
 pub const CONTRACT: &str = "mdw-sync/1.2";

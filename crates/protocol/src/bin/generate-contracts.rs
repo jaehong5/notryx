@@ -69,6 +69,9 @@ use notryx_protocol::{
     WorkspaceSearchRequest, WorkspaceSearchResult, WorkspaceSearchScope, WorkspaceSearchSource,
     WorkspaceSendResult, WorkspaceSendStatus, WorkspaceSyncState, WorkspaceSyncStatus,
 };
+use notryx_protocol::{
+    ThemeBase, ThemeFont, ThemePackage, ThemePreferences, ThemeSelection, ThemeStatus, ThemeTokens,
+};
 use schemars::{JsonSchema, schema_for};
 use ts_rs::{Config, TS};
 
@@ -99,6 +102,13 @@ fn main() -> Result<(), Box<dyn Error>> {
          // Admin-prefixed types are for the local Unix socket, not public HTTP endpoints.\n\n",
     );
     let mut schemas = BTreeMap::new();
+    add_type::<ThemeBase>(&config, &mut declarations, &mut schemas)?;
+    add_type::<ThemeFont>(&config, &mut declarations, &mut schemas)?;
+    add_type::<ThemeSelection>(&config, &mut declarations, &mut schemas)?;
+    add_type::<ThemeTokens>(&config, &mut declarations, &mut schemas)?;
+    add_type::<ThemePackage>(&config, &mut declarations, &mut schemas)?;
+    add_type::<ThemePreferences>(&config, &mut declarations, &mut schemas)?;
+    add_type::<ThemeStatus>(&config, &mut declarations, &mut schemas)?;
     add_type::<HeadHint>(&config, &mut declarations, &mut schemas)?;
     add_type::<M0OpenRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<M0CloseRequest>(&config, &mut declarations, &mut schemas)?;

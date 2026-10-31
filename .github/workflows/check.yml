@@ -22,6 +22,8 @@ jobs:
       - run: bash scripts/check.sh
       - run: npm run tauri -- build --debug --no-bundle
       - run: xvfb-run -a python3 scripts/m0-webdriver.py --output ci-artifacts/webdriver
+      - run: xvfb-run -a python3 scripts/m4-mermaid-webdriver.py --output ci-artifacts/mermaid
+      - run: xvfb-run -a python3 scripts/m4-theme-webdriver.py --output ci-artifacts/theme
       - run: cargo build --locked -p notryx-server
       - run: xvfb-run -a python3 scripts/m2-workspace-webdriver.py
       - run: xvfb-run -a python3 scripts/m2-migration-recovery-webdriver.py
@@ -39,6 +41,8 @@ jobs:
           name: webdriver-failure
           path: |
             ci-artifacts/webdriver/
+            ci-artifacts/mermaid/
+            ci-artifacts/theme/
             ci-artifacts/m3-lifecycle.log
           if-no-files-found: ignore
           retention-days: 7

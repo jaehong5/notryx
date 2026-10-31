@@ -1,0 +1,21 @@
+{
+  "id": "theme.ocean",
+  "schemaVersion": 1,
+  "name": "차분한 바다",
+  "base": "dark",
+  "tokens": {
+    "surface.background": "#10202c",
+    "surface.raised": "#182d3c",
+    "text.primary": "#e5edf4",
+    "text.secondary": "#a9bfce",
+    "border.default": "#3f5c70",
+    "accent.background": "#23465e",
+    "accent.text": "#bce3ff",
+    "status.conflict": "#efc16c",
+    "status.error": "#ffada5",
+    "status.success": "#91d8b0",
+    "editor.fontFamily": "system-monospace",
+    "editor.fontSize": 16,
+    "spacing.scale": 1
+  }
+}

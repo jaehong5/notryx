@@ -1,4 +1,12 @@
-include!("outbox_v20_migration.rs");
+#[path = "support/migration_fixtures.rs"]
+#[allow(dead_code)]
+mod migration_fixtures;
+use migration_fixtures::{
+    CONFLICT_OP, assert_integrity, connect, fixture_v20_for_v21, frozen_binding_v16, snapshot,
+    v16_intents,
+};
+use notryx_client_store::{ClientStore, StoreError};
+use sqlx::Connection;
 
 #[tokio::test]
 async fn v21_merge_link_collision_rolls_back_everything_and_leaves_recovery_readable() {

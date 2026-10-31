@@ -1,4 +1,12 @@
-include!("outbox_v20_migration.rs");
+#[path = "support/migration_fixtures.rs"]
+#[allow(dead_code)]
+mod migration_fixtures;
+use migration_fixtures::{
+    CONFLICT_OP, FOLLOWUP_OP, ROOT, V16_LOCAL, assert_integrity, connect, fixture_v19,
+    frozen_binding_v16, hash, snapshot, v16_intents,
+};
+use notryx_client_store::ClientStore;
+use sqlx::Connection;
 
 #[tokio::test]
 async fn v19_content_operation_column_without_foreign_key_is_rejected() {

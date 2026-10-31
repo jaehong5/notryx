@@ -1,39 +1,13 @@
-include!("outbox_v19_migration.rs");
-
-const COPY_NODE_V19: &str = "019a1000-0000-7000-8000-000000000071";
-const COPY_CREATE_V19: &str = "019a1000-0000-7000-8000-000000000072";
-
-async fn fixture_v19(path: &Path, with_content_id: bool, attempts: bool, obstruct: bool) {
-    fixture_v18(path, false).await;
-    let mut db = connect(path).await;
-    let create = if with_content_id {
-        "CREATE TABLE content_conflict_copies(operation_id TEXT PRIMARY KEY NOT NULL REFERENCES content_conflict_intents(operation_id), registration_id INTEGER NOT NULL REFERENCES client_registrations(id), intent_version INTEGER NOT NULL CHECK(intent_version>=0), parent_id TEXT NOT NULL, name TEXT NOT NULL, node_id TEXT NOT NULL UNIQUE, create_operation_id TEXT NOT NULL UNIQUE, content_operation_id TEXT UNIQUE REFERENCES client_outbox(operation_id))"
-    } else {
-        "CREATE TABLE content_conflict_copies(operation_id TEXT PRIMARY KEY NOT NULL REFERENCES content_conflict_intents(operation_id), registration_id INTEGER NOT NULL REFERENCES client_registrations(id), intent_version INTEGER NOT NULL CHECK(intent_version>=0), parent_id TEXT NOT NULL, name TEXT NOT NULL, node_id TEXT NOT NULL UNIQUE, create_operation_id TEXT NOT NULL UNIQUE)"
-    };
-    sqlx::query(create).execute(&mut db).await.unwrap();
-    sqlx::query(
-        "UPDATE content_conflict_intents SET choice='keep_local_copy' WHERE operation_id=?",
-    )
-    .bind(CONFLICT_OP)
-    .execute(&mut db)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO content_conflict_copies(operation_id,registration_id,intent_version,parent_id,name,node_id,create_operation_id) VALUES(?,5,0,?,'copy.md',?,?)")
-        .bind(CONFLICT_OP).bind(ROOT).bind(COPY_NODE_V19).bind(COPY_CREATE_V19).execute(&mut db).await.unwrap();
-    if attempts {
-        sqlx::raw_sql("CREATE TABLE content_conflict_copy_attempts(old_create_operation_id TEXT PRIMARY KEY NOT NULL REFERENCES client_outbox(operation_id),operation_id TEXT NOT NULL REFERENCES content_conflict_intents(operation_id),registration_id INTEGER NOT NULL REFERENCES client_registrations(id),intent_version INTEGER NOT NULL CHECK(intent_version>=0),old_parent_id TEXT NOT NULL,old_name TEXT NOT NULL,old_node_id TEXT NOT NULL,new_parent_id TEXT NOT NULL,new_name TEXT NOT NULL,new_node_id TEXT NOT NULL,new_create_operation_id TEXT NOT NULL UNIQUE)")
-            .execute(&mut db).await.unwrap();
-    }
-    if obstruct {
-        sqlx::raw_sql("CREATE TABLE content_conflict_copy_attempts(sentinel TEXT NOT NULL); INSERT INTO content_conflict_copy_attempts VALUES('preserve-me');").execute(&mut db).await.unwrap();
-    }
-    sqlx::query("PRAGMA user_version=19")
-        .execute(&mut db)
-        .await
-        .unwrap();
-    db.close().await.unwrap();
-}
+#[path = "support/migration_fixtures.rs"]
+#[allow(dead_code)]
+mod migration_fixtures;
+use migration_fixtures::{
+    CONFLICT_NODE, CONFLICT_OP, COPY_CREATE_V19, COPY_NODE_V19, V16_LOCAL, V16_SENT,
+    assert_integrity, completed_markers, connect, decisions, fixture_v19, fixture_v20_for_v21,
+    frozen_binding_v16, move_decisions, snapshot, v16_intents,
+};
+use notryx_client_store::{ClientStore, StoreError};
+use sqlx::Connection;
 
 #[tokio::test]
 async fn v19_variants_upgrade_preserving_existing_copy_drafts_and_operations() {
@@ -134,20 +108,6 @@ async fn v20_migration_rejects_malformed_attempts_and_rolls_back_all_changes() {
     assert_integrity(&path, 24).await;
     assert_eq!(snapshot(&path).await, before);
     assert_eq!(v16_intents(&path).await, intents);
-}
-
-async fn fixture_v20_for_v21(path: &Path, obstruct: bool) {
-    fixture_v19(path, true, true, false).await;
-    let mut db = connect(path).await;
-    sqlx::query("PRAGMA user_version=20")
-        .execute(&mut db)
-        .await
-        .unwrap();
-    if obstruct {
-        sqlx::raw_sql("CREATE TABLE deleted_draft_copy_intents (sentinel TEXT NOT NULL); INSERT INTO deleted_draft_copy_intents VALUES ('preserve-me');")
-            .execute(&mut db).await.unwrap();
-    }
-    db.close().await.unwrap();
 }
 
 #[tokio::test]

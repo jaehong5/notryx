@@ -1,4 +1,10 @@
-include!("outbox_v22_content_migration.rs");
+#[path = "support/migration_fixtures.rs"]
+#[allow(dead_code)]
+mod migration_fixtures;
+use migration_fixtures::{assert_integrity, connect, fixture_v21_content};
+use notryx_client_store::ClientStore;
+use sqlx::Connection;
+use std::path::Path;
 
 // The v22 schema is fixed here independently of the migration under test.
 async fn fixture_v22_dismissal(path: &Path, obstruct: bool) {

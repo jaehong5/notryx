@@ -1,4 +1,14 @@
-include!("outbox_v20_migration.rs");
+#[path = "support/migration_fixtures.rs"]
+#[allow(dead_code)]
+mod migration_fixtures;
+use migration_fixtures::{
+    CONFLICT_NODE, CONFLICT_OP, FOLLOWUP_OP, ROOT, V16_LOCAL, V16_REMOTE, V16_SENT,
+    assert_integrity, connect, fixture_v20_for_v21, frozen_binding_v16, hash, snapshot,
+    v16_intents,
+};
+use notryx_client_store::{ClientStore, RegistrationBinding};
+use sqlx::Connection;
+use std::path::Path;
 
 use notryx_client_store::{ContentConflictChoice, ContentConflictIntentRequest};
 use notryx_protocol::{InventoryPage, NodeState, ServerInfo};

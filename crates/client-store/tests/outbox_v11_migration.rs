@@ -287,7 +287,7 @@ async fn v10_to_v11_preserves_all_existing_payloads_receipts_streams_and_binding
         .fetch_one(&mut db)
         .await
         .unwrap();
-    assert_eq!(version, 23);
+    assert_eq!(version, 24);
     let errors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
         .fetch_one(&mut db)
         .await

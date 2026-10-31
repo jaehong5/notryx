@@ -339,6 +339,7 @@ HTTP 계약은 [Rust DTO](../crates/protocol/src/http.rs), 실제 경로와 head
 | 경로 | 요청과 결과 |
 |---|---|
 | `POST /v1/pair` | `protocol`, `workspace_id`, `pairing_secret` JSON. 기기 token과 새 stream, 만료 시각 반환 |
+| `POST /v1/devices/self/renew` | Bearer 인증. 본문과 query 없이 자기 기기의 idle 만료 연장, 현재 binding과 만료 시각 반환 |
 | `GET /v1/server-info` | Bearer 인증. workspace, epoch, root, head, journal floor와 제한 조회 |
 | `GET /v1/changes?after={seq}&through={seq}` | Bearer 인증. 고정된 범위의 완전한 ChangeSet 조회. `through` 생략 시 현재 head 사용 |
 | `GET /v1/nodes?after_id={id}&limit={n}` | Bearer 인증. root를 포함한 살아 있는 node의 UUID keyset 페이지 |
@@ -393,7 +394,17 @@ with urllib.request.urlopen(request, timeout=5) as response:
 '
 ```
 
-기기 token은 발급 시 idle 90일, absolute 365일 만료가 설정된다. 현재 조회 요청은 idle 만료를 연장하지 않으며 token renew도 아직 없다. 예제를 종료하면 token을 다시 사용할 수 있도록 저장하지 않는다. 필요하면 출력된 기기 ID로 `revoke-device`를 실행하고 새 pairing으로 시험한다.
+기기 token은 발급 시 idle 90일, absolute 365일 만료가 설정된다. 일반 조회 요청은 idle 만료를 연장하지 않는다. 예제를 종료하면 token을 다시 사용할 수 있도록 저장하지 않는다. 필요하면 출력된 기기 ID로 `revoke-device`를 실행하고 새 pairing으로 시험한다.
+
+`POST /v1/devices/self/renew`는 reader, editor, owner 모두 자기 기기에 사용할 수 있다. 유효하고 폐기되지 않은 token의 남은 idle 기간이 30일 이하이면 `min(현재 + 90일, absolute 만료)`까지 연장한다. 30일 초과이면 쓰기 없이 현재 만료를 반환하므로 응답 유실 후 같은 token으로 재시도할 수 있다. token secret, principal, role, device와 stream은 바꾸지 않으며 문서 mutation 순번이나 receipt를 사용하지 않는다. 만료되거나 폐기된 token은 401 `unauthorized`다.
+
+요청은 본문과 query를 받지 않으며 지정하면 400 `invalid_request`다. 성공 응답은 [DeviceRenewal](../crates/protocol/src/identity.rs)의 `protocol`, `workspace_id`, `workspace_epoch`, `device_id`, `device_stream_id`, `idle_expires_at`, `absolute_expires_at`이고, 만료 시각은 pairing과 같은 Unix 초 단위 decimal 문자열이다. 인증 secret을 반환하지 않으며 성공과 오류 모두 `Cache-Control: no-store`를 적용한다.
+
+클라이언트는 동기화 시작과 foreground 상태의 60초 주기에서 만료 정보를 확인한다. 남은 idle 기간이 30일 이하이거나 기존 등록의 만료 정보를 모르면 연장을 요청한다. absolute 만료까지 이미 연장된 유효한 token에는 같은 연장을 반복하지 않는다. 요청 간격은 최소 5분이고, 연장 API가 없는 서버는 1시간 뒤 재확인한다. 네트워크 오류나 미지원만으로 기존 동기화와 초안 및 outbox를 변경하지 않는다. 갱신 응답의 protocol과 전체 등록 binding을 검사하고, 응답 도중 등록이나 generation이 바뀌면 이전 응답을 버린다. 정상 재동기화의 generation 변경은 현재 동기화를 중단하지 않는다.
+
+클라이언트 DB schema 24는 등록별 만료 시각 두 개만 보관하는 `credential_expiry`를 추가한다. token secret과 비밀 저장소의 credential 형식은 그대로다. 이전 버전에서 넘어올 때 알 수 없는 만료 시각을 추정하지 않고, 연결 후 서버에서 확인한다. 이전은 기존 마이그레이션 transaction 안에서 실행하며 실패 시 원래 버전과 로컬 자료를 보존한다. schema 23까지 지원하는 이전 앱은 schema 24를 열 수 없다.
+
+만료 14일 전부터 저장 방식 안내와 함께 경고한다. 로컬에 보관한 만료 시각이 지났다는 이유만으로 문서 접근이나 편집을 막지는 않는다. 서버가 만료 또는 폐기를 거절하면 전송을 중단하고 재등록을 안내하며 로컬 자료는 보존한다. 앱 재시작 시 저장된 credential 확인이 401인 경우도 같은 안내를 표시한다. renderer는 token이나 HTTP 권한을 받지 않고 검증된 상태 enum만 전달받는다.
 
 ### 파일과 폴더 생성
 
@@ -534,4 +545,4 @@ cargo test --locked -p notryx-server --test http_upload progressing_upload_obeys
 
 저장 코어는 content revision, 요청 순번과 digest를 검사한다. 저장 전후의 예상 상태와 다른 파일이 발견되면 자료를 보존하고 쓰기를 막는다. 로컬 관리자가 현재 상태를 검증하고 명시적으로 해결할 수 있다. 다른 프로세스의 동시 파일 변경을 완전히 제어할 수는 없다.
 
-일반 본문 객체의 GC, watcher와 외부 변경 수용의 미완료 범위, token renew와 gateway 인증은 후속 범위다. SSE와 journal 동기화는 구현했지만 전체 동기화 게이트는 아직 통과하지 않았다. 다른 Linux 컴퓨터의 Fcitx 5에서 사용자가 물리 키보드 한글 입력과 저장 후 재시작 복구를 확인했다고 보고했다. 해당 시험 이후 M3 구현의 실제 Linux IME와 Android 실기기 검증은 별도로 남아 있다. 실패 주입 hook은 테스트용이며 운영 환경변수로 활성화하지 않는다.
+일반 본문 객체의 GC, watcher와 외부 변경 수용의 미완료 범위와 gateway 인증은 후속 범위다. SSE와 journal 동기화는 구현했지만 전체 동기화 게이트는 아직 통과하지 않았다. 다른 Linux 컴퓨터의 Fcitx 5에서 사용자가 물리 키보드 한글 입력과 저장 후 재시작 복구를 확인했다고 보고했다. 해당 시험 이후 M3 구현의 실제 Linux IME와 Android 실기기 검증은 별도로 남아 있다. 실패 주입 hook은 테스트용이며 운영 환경변수로 활성화하지 않는다.

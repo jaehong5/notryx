@@ -636,7 +636,7 @@ async fn v16_to_v17_preserves_intent_drafts_outbox_and_all_prior_decisions() {
     assert_eq!(v16_intents(&path).await, old_intents);
     assert_eq!(decisions(&path).await, create_delete);
     assert_eq!(move_decisions(&path).await, move_history);
-    assert_integrity(&path, 23).await;
+    assert_integrity(&path, 24).await;
     let mut db = connect(&path).await;
     let values: Vec<Option<i64>> = sqlx::query_scalar(
         "SELECT completed_generation FROM content_conflict_intents ORDER BY operation_id",

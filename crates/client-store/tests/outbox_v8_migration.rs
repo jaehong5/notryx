@@ -181,7 +181,7 @@ async fn v7_migration_preserves_pending_edits_dependencies_and_receipt_watermark
         .fetch_one(&mut db)
         .await
         .unwrap();
-    assert_eq!(version, 23);
+    assert_eq!(version, 24);
     let foreign_key_errors: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
             .fetch_one(&mut db)

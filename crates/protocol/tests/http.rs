@@ -1,6 +1,6 @@
 use notryx_protocol::{
-    AdminRequest, AdminResponse, AdminResult, ApiError, NodeKind, NodeMetadata, PairRequest,
-    PairResponse, ServerInfo, WorkspaceRole,
+    AdminRequest, AdminResponse, AdminResult, ApiError, DeviceRenewal, NodeKind, NodeMetadata,
+    PairRequest, PairResponse, ServerInfo, WorkspaceRole,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -30,6 +30,38 @@ fn pair_response() -> Value {
         "idle_expires_at": "1780000000",
         "absolute_expires_at": "1811536000"
     })
+}
+
+#[test]
+fn device_renewal_requires_binding_and_decimal_expiries_without_credentials() {
+    let response = json!({
+        "protocol": "mdw-sync/1.2",
+        "workspace_id": WORKSPACE,
+        "workspace_epoch": WORKSPACE,
+        "device_id": "550e8400-e29b-41d4-a716-446655440001",
+        "device_stream_id": "550e8400-e29b-41d4-a716-446655440002",
+        "idle_expires_at": "1780000000",
+        "absolute_expires_at": "1811536000"
+    });
+    assert_roundtrip::<DeviceRenewal>(response.clone());
+    assert_unknown_field_rejected::<DeviceRenewal>(response.clone());
+    for field in response.as_object().unwrap().keys() {
+        let mut missing = response.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<DeviceRenewal>(missing).is_err());
+    }
+    for field in ["idle_expires_at", "absolute_expires_at"] {
+        for invalid in [
+            json!(1780000000),
+            json!("-1"),
+            json!(""),
+            json!("18446744073709551616"),
+        ] {
+            let mut malformed = response.clone();
+            malformed[field] = invalid;
+            assert!(serde_json::from_value::<DeviceRenewal>(malformed).is_err());
+        }
+    }
 }
 
 fn server_info() -> Value {

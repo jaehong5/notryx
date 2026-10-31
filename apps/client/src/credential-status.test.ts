@@ -6,6 +6,16 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 beforeEach(() => { invoke.mockReset(); });
 
 test.each([
+  ["expiring", "14일"],
+  ["expired", "만료 시각"],
+  ["auth_required", "다시 등록"],
+  ["unsupported", "서버"],
+] as const)("인증 연장 상태 %s 안내를 표시한다", async (status, expected) => {
+  const { credentialRenewalMessage } = await import("./credential-status");
+  expect(credentialRenewalMessage(status)).toContain(expected);
+});
+
+test.each([
   ["none", ""],
   ["secure", ""],
   ["session_only", "인증정보를 이 실행 동안만 사용합니다. 앱을 다시 시작하면 다시 등록해야 합니다."],
@@ -19,13 +29,13 @@ test.each([
 });
 
 test.each(["none", "secure", "session_only", "registration_required", "unavailable", "identity_unsupported", "pending"] as const)("현재 renderer로 상태 %s를 확인한다", async (status) => {
-  invoke.mockImplementation((command: string) => command === "m0_renderer_session" ? Promise.resolve("renderer") : Promise.resolve({ status }));
+  invoke.mockImplementation((command: string) => command === "m0_renderer_session" ? Promise.resolve("renderer") : Promise.resolve({ status, renewal_status: "none" }));
   const { workspaceCredentialStatus } = await import("./credential-status");
-  await expect(workspaceCredentialStatus()).resolves.toBe(status);
+  await expect(workspaceCredentialStatus()).resolves.toEqual({ status, renewal_status: "none" });
   expect(invoke).toHaveBeenCalledWith("workspace_credential_status", { request: { renderer_session_id: "renderer" } });
 });
 
-test.each([null, [], {}, { status: "unknown" }, { status: null }])("잘못된 인증정보 상태 응답을 거절한다", async (response) => {
+test.each([null, [], {}, { status: "unknown" }, { status: null }, { status: "secure" }, { status: "secure", renewal_status: "unknown" }])("잘못된 인증정보 상태 응답을 거절한다", async (response) => {
   invoke.mockImplementation((command: string) => command === "m0_renderer_session" ? Promise.resolve("renderer") : Promise.resolve(response));
   const { workspaceCredentialStatus } = await import("./credential-status");
   await expect(workspaceCredentialStatus()).rejects.toThrow("인증정보 저장 상태를 확인하지 못했습니다.");

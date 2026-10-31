@@ -23,7 +23,7 @@ pub use create::{CreateNodeRequest, CreatedNode};
 pub use http::{
     ApiError, NodeKind, NodeMetadata, PairRequest, PairResponse, ServerInfo, WorkspaceRole,
 };
-pub use identity::{DeviceCurrentRole, DeviceIdentity};
+pub use identity::{DeviceCurrentRole, DeviceIdentity, DeviceRenewal};
 pub use node::{ChangesPage, InventoryPage, NodeState};
 pub use operation::{AbandonRequest, AckRequest, AckResponse, OperationError, OperationReceipt};
 pub use structure::{MoveNodeRequest, RestoreNodeRequest, TrashNode, TrashPage};
@@ -1955,6 +1955,18 @@ pub enum WorkspaceCredentialStatus {
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceCredentialState {
     pub status: WorkspaceCredentialStatus,
+    pub renewal_status: WorkspaceCredentialRenewalStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum WorkspaceCredentialRenewalStatus {
+    None,
+    Expiring,
+    Expired,
+    AuthRequired,
+    Unsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]

@@ -4,6 +4,64 @@ use std::collections::HashMap;
 
 const TEST_TOKEN: &[u8] = b"synthetic-secret-service-token-4bcaebd2";
 
+#[tokio::test]
+async fn expired_restore_reports_registration_required_without_losing_the_draft() {
+    let (directory, server, runtime, session, document) =
+        crate::sync_bootstrap::tests::setup().await;
+    let binding = crate::registration_binding(session.binding());
+    let expected = {
+        let mut state = runtime.0.lock().await;
+        state.session = None;
+        state.store.active_credential().await.unwrap().unwrap()
+    };
+    assert!(matches!(
+        notryx_server::admin::request(
+            &directory.path().join("admin.sock"),
+            &notryx_protocol::AdminRequest::RevokeDevice {
+                device_id: binding.device_id.clone()
+            }
+        )
+        .await
+        .unwrap(),
+        notryx_protocol::AdminResponse::Ok { .. }
+    ));
+    assert_eq!(
+        activate_verified_session(&runtime, &expected, &session).await,
+        Err(notryx_client_runtime::Error::Unauthorized)
+    );
+    assert_eq!(
+        crate::credential_status_for_renderer(&runtime, "owner")
+            .await
+            .unwrap()
+            .renewal_status,
+        notryx_protocol::WorkspaceCredentialRenewalStatus::AuthRequired
+    );
+    let mut state = runtime.0.lock().await;
+    assert!(state.session.is_none());
+    assert_eq!(
+        state
+            .store
+            .read_registered_checkpoint(&binding, &document)
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        b"local draft"
+    );
+    assert_eq!(
+        state
+            .store
+            .list_outbox(&binding, 0, 100)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    drop(state);
+    server.shutdown().await.unwrap();
+}
+
 #[derive(Default)]
 struct FakeVault {
     items: HashMap<Uuid, Vec<StoredCredential>>,

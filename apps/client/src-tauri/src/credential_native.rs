@@ -787,7 +787,12 @@ async fn activate_verified_session(
     if crate::registration_binding(session.binding()) != expected.0 {
         return Err(notryx_client_runtime::Error::Binding);
     }
-    session.verify_binding().await?;
+    let verification = session.verify_binding().await;
+    if let Err(error) = verification
+        && error != notryx_client_runtime::Error::Unauthorized
+    {
+        return Err(error);
+    }
     let mut state = runtime.0.lock().await;
     if state
         .store
@@ -803,6 +808,12 @@ async fn activate_verified_session(
         || state.gate.check_queue(state.gate.owner()).is_err()
     {
         return Ok(false);
+    }
+    if verification == Err(notryx_client_runtime::Error::Unauthorized) {
+        state
+            .transmission_gate
+            .block(&expected.0, crate::send::TransmissionBlock::AuthRequired);
+        return Err(notryx_client_runtime::Error::Unauthorized);
     }
     let Some(token) = state.transmission_gate.begin_initial_sync(&expected.0) else {
         return Ok(false);
@@ -903,6 +914,11 @@ pub(crate) async fn resume(runtime: &crate::Runtime, app: tauri::AppHandle) {
                     use tauri::Emitter;
                     let _ = app.emit_to("main", "workspace-credential-status-changed", ());
                 }
+                return;
+            }
+            Err(notryx_client_runtime::Error::Unauthorized) => {
+                use tauri::Emitter;
+                let _ = app.emit_to("main", "workspace-credential-status-changed", ());
                 return;
             }
             Err(_) => return,

@@ -501,7 +501,7 @@ async fn v15_to_v16_preserves_drafts_outbox_receipts_and_structure_decisions() {
     assert_eq!(snapshot(&path).await, before);
     assert_eq!(decisions(&path).await, before_decisions);
     assert_eq!(move_decisions(&path).await, before_move);
-    assert_integrity(&path, 23).await;
+    assert_integrity(&path, 24).await;
     let mut db = connect(&path).await;
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM content_conflict_intents")
         .fetch_one(&mut db)
@@ -541,7 +541,7 @@ async fn failed_v16_migration_rolls_back_everything_and_keeps_v15_recoverable() 
     db.close().await.unwrap();
     let store = ClientStore::open(&path).await.unwrap();
     store.close().await.unwrap();
-    assert_integrity(&path, 23).await;
+    assert_integrity(&path, 24).await;
     assert_eq!(snapshot(&path).await, before);
     assert_eq!(decisions(&path).await, before_decisions);
     assert_eq!(move_decisions(&path).await, before_move);

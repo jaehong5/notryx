@@ -20,6 +20,15 @@ pub(crate) const UPGRADE_V9: &str = "
     PRAGMA user_version = 9;
 ";
 
+pub(crate) const UPGRADE_V24: &str = "
+    CREATE TABLE credential_expiry (
+        registration_id INTEGER PRIMARY KEY REFERENCES client_registrations(id),
+        idle_expires_at INTEGER NOT NULL CHECK(typeof(idle_expires_at)='integer' AND idle_expires_at>0),
+        absolute_expires_at INTEGER NOT NULL CHECK(typeof(absolute_expires_at)='integer' AND absolute_expires_at>=idle_expires_at)
+    );
+    PRAGMA user_version = 24;
+";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CredentialPending {
     pub id: Uuid,
@@ -47,6 +56,53 @@ fn pending_from_row(row: &SqliteRow) -> Result<CredentialPending, StoreError> {
 }
 
 impl ClientStore {
+    pub async fn credential_expiry(
+        &mut self,
+        binding: &RegistrationBinding,
+    ) -> Result<Option<(u64, u64)>, StoreError> {
+        let id = self.registration_id(binding, true).await?;
+        let row: Option<(i64, i64)> = sqlx::query_as(
+            "SELECT idle_expires_at,absolute_expires_at FROM credential_expiry WHERE registration_id=?",
+        )
+        .bind(id)
+        .fetch_optional(&mut self.connection)
+        .await
+        .map_err(storage_error)?;
+        row.map(|(idle, absolute)| {
+            if idle <= 0 || absolute < idle {
+                return Err(StoreError::UnsupportedFormat);
+            }
+            Ok((idle as u64, absolute as u64))
+        })
+        .transpose()
+    }
+
+    pub async fn set_credential_expiry(
+        &mut self,
+        binding: &RegistrationBinding,
+        idle_expires_at: u64,
+        absolute_expires_at: u64,
+    ) -> Result<(), StoreError> {
+        if idle_expires_at == 0 || idle_expires_at > absolute_expires_at {
+            return Err(StoreError::InvalidRegistration);
+        }
+        let idle = i64::try_from(idle_expires_at).map_err(|_| StoreError::InvalidRegistration)?;
+        let absolute =
+            i64::try_from(absolute_expires_at).map_err(|_| StoreError::InvalidRegistration)?;
+        let id = self.registration_id(binding, true).await?;
+        sqlx::query(
+            "INSERT INTO credential_expiry(registration_id,idle_expires_at,absolute_expires_at) VALUES(?,?,?)
+             ON CONFLICT(registration_id) DO UPDATE SET idle_expires_at=excluded.idle_expires_at,absolute_expires_at=excluded.absolute_expires_at",
+        )
+        .bind(id)
+        .bind(idle)
+        .bind(absolute)
+        .execute(&mut self.connection)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
     pub async fn prepare_credential_pending(
         &mut self,
         binding: &RegistrationBinding,

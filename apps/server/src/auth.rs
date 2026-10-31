@@ -4,7 +4,7 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use notryx_domain::{WorkspaceEpoch, WorkspaceId};
-use notryx_protocol::{CONTRACT, PairRequest, PairResponse, WorkspaceRole};
+use notryx_protocol::{CONTRACT, DeviceRenewal, PairRequest, PairResponse, WorkspaceRole};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -53,6 +53,7 @@ pub struct PairingGrant {
 
 const PAIRING_SECONDS: i64 = 300;
 const IDLE_SECONDS: i64 = 90 * 24 * 60 * 60;
+const RENEW_REMAINING_SECONDS: i64 = 30 * 24 * 60 * 60;
 const ABSOLUTE_SECONDS: i64 = 365 * 24 * 60 * 60;
 
 fn expiry(now: i64, lifetime: i64) -> Result<i64, AuthError> {
@@ -250,6 +251,14 @@ impl Workspace {
     }
 
     pub async fn authenticate(&mut self, token: &str, now: i64) -> Result<AuthIdentity, AuthError> {
+        Ok(self.authenticated_device(token, now).await?.identity)
+    }
+
+    async fn authenticated_device(
+        &mut self,
+        token: &str,
+        now: i64,
+    ) -> Result<DeviceRecord, AuthError> {
         let (id, actual_hash) = credential_hash(token, "device")?;
         let device = self.state.device(id).await?;
         let expected_hash = device.as_ref().map_or([0; 32], |record| record.token_hash);
@@ -264,7 +273,36 @@ impl Workspace {
         {
             return Err(AuthError::Unauthorized);
         }
-        Ok(device.identity)
+        Ok(device)
+    }
+
+    pub async fn renew_device(
+        &mut self,
+        token: &str,
+        now: i64,
+    ) -> Result<DeviceRenewal, AuthError> {
+        let device = self.authenticated_device(token, now).await?;
+        let mut idle_expires_at = device.idle_expires_at;
+        // A retry after a lost response must succeed even outside the renewal window.
+        if idle_expires_at - now <= RENEW_REMAINING_SECONDS {
+            idle_expires_at = now
+                .saturating_add(IDLE_SECONDS)
+                .min(device.absolute_expires_at);
+            if idle_expires_at != device.idle_expires_at {
+                self.state
+                    .renew_device(&device, now, idle_expires_at)
+                    .await?;
+            }
+        }
+        Ok(DeviceRenewal {
+            protocol: CONTRACT.into(),
+            workspace_id: self.state.workspace_id,
+            workspace_epoch: self.state.epoch,
+            device_id: device.identity.device_id.to_string(),
+            device_stream_id: device.identity.stream_id.to_string(),
+            idle_expires_at: idle_expires_at.to_string(),
+            absolute_expires_at: device.absolute_expires_at.to_string(),
+        })
     }
 
     pub async fn revoke_device(&mut self, device: Uuid, now: i64) -> Result<(), AuthError> {

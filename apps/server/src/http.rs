@@ -296,6 +296,27 @@ async fn device_current_role(
     }
 }
 
+async fn renew_device(
+    State(handle): State<WorkspaceHandle>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> Response {
+    let token = match bearer(&headers) {
+        Ok(token) => token,
+        Err(error) => return runtime_error(error),
+    };
+    match body {
+        Ok(bytes) if bytes.is_empty() && uri.query().is_none() => {}
+        Ok(_) => return api_error(StatusCode::BAD_REQUEST, "invalid_request"),
+        Err(error) => return api_error(error.status(), "invalid_request"),
+    }
+    match handle.renew_device(token).await {
+        Ok(renewal) => ([(header::CACHE_CONTROL, "no-store")], Json(renewal)).into_response(),
+        Err(error) => runtime_error(error),
+    }
+}
+
 async fn metadata(
     State(handle): State<WorkspaceHandle>,
     Path(id): Path<String>,
@@ -576,6 +597,7 @@ impl RunningServer {
             .route("/v1/server-info", get(server_info))
             .route("/v1/devices/self", get(device_identity))
             .route("/v1/devices/self/role", get(device_current_role))
+            .route("/v1/devices/self/renew", post(renew_device))
             .route("/v1/changes", get(read::changes))
             .route("/v1/events", get(events::events))
             .route("/v1/uploads", post(upload::upload))

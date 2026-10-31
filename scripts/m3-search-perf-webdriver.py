@@ -640,7 +640,7 @@ def seed_fixture(path, watchdog):
     with sqlite3.connect(path, timeout=30) as db:
         db.execute("PRAGMA foreign_keys=ON")
         ensure(db.execute("PRAGMA application_id").fetchone()[0] == 1314148952, "unexpected ClientStore application id")
-        ensure(db.execute("PRAGMA user_version").fetchone()[0] == 23, "unexpected ClientStore schema version")
+        ensure(db.execute("PRAGMA user_version").fetchone()[0] == 24, "unexpected ClientStore schema version")
         ensure(db.execute("SELECT count(*) FROM client_registrations").fetchone()[0] == 0, "fresh fixture store is not empty")
         db.execute("BEGIN IMMEDIATE")
         try:

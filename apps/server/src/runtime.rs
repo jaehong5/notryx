@@ -7,8 +7,8 @@ use crate::{
 use notryx_domain::{ChangeSeq, NodeId, OperationId};
 use notryx_protocol::{
     AdminRecoverySummary, AdminRequest, AdminResult, ChangesPage, ContentPrecondition,
-    DeviceCurrentRole, DeviceIdentity, InventoryPage, JournalAccounting, NodeMetadata, NodeState,
-    PairRequest, PairResponse, ServerInfo, TrashPage, WorkspaceRole,
+    DeviceCurrentRole, DeviceIdentity, DeviceRenewal, InventoryPage, JournalAccounting,
+    NodeMetadata, NodeState, PairRequest, PairResponse, ServerInfo, TrashPage, WorkspaceRole,
 };
 use std::sync::{
     Arc,
@@ -512,6 +512,10 @@ enum Command {
     Pair {
         request: PairRequest,
         reply: oneshot::Sender<Result<PairResponse, RuntimeError>>,
+    },
+    RenewDevice {
+        token: String,
+        reply: oneshot::Sender<Result<DeviceRenewal, RuntimeError>>,
     },
     ServerInfo {
         token: String,
@@ -2598,6 +2602,12 @@ impl WorkspaceHandle {
         response.await.map_err(|_| RuntimeError::Closed)?
     }
 
+    pub async fn renew_device(&self, token: String) -> Result<DeviceRenewal, RuntimeError> {
+        let (reply, response) = oneshot::channel();
+        self.enqueue(Command::RenewDevice { token, reply })?;
+        response.await.map_err(|_| RuntimeError::Closed)?
+    }
+
     pub(crate) async fn authenticate(&self, token: String) -> Result<(), RuntimeError> {
         let (reply, response) = oneshot::channel();
         self.enqueue(Command::Authenticate { token, reply })?;
@@ -3969,6 +3979,19 @@ async fn execute(
         Command::Admin { request, reply } => {
             if !reply.is_closed() {
                 let _ = reply.send(execute_admin(workspace, request, journal_budget_bytes).await);
+            }
+        }
+        Command::RenewDevice { token, reply } => {
+            if !reply.is_closed() {
+                let result = match now() {
+                    Ok(now) if !shutting_down => workspace
+                        .renew_device(&token, now)
+                        .await
+                        .map_err(RuntimeError::Auth),
+                    Ok(_) => Err(RuntimeError::Closed),
+                    Err(error) => Err(error),
+                };
+                let _ = reply.send(result);
             }
         }
         Command::Pair { request, reply } => {

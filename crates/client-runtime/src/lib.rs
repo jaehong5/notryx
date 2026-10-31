@@ -1,8 +1,8 @@
 use notryx_domain::{ChangeSeq, NodeId, WorkspaceEpoch, WorkspaceId};
 use notryx_protocol::{
-    ApiError, CONTRACT, ChangesPage, DeviceCurrentRole, DeviceIdentity, InventoryPage, NodeKind,
-    NodeState, PairRequest, PairResponse, ServerInfo, StrongEtag, WorkspaceRole, require_contract,
-    verify_content_digest,
+    ApiError, CONTRACT, ChangesPage, DeviceCurrentRole, DeviceIdentity, DeviceRenewal,
+    InventoryPage, NodeKind, NodeState, PairRequest, PairResponse, ServerInfo, StrongEtag,
+    WorkspaceRole, require_contract, verify_content_digest,
 };
 use reqwest::{Client, Response, Url, header};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -42,6 +42,7 @@ pub enum Error {
     GatewayAuthRequired,
     IdentityUnsupported,
     RoleUnsupported,
+    RenewalUnsupported,
     Response,
     Contract,
     Binding,
@@ -84,6 +85,28 @@ pub struct Session {
     origin: Url,
     authorization: header::HeaderValue,
     binding: Binding,
+    token_expiry: Option<TokenExpiry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenExpiry {
+    pub idle_expires_at: u64,
+    pub absolute_expires_at: u64,
+}
+
+fn parse_token_expiry(idle: &str, absolute: &str) -> Result<TokenExpiry, Error> {
+    let idle_expires_at = idle.parse::<u64>().map_err(|_| Error::Contract)?;
+    let absolute_expires_at = absolute.parse::<u64>().map_err(|_| Error::Contract)?;
+    if idle_expires_at == 0
+        || idle_expires_at > absolute_expires_at
+        || absolute_expires_at > i64::MAX as u64
+    {
+        return Err(Error::Contract);
+    }
+    Ok(TokenExpiry {
+        idle_expires_at,
+        absolute_expires_at,
+    })
 }
 
 fn origin(value: &str) -> Result<Url, Error> {
@@ -242,6 +265,7 @@ impl Session {
             origin,
             authorization,
             binding: expected.clone(),
+            token_expiry: None,
         })
     }
 
@@ -294,28 +318,61 @@ impl Session {
             device_id: device_id(&paired.device_id)?,
             device_stream_id: device_id(&paired.device_stream_id)?,
         };
-        let idle = paired
-            .idle_expires_at
-            .parse::<u64>()
-            .map_err(|_| Error::Contract)?;
-        let absolute = paired
-            .absolute_expires_at
-            .parse::<u64>()
-            .map_err(|_| Error::Contract)?;
-        if idle > absolute {
-            return Err(Error::Contract);
-        }
+        let token_expiry = Some(parse_token_expiry(
+            &paired.idle_expires_at,
+            &paired.absolute_expires_at,
+        )?);
         let authorization = authorization(&paired.device_token)?;
         Ok(Self {
             client,
             origin,
             authorization,
             binding,
+            token_expiry,
         })
     }
 
     pub fn binding(&self) -> &Binding {
         &self.binding
+    }
+
+    pub fn token_expiry(&self) -> Option<TokenExpiry> {
+        self.token_expiry
+    }
+
+    pub async fn renew_device(&self) -> Result<TokenExpiry, Error> {
+        let response = self
+            .client
+            .post(
+                self.origin
+                    .join("/v1/devices/self/renew")
+                    .map_err(|_| Error::InvalidRequest)?,
+            )
+            .header(header::AUTHORIZATION, self.authorization.clone())
+            .send()
+            .await
+            .map_err(|_| Error::Network)?;
+        if response.status().as_u16() == 404 {
+            if content_type(&response)?.is_some_and(|value| {
+                value.eq_ignore_ascii_case("text/html")
+                    || value.eq_ignore_ascii_case("application/xhtml+xml")
+            }) {
+                return Err(Error::GatewayAuthRequired);
+            }
+            return Err(Error::RenewalUnsupported);
+        }
+        let renewed: DeviceRenewal = json(response).await?;
+        require_contract(&renewed.protocol).map_err(|_| Error::Contract)?;
+        let device = device_id(&renewed.device_id)?;
+        let stream = device_id(&renewed.device_stream_id)?;
+        if renewed.workspace_id != self.binding.workspace_id
+            || renewed.workspace_epoch != self.binding.workspace_epoch
+            || device != self.binding.device_id
+            || stream != self.binding.device_stream_id
+        {
+            return Err(Error::Binding);
+        }
+        parse_token_expiry(&renewed.idle_expires_at, &renewed.absolute_expires_at)
     }
 
     async fn get(&self, path: &str) -> Result<Response, Error> {

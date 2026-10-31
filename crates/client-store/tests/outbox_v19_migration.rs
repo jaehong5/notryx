@@ -39,7 +39,7 @@ async fn v18_to_v19_preserves_old_state_and_starts_with_no_copies() {
         .close()
         .await
         .unwrap();
-    assert_integrity(&path, 23).await;
+    assert_integrity(&path, 24).await;
     assert_eq!(snapshot(&path).await, before);
     assert_eq!(v16_intents(&path).await, intents);
     assert_eq!(completed_markers(&path).await, markers);
@@ -85,7 +85,7 @@ async fn failed_v19_migration_rolls_back_and_retains_existing_data() {
         .close()
         .await
         .unwrap();
-    assert_integrity(&path, 23).await;
+    assert_integrity(&path, 24).await;
     assert_eq!(snapshot(&path).await, before);
     assert_eq!(v16_intents(&path).await, intents);
     assert_eq!(completed_markers(&path).await, markers);

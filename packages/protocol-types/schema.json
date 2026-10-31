@@ -1509,6 +1509,46 @@
       "title": "DeviceIdentity",
       "type": "object"
     },
+    "DeviceRenewal": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "absolute_expires_at": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "device_id": {
+          "type": "string"
+        },
+        "device_stream_id": {
+          "type": "string"
+        },
+        "idle_expires_at": {
+          "pattern": "^[0-9]+$",
+          "type": "string"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "workspace_epoch": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol",
+        "workspace_id",
+        "workspace_epoch",
+        "device_id",
+        "device_stream_id",
+        "idle_expires_at",
+        "absolute_expires_at"
+      ],
+      "title": "DeviceRenewal",
+      "type": "object"
+    },
     "HeadHint": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -8636,8 +8676,30 @@
       "title": "WorkspaceCreateStatus",
       "type": "string"
     },
+    "WorkspaceCredentialRenewalStatus": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "none",
+        "expiring",
+        "expired",
+        "auth_required",
+        "unsupported"
+      ],
+      "title": "WorkspaceCredentialRenewalStatus",
+      "type": "string"
+    },
     "WorkspaceCredentialState": {
       "$defs": {
+        "WorkspaceCredentialRenewalStatus": {
+          "enum": [
+            "none",
+            "expiring",
+            "expired",
+            "auth_required",
+            "unsupported"
+          ],
+          "type": "string"
+        },
         "WorkspaceCredentialStatus": {
           "enum": [
             "none",
@@ -8654,12 +8716,16 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "renewal_status": {
+          "$ref": "#/$defs/WorkspaceCredentialRenewalStatus"
+        },
         "status": {
           "$ref": "#/$defs/WorkspaceCredentialStatus"
         }
       },
       "required": [
-        "status"
+        "status",
+        "renewal_status"
       ],
       "title": "WorkspaceCredentialState",
       "type": "object"

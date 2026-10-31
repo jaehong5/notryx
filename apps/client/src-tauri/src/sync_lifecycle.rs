@@ -26,7 +26,7 @@ impl ForegroundSignal {
         self.wake.notify_one();
     }
 
-    fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         self.active.load(std::sync::atomic::Ordering::Acquire)
     }
 
@@ -150,7 +150,16 @@ pub(crate) async fn start_background_sync(
     }
     let runtime = Runtime(runtime.0.clone());
     state.sync_task = Some(tokio::spawn(async move {
-        run_background(runtime, session, token, foreground, app).await;
+        let renewal = crate::credential_renewal::run(
+            Runtime(runtime.0.clone()),
+            session.clone(),
+            foreground.clone(),
+            app.clone(),
+        );
+        tokio::select! {
+            _ = run_background(runtime, session, token, foreground, app) => {},
+            _ = renewal => {},
+        }
     }));
 }
 
@@ -499,7 +508,7 @@ async fn block_sync(
     }
 }
 
-async fn handle_remote_error(
+pub(crate) async fn handle_remote_error(
     runtime: &Runtime,
     session: &Arc<Session>,
     error: notryx_client_runtime::Error,

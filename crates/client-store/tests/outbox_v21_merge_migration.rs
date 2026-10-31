@@ -68,7 +68,7 @@ async fn v20_nonmerge_intent_upgrades_without_creating_a_merge_digest() {
     ));
     assert_eq!(intent.merged_hash, None);
     store.close().await.unwrap();
-    assert_integrity(&path, 23).await;
+    assert_integrity(&path, 24).await;
     assert_eq!(snapshot(&path).await, before);
     assert_eq!(v16_intents(&path).await, intents);
 }

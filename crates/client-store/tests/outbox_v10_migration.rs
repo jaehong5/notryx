@@ -180,7 +180,7 @@ async fn v9_migration_preserves_existing_pending_fifo_and_binding() {
         .fetch_one(&mut db)
         .await
         .unwrap();
-    assert_eq!(version, 23);
+    assert_eq!(version, 24);
     let errors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
         .fetch_one(&mut db)
         .await

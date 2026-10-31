@@ -28,6 +28,7 @@ mod create_native;
 #[cfg(test)]
 mod create_native_tests;
 mod credential_native;
+mod credential_renewal;
 mod delete_native;
 mod external_native;
 #[cfg(test)]
@@ -126,6 +127,7 @@ struct RuntimeState {
     pending_pair: Option<Arc<Session>>,
     credential_io: Arc<Mutex<()>>,
     credential_identity_unsupported: Option<(RegistrationBinding, Uuid)>,
+    credential_renewal_unsupported: Option<RegistrationBinding>,
     product_sessions: HashMap<String, ProductSession>,
     remote_refresh_candidates: HashMap<String, remote_refresh_native::Candidate>,
     preview_limit: Arc<Semaphore>,
@@ -214,6 +216,7 @@ impl RuntimeState {
             pending_pair: None,
             credential_io: Arc::new(Mutex::new(())),
             credential_identity_unsupported: None,
+            credential_renewal_unsupported: None,
             product_sessions: HashMap::new(),
             remote_refresh_candidates: HashMap::new(),
             preview_limit: Arc::new(Semaphore::new(1)),
@@ -814,7 +817,22 @@ async fn credential_status_for_renderer(
             Some((_, Some(_))) => WorkspaceCredentialStatus::Unavailable,
         }
     };
-    Ok(notryx_protocol::WorkspaceCredentialState { status })
+    let renewal_status = if status == WorkspaceCredentialStatus::Pending {
+        notryx_protocol::WorkspaceCredentialRenewalStatus::None
+    } else if let Some(binding) = state
+        .store
+        .current_registration()
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        credential_renewal::status(&mut state, &binding).await?
+    } else {
+        notryx_protocol::WorkspaceCredentialRenewalStatus::None
+    };
+    Ok(notryx_protocol::WorkspaceCredentialState {
+        status,
+        renewal_status,
+    })
 }
 
 #[tauri::command]

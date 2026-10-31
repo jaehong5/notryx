@@ -166,7 +166,7 @@ async fn v19_repeated_failed_attempts_receipts_and_current_copy_survive_upgrade(
         ));
     }
     store.close().await.unwrap();
-    assert_integrity(&path, 23).await;
+    assert_integrity(&path, 24).await;
     assert_eq!(snapshot(&path).await, before);
     assert_eq!(v16_intents(&path).await, intents);
     let mut db = connect(&path).await;

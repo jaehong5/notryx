@@ -51,7 +51,7 @@ async fn fixture_v22_dismissal(path: &Path, obstruct: bool) {
 async fn v22_all_rows(path: &Path) -> Vec<(String, Vec<String>)> {
     let mut db = connect(path).await;
     let tables: Vec<String> = sqlx::query_scalar(
-        "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name <> 'frozen_content_dismissals' ORDER BY name",
+        "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('frozen_content_dismissals', 'credential_expiry') ORDER BY name",
     ).fetch_all(&mut db).await.unwrap();
     let mut result = Vec::new();
     for table in tables {
@@ -90,7 +90,7 @@ async fn v23_dismissal_migration_preserves_all_v22_rows() {
     let before = v22_all_rows(&path).await;
     let store = ClientStore::open(&path).await.unwrap();
     store.close().await.unwrap();
-    assert_integrity(&path, 23).await;
+    assert_integrity(&path, 24).await;
     assert_eq!(v22_all_rows(&path).await, before);
     let mut db = connect(&path).await;
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM frozen_content_dismissals")

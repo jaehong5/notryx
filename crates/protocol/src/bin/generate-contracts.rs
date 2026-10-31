@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, error::Error, fs, path::PathBuf};
 use notryx_protocol::{
     AbandonRequest, AckRequest, AckResponse, AdminRecoverySummary, AdminRequest, AdminResponse,
     AdminResult, AdminUnsupportedItem, ApiError, ChangesPage, ClientStartupMode,
-    ClientStartupStatus, CreateNodeRequest, DeviceCurrentRole, DeviceIdentity, HeadHint,
-    InventoryPage, JournalAccounting, M0CloseRequest, M0OpenRequest, M0OpenedDocument,
+    ClientStartupStatus, CreateNodeRequest, DeviceCurrentRole, DeviceIdentity, DeviceRenewal,
+    HeadHint, InventoryPage, JournalAccounting, M0CloseRequest, M0OpenRequest, M0OpenedDocument,
     M0SaveRequest, M0SavedCheckpoint, MigrationDraft, MigrationInventory,
     MigrationInventoryRequest, MigrationOperation, MigrationOperationKind, MigrationSource,
     MigrationSourceKind, MigrationSourceRequest, MoveNodeRequest, NodeKind, NodeMetadata,
@@ -28,11 +28,12 @@ use notryx_protocol::{
     WorkspaceContentConflictSnapshot, WorkspaceCreateAbandonRequest, WorkspaceCreateEntry,
     WorkspaceCreateListRequest, WorkspaceCreatePage, WorkspaceCreateParentsPage,
     WorkspaceCreateParentsRequest, WorkspaceCreateQueueRequest, WorkspaceCreateStatus,
-    WorkspaceCredentialState, WorkspaceCredentialStatus, WorkspaceDeleteAbandonRequest,
-    WorkspaceDeleteEntry, WorkspaceDeleteListRequest, WorkspaceDeletePage,
-    WorkspaceDeleteQueueRequest, WorkspaceDeleteStatus, WorkspaceDeletedDraftCopyBlockingFollowup,
-    WorkspaceDeletedDraftCopyConfirmRequest, WorkspaceDeletedDraftCopyConfirmResult,
-    WorkspaceDeletedDraftCopyConfirmStatus, WorkspaceDeletedDraftCopyFollowupAbandonRequest,
+    WorkspaceCredentialRenewalStatus, WorkspaceCredentialState, WorkspaceCredentialStatus,
+    WorkspaceDeleteAbandonRequest, WorkspaceDeleteEntry, WorkspaceDeleteListRequest,
+    WorkspaceDeletePage, WorkspaceDeleteQueueRequest, WorkspaceDeleteStatus,
+    WorkspaceDeletedDraftCopyBlockingFollowup, WorkspaceDeletedDraftCopyConfirmRequest,
+    WorkspaceDeletedDraftCopyConfirmResult, WorkspaceDeletedDraftCopyConfirmStatus,
+    WorkspaceDeletedDraftCopyFollowupAbandonRequest,
     WorkspaceDeletedDraftCopyFollowupAbandonResult, WorkspaceDeletedDraftCopyProgressRequest,
     WorkspaceDeletedDraftCopyProgressResult, WorkspaceDeletedDraftCopyReconfirmRequest,
     WorkspaceDeletedDraftCopyReopenRequest, WorkspaceDeletedDraftCopyReopenResponse,
@@ -323,6 +324,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     add_type::<WorkspaceSyncState>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceCredentialStatus>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceCredentialState>(&config, &mut declarations, &mut schemas)?;
+    add_type::<WorkspaceCredentialRenewalStatus>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceLocalRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceDraftRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspacePreviewImageRequest>(&config, &mut declarations, &mut schemas)?;
@@ -349,6 +351,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     add_type::<PairResponse>(&config, &mut declarations, &mut schemas)?;
     add_type::<DeviceIdentity>(&config, &mut declarations, &mut schemas)?;
     add_type::<DeviceCurrentRole>(&config, &mut declarations, &mut schemas)?;
+    add_type::<DeviceRenewal>(&config, &mut declarations, &mut schemas)?;
     add_type::<ServerInfo>(&config, &mut declarations, &mut schemas)?;
     add_type::<UploadResponse>(&config, &mut declarations, &mut schemas)?;
     add_type::<NodeMetadata>(&config, &mut declarations, &mut schemas)?;

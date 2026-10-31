@@ -236,6 +236,7 @@ def main():
             js("document.querySelector('[data-document=\"'+arguments[0]+'\"]').click()", fixtures[0][0])
             wait(lambda: js("return document.querySelector('[aria-current=page]')?.dataset.document===arguments[0] && document.querySelector('.cm-content')?.cmTile.root.view.state.doc.toString()===arguments[1]", fixtures[0][0], fixtures[0][2].decode()), "cached content after device revocation")
             wait(lambda: js("return document.body.textContent.includes('기기 인증 필요')"), "revoked-device status")
+            wait(lambda: js("return document.querySelector('[data-testid=credential-status]')?.textContent.includes('다시 등록해 주세요')"), "credential renewal registration guidance")
             new_contents = fixtures[0][2] + b"local after revoke\n"
             js("const view=document.querySelector('.cm-content').cmTile.root.view; view.dispatch({changes:{from:view.state.doc.length,insert:arguments[0]}})", "local after revoke\n")
             js("document.querySelector('#save').click()")

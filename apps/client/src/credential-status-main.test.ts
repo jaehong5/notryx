@@ -30,7 +30,7 @@ const rootNode = { node_id: "019a1000-0000-7000-8000-000000000001", parent_id: n
 beforeEach(() => {
   vi.resetModules();
   fakes.status.mockReset(); fakes.pair.mockReset(); fakes.listeners.clear();
-  fakes.status.mockResolvedValue("none"); fakes.pair.mockResolvedValue(undefined);
+  fakes.status.mockResolvedValue({ status: "none", renewal_status: "none" }); fakes.pair.mockResolvedValue(undefined);
 });
 afterEach(async () => {
   fakes.root?.unmount(); fakes.root = undefined;
@@ -49,22 +49,22 @@ function message(): string | null {
 }
 
 test("시작과 상태 이벤트에서 인증정보 저장 안내를 갱신한다", async () => {
-  fakes.status.mockResolvedValue("session_only");
+  fakes.status.mockResolvedValue({ status: "session_only", renewal_status: "none" });
   await startApp();
   await vi.waitFor(() => expect(message()).toBe("인증정보를 이 실행 동안만 사용합니다. 앱을 다시 시작하면 다시 등록해야 합니다."));
-  fakes.status.mockResolvedValue("pending");
+  fakes.status.mockResolvedValue({ status: "pending", renewal_status: "none" });
   fakes.listeners.get("workspace-credential-status-changed")!();
   await vi.waitFor(() => expect(message()).toContain("대기 중인 등록"));
-  fakes.status.mockResolvedValue("unavailable");
+  fakes.status.mockResolvedValue({ status: "unavailable", renewal_status: "none" });
   fakes.listeners.get("workspace-credential-status-changed")!();
   await vi.waitFor(() => expect(message()).toBe("저장된 인증정보를 복원하지 못했습니다. 비밀 저장소와 서버 상태를 확인해 주세요."));
-  fakes.status.mockResolvedValue("identity_unsupported");
+  fakes.status.mockResolvedValue({ status: "identity_unsupported", renewal_status: "none" });
   fakes.listeners.get("workspace-credential-status-changed")!();
   await vi.waitFor(() => expect(message()).toBe("서버에서 기기 신원 확인 API를 사용할 수 없어 인증정보를 자동 복원할 수 없습니다. 서버 설정과 버전을 확인해 주세요."));
-  fakes.status.mockResolvedValue("registration_required");
+  fakes.status.mockResolvedValue({ status: "registration_required", renewal_status: "none" });
   fakes.listeners.get("workspace-credential-status-changed")!();
   await vi.waitFor(() => expect(message()).toBe("이전에 저장한 인증정보가 없어 다시 등록해야 합니다. 기기 자료는 보존됩니다."));
-  fakes.status.mockResolvedValue("secure");
+  fakes.status.mockResolvedValue({ status: "secure", renewal_status: "none" });
   fakes.listeners.get("workspace-credential-status-changed")!();
   await vi.waitFor(() => expect(message()).toBeNull());
 });
@@ -76,7 +76,7 @@ test("페어링이 끝난 뒤 session-only 상태를 다시 확인한다", async
   (form.elements.namedItem("origin") as HTMLInputElement).value = "https://example.invalid";
   (form.elements.namedItem("workspace_id") as HTMLInputElement).value = "synthetic-workspace";
   (form.elements.namedItem("pairing_secret") as HTMLInputElement).value = "synthetic-pairing-secret";
-  fakes.status.mockResolvedValue("session_only");
+  fakes.status.mockResolvedValue({ status: "session_only", renewal_status: "none" });
   form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
   await vi.waitFor(() => expect(fakes.pair).toHaveBeenCalledOnce());
   await vi.waitFor(() => expect(message()).toContain("이 실행 동안만 사용"));
@@ -85,17 +85,34 @@ test("페어링이 끝난 뒤 session-only 상태를 다시 확인한다", async
 
 test("늦게 도착한 이전 상태와 오류의 비밀 텍스트를 표시하지 않는다", async () => {
   await startApp();
-  let resolvePrevious!: (value: string) => void;
+  let resolvePrevious!: (value: { status: string; renewal_status: string }) => void;
   fakes.status.mockImplementationOnce(() => new Promise((resolve) => { resolvePrevious = resolve; }));
   fakes.listeners.get("workspace-credential-status-changed")!();
-  fakes.status.mockResolvedValueOnce("session_only");
+  fakes.status.mockResolvedValueOnce({ status: "session_only", renewal_status: "none" });
   fakes.listeners.get("workspace-credential-status-changed")!();
   await vi.waitFor(() => expect(message()).toContain("이 실행 동안만 사용"));
-  resolvePrevious("secure");
+  resolvePrevious({ status: "secure", renewal_status: "none" });
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(message()).toContain("이 실행 동안만 사용");
   fakes.status.mockRejectedValueOnce(new Error("synthetic-credential-value"));
   fakes.listeners.get("workspace-credential-status-changed")!();
   await vi.waitFor(() => expect(message()).toBe("인증정보 저장 상태를 확인하지 못했습니다."));
   expect(document.body.textContent).not.toContain("synthetic-credential-value");
+});
+
+test("서버가 인증을 거절하면 비밀 저장소 점검 대신 재등록을 안내한다", async () => {
+  fakes.status.mockResolvedValue({ status: "unavailable", renewal_status: "auth_required" });
+  await startApp();
+  await vi.waitFor(() => expect(message()).toBe("기기 인증이 만료되었거나 폐기되었습니다. 다시 등록해 주세요. 기기 자료는 보존됩니다."));
+});
+
+test("저장 방식 안내를 유지하며 만료 경고를 표시하고 갱신 뒤 지운다", async () => {
+  fakes.status.mockResolvedValue({ status: "session_only", renewal_status: "expiring" });
+  await startApp();
+  await vi.waitFor(() => expect(message()).toContain("14일"));
+  expect(message()).toContain("이 실행 동안만 사용");
+  fakes.status.mockResolvedValue({ status: "session_only", renewal_status: "none" });
+  fakes.listeners.get("workspace-credential-status-changed")!();
+  await vi.waitFor(() => expect(message()).not.toContain("14일"));
+  expect(message()).toContain("이 실행 동안만 사용");
 });

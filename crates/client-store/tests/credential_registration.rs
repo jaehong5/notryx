@@ -79,6 +79,135 @@ async fn connect(path: &std::path::Path) -> SqliteConnection {
 }
 
 #[tokio::test]
+async fn credential_expiry_survives_restart_without_changing_drafts_or_outbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("client.sqlite");
+    let (mut store, binding) = fixture(&path).await;
+    assert_eq!(store.credential_expiry(&binding).await.unwrap(), None);
+    store
+        .set_credential_expiry(&binding, 100, 300)
+        .await
+        .unwrap();
+    store
+        .set_credential_expiry(&binding, 200, 300)
+        .await
+        .unwrap();
+    assert_preserved(&mut store, &binding, false).await;
+    assert_eq!(
+        store.active_credential().await.unwrap(),
+        Some((binding.clone(), None))
+    );
+    store.close().await.unwrap();
+    let mut store = ClientStore::open(&path).await.unwrap();
+    assert_eq!(
+        store.credential_expiry(&binding).await.unwrap(),
+        Some((200, 300))
+    );
+    assert_preserved(&mut store, &binding, false).await;
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn credential_expiry_rejects_invalid_times_and_late_old_registration_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("client.sqlite");
+    let (mut store, old) = fixture(&path).await;
+    store.set_credential_expiry(&old, 100, 300).await.unwrap();
+    for (idle, absolute) in [(0, 300), (301, 300), (1, u64::MAX)] {
+        assert_eq!(
+            store.set_credential_expiry(&old, idle, absolute).await,
+            Err(StoreError::InvalidRegistration)
+        );
+    }
+    assert_eq!(
+        store.credential_expiry(&old).await.unwrap(),
+        Some((100, 300))
+    );
+    let next = replacement(&old);
+    store.activate_registration(&next).await.unwrap();
+    assert_eq!(store.credential_expiry(&next).await.unwrap(), None);
+    store.set_credential_expiry(&next, 400, 600).await.unwrap();
+    assert_eq!(
+        store.set_credential_expiry(&old, 200, 300).await,
+        Err(StoreError::StaleRegistration)
+    );
+    assert_eq!(
+        store.credential_expiry(&old).await,
+        Err(StoreError::StaleRegistration)
+    );
+    assert_eq!(
+        store.credential_expiry(&next).await.unwrap(),
+        Some((400, 600))
+    );
+    assert_preserved(&mut store, &old, true).await;
+    store.close().await.unwrap();
+    let mut db = connect(&path).await;
+    let retained: (i64, i64) = sqlx::query_as("SELECT e.idle_expires_at,e.absolute_expires_at FROM credential_expiry e JOIN client_registrations r ON r.id=e.registration_id WHERE r.device_id=?")
+        .bind(&old.device_id).fetch_one(&mut db).await.unwrap();
+    assert_eq!(retained, (100, 300));
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn credential_expiry_migrates_v23_without_inventing_expiry_or_changing_user_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("client.sqlite");
+    let (store, binding) = fixture(&path).await;
+    store.close().await.unwrap();
+    let mut db = connect(&path).await;
+    sqlx::raw_sql("DROP TABLE IF EXISTS credential_expiry; PRAGMA user_version=23;")
+        .execute(&mut db)
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+    let mut store = ClientStore::open(&path).await.unwrap();
+    assert_eq!(store.credential_expiry(&binding).await.unwrap(), None);
+    assert_preserved(&mut store, &binding, false).await;
+    store.close().await.unwrap();
+    let mut db = connect(&path).await;
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&mut db)
+        .await
+        .unwrap();
+    assert_eq!(version, 24);
+    db.close().await.unwrap();
+    let mut store = ClientStore::open(&path).await.unwrap();
+    assert_eq!(store.credential_expiry(&binding).await.unwrap(), None);
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn credential_expiry_migration_collision_preserves_v23_and_recovery_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("client.sqlite");
+    let (store, binding) = fixture(&path).await;
+    store.close().await.unwrap();
+    let mut db = connect(&path).await;
+    sqlx::raw_sql("DROP TABLE IF EXISTS credential_expiry; CREATE TABLE credential_expiry(sentinel TEXT); INSERT INTO credential_expiry VALUES('preserve-me'); PRAGMA user_version=23;").execute(&mut db).await.unwrap();
+    db.close().await.unwrap();
+    assert!(ClientStore::open(&path).await.is_err());
+    let mut db = connect(&path).await;
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&mut db)
+        .await
+        .unwrap();
+    assert_eq!(version, 23);
+    let sentinel: String = sqlx::query_scalar("SELECT sentinel FROM credential_expiry")
+        .fetch_one(&mut db)
+        .await
+        .unwrap();
+    assert_eq!(sentinel, "preserve-me");
+    sqlx::query("DROP TABLE credential_expiry")
+        .execute(&mut db)
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+    let mut store = ClientStore::open(&path).await.unwrap();
+    assert_preserved(&mut store, &binding, false).await;
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn credential_pair_commits_binding_and_freezes_old_outbox_atomically() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("client.sqlite");
@@ -438,7 +567,7 @@ async fn credential_v8_migration_preserves_data_and_rolls_back_on_schema_collisi
             .fetch_one(&mut db)
             .await
             .unwrap(),
-        23
+        24
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pragma_foreign_key_check")

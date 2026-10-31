@@ -21,7 +21,7 @@ import { receiptWaitResult, staleTransmissionResult } from "./send-result";
 import { documentSizeGuard } from "./document-size-guard";
 import { StartupGate } from "./migration-recovery";
 import { workspaceOpenError } from "./workspace-open-error";
-import { credentialStatusMessage, workspaceCredentialStatus } from "./credential-status";
+import { credentialStateMessage, workspaceCredentialStatus } from "./credential-status";
 import { TrashPanel, type TrashPanelPorts } from "./trash-panel";
 import { CreatePanel, type CreatePanelPorts } from "./create-panel";
 import { DeletePanel, type DeletePanelPorts } from "./delete-panel";
@@ -489,7 +489,7 @@ function App() {
     const registration = registrationVersion.current;
     try {
       const status = await workspaceCredentialStatus();
-      if (credentialMounted.current && revision === credentialRevision.current && registration === registrationVersion.current) setCredentialMessage(credentialStatusMessage(status));
+      if (credentialMounted.current && revision === credentialRevision.current && registration === registrationVersion.current) setCredentialMessage(credentialStateMessage(status));
     } catch {
       if (credentialMounted.current && revision === credentialRevision.current && registration === registrationVersion.current) setCredentialMessage("인증정보 저장 상태를 확인하지 못했습니다.");
     }
@@ -978,6 +978,7 @@ function App() {
       return () => {};
     });
     void refreshCredentialStatus();
+    const credentialTimer = window.setInterval(() => { void refreshCredentialStatus(); }, 60_000);
     const metadataChanged = listen("workspace-metadata-changed", () => {
       if (modeRef.current === "workspace") {
         metadataVersion.current++;
@@ -1018,6 +1019,7 @@ function App() {
     return () => {
       disposed = true;
       credentialMounted.current = false;
+      window.clearInterval(credentialTimer);
       credentialRevision.current++;
       workspace.current.invalidate();
       controller.current = null;

@@ -376,6 +376,33 @@ impl State {
         .map_err(auth_error)
     }
 
+    pub async fn renew_device(
+        &mut self,
+        device: &DeviceRecord,
+        now: i64,
+        idle_expires_at: i64,
+    ) -> Result<(), AuthError> {
+        let changed = sqlx::query(
+            "UPDATE devices SET idle_expires_at=? WHERE token_id=? AND revoked_at IS NULL
+             AND issued_at<=? AND idle_expires_at>? AND absolute_expires_at>=?
+             AND principal_id IN (SELECT principal_id FROM principals WHERE workspace_id=?)",
+        )
+        .bind(idle_expires_at)
+        .bind(device.token_id.to_string())
+        .bind(now)
+        .bind(now)
+        .bind(idle_expires_at)
+        .bind(self.workspace_id.to_string())
+        .execute(&mut self.connection)
+        .await
+        .map_err(auth_db_error)?
+        .rows_affected();
+        if changed != 1 {
+            return Err(AuthError::Unauthorized);
+        }
+        Ok(())
+    }
+
     pub async fn revoke_device(&mut self, device: Uuid, now: i64) -> Result<(), AuthError> {
         let row = sqlx::query("SELECT d.issued_at FROM devices d JOIN principals p USING(principal_id) WHERE d.device_id=? AND p.workspace_id=?")
             .bind(device.to_string()).bind(self.workspace_id.to_string())

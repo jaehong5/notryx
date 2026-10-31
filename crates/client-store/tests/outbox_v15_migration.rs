@@ -461,7 +461,7 @@ async fn v14_to_v15_preserves_existing_move_drafts_receipts_and_decisions() {
         .fetch_one(&mut db)
         .await
         .unwrap();
-    assert_eq!(version, 23);
+    assert_eq!(version, 24);
     let errors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
         .fetch_one(&mut db)
         .await

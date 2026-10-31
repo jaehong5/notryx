@@ -128,6 +128,123 @@ async fn pair_owner(workspace: &mut Workspace) -> PairResponse {
 }
 
 #[tokio::test]
+async fn renewal_window_and_absolute_expiry_have_exact_boundaries() {
+    const DAY: i64 = 24 * 60 * 60;
+    let (fixture, mut workspace) = Fixture::new().await;
+    let paired = pair_owner(&mut workspace).await;
+    let identity = workspace
+        .authenticate(&paired.device_token, NOW)
+        .await
+        .unwrap();
+    let early = workspace
+        .renew_device(&paired.device_token, NOW + 60 * DAY - 1)
+        .await
+        .unwrap();
+    assert_eq!(early.idle_expires_at, paired.idle_expires_at);
+    for day in [60, 120, 180, 240, 300] {
+        let renewed = workspace
+            .renew_device(&paired.device_token, NOW + day * DAY)
+            .await
+            .unwrap();
+        assert_eq!(
+            renewed.idle_expires_at,
+            (NOW + (day + 90).min(365) * DAY).to_string()
+        );
+        assert_eq!(renewed.absolute_expires_at, paired.absolute_expires_at);
+        assert_eq!(
+            workspace
+                .authenticate(&paired.device_token, NOW + day * DAY)
+                .await
+                .unwrap(),
+            identity
+        );
+    }
+    workspace.close().await.unwrap();
+    let mut workspace = Workspace::open(&fixture.notes, &fixture.state)
+        .await
+        .unwrap();
+    let last_valid = workspace
+        .renew_device(&paired.device_token, NOW + 365 * DAY - 1)
+        .await
+        .unwrap();
+    assert_eq!(last_valid.idle_expires_at, paired.absolute_expires_at);
+    assert_eq!(
+        workspace
+            .renew_device(&paired.device_token, NOW + 365 * DAY)
+            .await,
+        Err(AuthError::Unauthorized)
+    );
+    workspace.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn renewal_cannot_revive_an_expired_or_revoked_token() {
+    const DAY: i64 = 24 * 60 * 60;
+    let (_fixture, mut workspace) = Fixture::new().await;
+    let paired = pair_owner(&mut workspace).await;
+    for time in [NOW - 1, NOW + 90 * DAY] {
+        assert_eq!(
+            workspace.renew_device(&paired.device_token, time).await,
+            Err(AuthError::Unauthorized)
+        );
+    }
+    let mut wrong_secret = paired.device_token.clone();
+    let secret_start = wrong_secret.rfind('.').unwrap() + 1;
+    let replacement = if wrong_secret.as_bytes()[secret_start] == b'A' {
+        "B"
+    } else {
+        "A"
+    };
+    wrong_secret.replace_range(secret_start..secret_start + 1, replacement);
+    assert_eq!(
+        workspace.renew_device(&wrong_secret, NOW + 60 * DAY).await,
+        Err(AuthError::Unauthorized)
+    );
+    workspace
+        .revoke_device(paired.device_id.parse().unwrap(), NOW + 60 * DAY)
+        .await
+        .unwrap();
+    assert_eq!(
+        workspace
+            .renew_device(&paired.device_token, NOW + 60 * DAY)
+            .await,
+        Err(AuthError::Unauthorized)
+    );
+    workspace.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_renewal_keeps_the_previous_expiry_and_can_be_retried() {
+    const DAY: i64 = 24 * 60 * 60;
+    let (fixture, mut workspace) = Fixture::new().await;
+    let paired = pair_owner(&mut workspace).await;
+    let mut db = fixture.database().await;
+    sqlx::raw_sql("CREATE TRIGGER fail_renewal BEFORE UPDATE OF idle_expires_at ON devices BEGIN SELECT RAISE(ABORT, 'synthetic renewal failure'); END;").execute(&mut db).await.unwrap();
+    assert_eq!(
+        workspace
+            .renew_device(&paired.device_token, NOW + 60 * DAY)
+            .await,
+        Err(AuthError::Storage)
+    );
+    let idle: i64 = sqlx::query_scalar("SELECT idle_expires_at FROM devices")
+        .fetch_one(&mut db)
+        .await
+        .unwrap();
+    assert_eq!(idle.to_string(), paired.idle_expires_at);
+    sqlx::raw_sql("DROP TRIGGER fail_renewal;")
+        .execute(&mut db)
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+    let renewed = workspace
+        .renew_device(&paired.device_token, NOW + 60 * DAY)
+        .await
+        .unwrap();
+    assert_eq!(renewed.idle_expires_at, (NOW + 150 * DAY).to_string());
+    workspace.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn fresh_init_has_one_credential_free_owner() {
     let (fixture, mut workspace) = Fixture::new().await;
     let status = workspace.auth_status().await.unwrap();

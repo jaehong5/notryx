@@ -151,6 +151,24 @@ WebDriver 시험은 합성 원문으로 5종 그림 표시, 원문 보존, 오�
 
 빌드 시 `apps/client/dist/third-party-licenses.md`에 번들 의존성의 라이선스 전문을 생성하고, `third-party-sources.md`에 Mermaid와 간접 의존성 elkjs의 소스 위치를 포함한다. 이 고지는 프로젝트 자체의 라이선스 확정을 대신하지 않는다.
 
+## draw.io PNG 미리보기
+
+작업 공간 문서에서 `![구성도](./assets/system.drawio.png)`처럼 상대 경로로 PNG를 참조하면 이미지를 표시하고 내장 편집 데이터의 상태를 안내한다. `.png`에도 `mxfile` 데이터가 있으면 검사한다. `.drawio.png`에 편집 데이터가 없거나 손상됐으면 이유를 표시하고 정상 픽셀은 계속 보여 준다. 현재는 미리보기만 지원한다. 별도 draw.io 편집 창, XML 저장과 PNG export는 후속 구현이다.
+
+원본 PNG는 변경하지 않는다. Rust가 원본의 내장 데이터를 검사하고 표시용 PNG와 상태만 화면에 전달한다. 표시용 PNG에는 XML을 넣지 않으며 원본 저장이나 내보내기에 사용하지 않는다. 검사 통과는 실제 draw.io 편집기에서 다시 열 수 있다는 보장이 아니다.
+
+검사 대상은 `mxfile` 키의 `tEXt`와 `zTXt`, 비압축 모델과 압축된 diagram 페이지다. XML 원문 5 MiB, 압축 해제 후 합계 20 MiB, cell 5,000개, XML 깊이 64를 상한으로 둔다. DTD, 외부 entity와 원격 이미지 참조는 지원하지 않는다. PNG 자체에는 기존 미리보기 제한인 25 MiB, 16 megapixels, 한 변 8192px가 적용된다. 설계의 draw.io 40 megapixels 지원, `iTXt` 편집 데이터, CDATA와 HTML 이미지 label은 아직 제공하지 않는다.
+
+```bash
+source scripts/dev-env.sh
+cargo test --locked -j 1 -p notryx-client-runtime --lib drawio_png::tests
+cargo test --locked -j 1 -p notryx-client-runtime --test preview_image
+cargo test --locked -j 1 -p notryx-client --lib preview_native::tests
+npm test -- apps/client/src/preview.test.ts apps/client/src/preview-image-ipc.test.ts
+```
+
+Linux의 실제 표시와 원본 보존은 기존 `scripts/m2-workspace-webdriver.py`에서 합성 draw.io PNG로 검사한다. 실제 편집기 export/reopen, 시각적 일치, 편집 초안 복구와 Android 검증을 대신하지 않는다.
+
 ## 사용자 JSON 테마
 
 Linux 앱 오른쪽 위의 **테마**에서 밝은 테마와 어두운 테마를 선택하거나 JSON 파일을 가져온다. 사용자 테마는 한 개를 보관하며 새 파일을 가져오면 교체한다. 내장 테마로 전환해도 가져온 사용자 테마는 남는다. 예제로 [차분한 바다](../examples/themes/ocean.json)를 제공한다.

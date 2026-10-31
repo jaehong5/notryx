@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode,
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { MermaidPreview } from "./mermaid-preview";
+import type { PreviewImageData } from "./ipc";
 
 export type PreviewLink =
   | { kind: "external"; target: string }
@@ -83,7 +84,7 @@ export type MarkdownPreviewProps = {
   source: string;
   themeBase?: "light" | "dark";
   onOpenLink?: (link: PreviewLink) => void;
-  loadImage?: (target: string, signal: AbortSignal) => Promise<Uint8Array>;
+  loadImage?: (target: string, signal: AbortSignal) => Promise<PreviewImageData>;
   fragment?: { fragment: string } | null;
 };
 
@@ -94,21 +95,36 @@ const PreviewContext = createContext<{
   loadImage?: MarkdownPreviewProps["loadImage"];
 } | null>(null);
 
-function PreviewImage({ target, alt, load }: { target: string; alt: string; load: (target: string, signal: AbortSignal) => Promise<Uint8Array> }) {
-  const [url, setUrl] = useState<string>();
+function diagramNotice(target: string, status: PreviewImageData["drawioStatus"]): string | null {
+  switch (status) {
+    case "embedded_xml": return "편집 데이터 포함. 현재 미리보기만 지원합니다.";
+    case "invalid_xml": return "편집 데이터가 손상되었습니다. 이미지만 표시합니다.";
+    case "unsupported_xml": return "지원하지 않는 편집 데이터입니다. 이미지만 표시합니다.";
+    case "limit_exceeded": return "편집 데이터가 검사 한도를 초과했습니다. 이미지만 표시합니다.";
+    case "none": return /\.drawio\.png$/iu.test(decodeURIComponent(target).split(/[?#]/u, 1)[0])
+      ? "편집 데이터가 없습니다. 일반 PNG로 표시합니다." : null;
+  }
+}
+
+function PreviewImage({ target, alt, load }: { target: string; alt: string; load: NonNullable<MarkdownPreviewProps["loadImage"]> }) {
+  const [image, setImage] = useState<{ url: string; notice: string | null }>();
+  const [failed, setFailed] = useState(false);
   useEffect(() => {
     let active = true;
     let created: string | undefined;
     const controller = new AbortController();
-    setUrl(undefined);
-    void load(target, controller.signal).then((bytes) => {
+    setImage(undefined);
+    setFailed(false);
+    void load(target, controller.signal).then(({ bytes, drawioStatus }) => {
       if (!active) return;
       created = URL.createObjectURL(new Blob([Uint8Array.from(bytes).buffer], { type: "image/png" }));
-      setUrl(created);
-    }).catch(() => {});
+      setImage({ url: created, notice: diagramNotice(target, drawioStatus) });
+    }).catch(() => { if (active) setFailed(true); });
     return () => { active = false; controller.abort(); if (created) URL.revokeObjectURL(created); };
   }, [target, load]);
-  return url ? <img src={url} alt={alt} /> : <span>{alt || "이미지"}</span>;
+  return image ? <span className="preview-image"><img src={image.url} alt={alt} />
+    {image.notice && <small className="diagram-notice">{image.notice}</small>}
+  </span> : <span>{alt || "이미지"}{failed ? " (이미지를 불러올 수 없습니다)" : ""}</span>;
 }
 
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {

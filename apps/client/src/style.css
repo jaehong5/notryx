@@ -40,6 +40,7 @@ nav small { display: block; color: var(--text-secondary); line-height: 1.6; padd
 .mermaid-preview { margin: 16px 0; min-height: 60px; }
 .mermaid-preview summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
 .markdown-preview img { max-width: 100%; height: auto; }
+.diagram-notice { display: block; color: var(--text-secondary); margin: 4px 0 8px; }
 .markdown-preview table { border-collapse: collapse; }
 .markdown-preview td, .markdown-preview th { border: 1px solid var(--border-default); padding: 4px 8px; }
 .cm-editor { height: 100%; font-size: var(--editor-font-size); }

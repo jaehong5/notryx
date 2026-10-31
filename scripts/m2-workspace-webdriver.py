@@ -641,7 +641,7 @@ def main():
                 return server_request("POST", "/v1/nodes", data=json.dumps(payload).encode(), headers=headers)
 
             create(folder_id, info["root_id"], "Test Folder", "folder", 1)
-            png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==")
+            png = (Path(__file__).resolve().parents[1] / "crates/client-runtime/tests/fixtures/drawio-valid.png").read_bytes()
             png_digest = base64.b64encode(hashlib.sha256(png).digest()).decode()
             png_upload = server_request("POST", "/v1/uploads", data=png, expected=201, headers={
                 **authorization, "Content-Type": "application/octet-stream", "Content-Digest": f"sha-256=:{png_digest}:",
@@ -1614,6 +1614,8 @@ print(json.dumps({'sha256':hashlib.sha256(data).hexdigest(), 'length':len(data),
                 const images=[...document.querySelectorAll('.markdown-preview img[alt=local]')];
                 return images.length === 17 && images.every(image => image.src.startsWith('blob:') && image.complete && image.naturalWidth === 1);
             """), seconds=45)
+            require(js("return [...document.querySelectorAll('.diagram-notice')].filter(e=>e.textContent.includes('편집 데이터 포함') && e.textContent.includes('현재 미리보기만 지원')).length === 17"), "draw.io metadata status missing")
+            require((notes / "Test Folder" / "pixel.png").read_bytes() == png, "diagram preview changed the original PNG metadata")
             js("""
                 window.__notryxScrolls=[];
                 window.__notryxOriginalScroll=Element.prototype.scrollIntoView;

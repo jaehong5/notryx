@@ -85,6 +85,7 @@ pub async fn load_preview(
         png_base64: STANDARD.encode(image.png_bytes),
         width: image.width,
         height: image.height,
+        drawio_status: image.drawio_status,
     })
 }
 
@@ -130,9 +131,23 @@ mod tests {
         let png = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==").unwrap();
         std::fs::write(notes.join("Document.md"), b"![image](Image.png)").unwrap();
         std::fs::write(notes.join("Image.png"), &png).unwrap();
+        let diagram =
+            include_bytes!("../../../../crates/client-runtime/tests/fixtures/drawio-valid.png");
+        let broken_diagram =
+            include_bytes!("../../../../crates/client-runtime/tests/fixtures/drawio-invalid.png");
+        std::fs::write(notes.join("Diagram.drawio.png"), diagram).unwrap();
+        std::fs::write(notes.join("Broken.drawio.png"), broken_diagram).unwrap();
         std::fs::write(notes.join("Bad.svg"), b"<svg onload='alert(1)'/>").unwrap();
         let document = workspace.adopt_root_document("Document.md").await.unwrap();
         let image = workspace.adopt_root_document("Image.png").await.unwrap();
+        workspace
+            .adopt_root_document("Diagram.drawio.png")
+            .await
+            .unwrap();
+        workspace
+            .adopt_root_document("Broken.drawio.png")
+            .await
+            .unwrap();
         let bad = workspace.adopt_root_document("Bad.svg").await.unwrap();
         workspace.close().await.unwrap();
         let config = Config {
@@ -236,6 +251,33 @@ mod tests {
         };
         let preview = load_preview(state.clone(), &request).await.unwrap();
         assert_eq!((preview.width, preview.height), (1, 1));
+        assert_eq!(
+            preview.drawio_status,
+            notryx_protocol::DrawioPngStatus::None
+        );
+        for (name, expected, original) in [
+            (
+                "Diagram.drawio.png",
+                notryx_protocol::DrawioPngStatus::EmbeddedXml,
+                diagram.as_slice(),
+            ),
+            (
+                "Broken.drawio.png",
+                notryx_protocol::DrawioPngStatus::InvalidXml,
+                broken_diagram.as_slice(),
+            ),
+        ] {
+            let mut diagram_request = request.clone();
+            diagram_request.node = nodes.iter().find(|node| node.name == name).unwrap().clone();
+            let result = load_preview(state.clone(), &diagram_request).await.unwrap();
+            assert_eq!(result.drawio_status, expected);
+            assert_eq!((result.width, result.height), (1, 1));
+            assert_eq!(
+                std::fs::read(config.workspace.notes_root.join(name)).unwrap(),
+                original
+            );
+            assert_ne!(STANDARD.decode(result.png_base64).unwrap(), original);
+        }
         assert!(
             STANDARD
                 .decode(preview.png_base64)

@@ -12,6 +12,7 @@ import { MarkdownPreview } from "./preview";
 import { ThemeControls, useTheme } from "./theme-controls";
 import { applyDocumentTheme, editorTheme } from "./theme";
 import { PreviewImageQueue } from "./preview-image-queue";
+import type { PreviewImageData } from "./ipc";
 import { workspacePath, draftKey, draftSelectionId } from "./workspace-list";
 import { WorkspaceController } from "./workspace-controller";
 import { resolveWorkspaceReference } from "./workspace-reference";
@@ -1059,7 +1060,7 @@ function App() {
     return () => window.removeEventListener("keydown", keydown);
   }, [mode, workspaceBinding]);
 
-  const loadPreviewImage = useCallback((target: string, signal: AbortSignal): Promise<Uint8Array> => {
+  const loadPreviewImage = useCallback((target: string, signal: AbortSignal): Promise<PreviewImageData> => {
     if (mode !== "workspace") return Promise.reject(new Error("작업 공간에 연결되어 있지 않습니다."));
     const found = [...sessionModes.current.entries()].find(([, session]) => session.uiId === state.selected && session.mode === "workspace");
     const resolved = found && resolveWorkspaceReference(nodesRef.current, found[1].documentId, target);

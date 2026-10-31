@@ -2030,6 +2030,18 @@ pub struct WorkspacePreviewImage {
     pub png_base64: String,
     pub width: u32,
     pub height: u32,
+    pub drawio_status: DrawioPngStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum DrawioPngStatus {
+    None,
+    EmbeddedXml,
+    InvalidXml,
+    UnsupportedXml,
+    LimitExceeded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]

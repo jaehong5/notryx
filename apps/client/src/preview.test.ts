@@ -4,12 +4,38 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { classifyPreviewLink, MarkdownPreview } from "./preview";
+import type { PreviewImageData } from "./ipc";
+import type { DrawioPngStatus } from "../../../packages/protocol-types";
+
+const plainImage = (bytes: Uint8Array): PreviewImageData => ({ bytes, drawioStatus: "none" });
 
 function render(source: string): string {
   return renderToStaticMarkup(createElement(MarkdownPreview, { source }));
 }
 
 describe("AT-31 basic Markdown preview", () => {
+  test.each([
+    ["embedded_xml", "편집 데이터 포함", "diagram.png"],
+    ["none", "편집 데이터가 없습니다", "diagram.drawio.png"],
+    ["invalid_xml", "편집 데이터가 손상되었습니다", "diagram.drawio.png"],
+    ["unsupported_xml", "지원하지 않는 편집 데이터입니다", "diagram.drawio.png"],
+    ["limit_exceeded", "편집 데이터가 검사 한도를 초과했습니다", "diagram.drawio.png"],
+  ])("keeps the passive image and explains %s metadata", async (drawioStatus, message, target) => {
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: () => "blob:drawio" });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const bytes = new Uint8Array([137, 80, 78, 71]);
+    await act(async () => root.render(createElement(MarkdownPreview, {
+      source: `![그림](${target})`, loadImage: async () => ({ bytes, drawioStatus: drawioStatus as DrawioPngStatus }),
+    })));
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("blob:drawio");
+    expect(container.textContent).toContain(message);
+    if (drawioStatus === "embedded_xml") expect(container.textContent).toContain("현재 미리보기만 지원");
+    expect(container.querySelector("iframe, svg, a")).toBeNull();
+    await act(async () => root.unmount());
+  });
+
   test("renders Markdown and GFM without changing the source", () => {
     const source = "# 제목\n\n| 이름 | 값 |\n| --- | --- |\n| 가 | 1 |\n\n- [x] 완료\n\n```custom\n<!-- source -->\n```";
     const html = render(source);
@@ -45,7 +71,7 @@ describe("AT-31 basic Markdown preview", () => {
   });
 
   test("loads only local images and releases their blob when the preview closes", async () => {
-    const loadImage = vi.fn(async () => new Uint8Array([137, 80, 78, 71]));
+    const loadImage = vi.fn(async () => plainImage(new Uint8Array([137, 80, 78, 71])));
     const create = vi.fn(() => "blob:local-preview");
     const revoke = vi.fn();
     Object.defineProperty(URL, "createObjectURL", { configurable: true, value: create });
@@ -63,21 +89,21 @@ describe("AT-31 basic Markdown preview", () => {
   });
 
   test("does not create a blob when a late image arrives after the preview closes", async () => {
-    let complete!: (bytes: Uint8Array) => void;
-    const pending = new Promise<Uint8Array>((resolve) => { complete = resolve; });
+    let complete!: (bytes: PreviewImageData) => void;
+    const pending = new Promise<PreviewImageData>((resolve) => { complete = resolve; });
     const create = vi.fn(() => "blob:late");
     Object.defineProperty(URL, "createObjectURL", { configurable: true, value: create });
     const root = createRoot(document.createElement("div"));
     await act(async () => root.render(createElement(MarkdownPreview, { source: "![로컬](image.png)", loadImage: () => pending })));
     await act(async () => root.unmount());
-    await act(async () => complete(new Uint8Array([1])));
+    await act(async () => complete(plainImage(new Uint8Array([1]))));
     expect(create).not.toHaveBeenCalled();
   });
 
   test("keeps an in-flight image request across parent rerenders", async () => {
-    let complete!: (bytes: Uint8Array) => void;
-    const pending = new Promise<Uint8Array>((resolve) => { complete = resolve; });
-    const loadImage = vi.fn<(target: string, signal: AbortSignal) => Promise<Uint8Array>>(() => pending);
+    let complete!: (bytes: PreviewImageData) => void;
+    const pending = new Promise<PreviewImageData>((resolve) => { complete = resolve; });
+    const loadImage = vi.fn<(target: string, signal: AbortSignal) => Promise<PreviewImageData>>(() => pending);
     const create = vi.fn(() => "blob:retained");
     const revoke = vi.fn();
     Object.defineProperty(URL, "createObjectURL", { configurable: true, value: create });
@@ -90,7 +116,7 @@ describe("AT-31 basic Markdown preview", () => {
     await act(async () => root.render(createElement(MarkdownPreview, { source, loadImage, onOpenLink: () => {} })));
     expect(signal.aborted).toBe(false);
     expect(loadImage).toHaveBeenCalledTimes(1);
-    await act(async () => complete(new Uint8Array([1])));
+    await act(async () => complete(plainImage(new Uint8Array([1]))));
     expect(container.querySelector("img")?.getAttribute("src")).toBe("blob:retained");
     await act(async () => root.unmount());
     expect(signal.aborted).toBe(true);
@@ -98,9 +124,9 @@ describe("AT-31 basic Markdown preview", () => {
   });
 
   test("keeps an image inside a link loading across parent rerenders", async () => {
-    let complete!: (bytes: Uint8Array) => void;
-    const pending = new Promise<Uint8Array>((resolve) => { complete = resolve; });
-    const loadImage = vi.fn<(target: string, signal: AbortSignal) => Promise<Uint8Array>>(() => pending);
+    let complete!: (bytes: PreviewImageData) => void;
+    const pending = new Promise<PreviewImageData>((resolve) => { complete = resolve; });
+    const loadImage = vi.fn<(target: string, signal: AbortSignal) => Promise<PreviewImageData>>(() => pending);
     const onOpenLink = vi.fn();
     Object.defineProperty(URL, "createObjectURL", { configurable: true, value: () => "blob:linked" });
     Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: () => {} });
@@ -112,7 +138,7 @@ describe("AT-31 basic Markdown preview", () => {
     await act(async () => root.render(createElement(MarkdownPreview, { source, loadImage, onOpenLink })));
     expect(signal.aborted).toBe(false);
     expect(loadImage).toHaveBeenCalledTimes(1);
-    await act(async () => complete(new Uint8Array([1])));
+    await act(async () => complete(plainImage(new Uint8Array([1]))));
     expect(container.querySelector("button img")?.getAttribute("src")).toBe("blob:linked");
     await act(async () => container.querySelector("button")?.click());
     expect(onOpenLink).toHaveBeenCalledExactlyOnceWith({ kind: "document", target: "target.md" });

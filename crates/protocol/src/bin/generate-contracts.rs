@@ -70,7 +70,8 @@ use notryx_protocol::{
     WorkspaceSendResult, WorkspaceSendStatus, WorkspaceSyncState, WorkspaceSyncStatus,
 };
 use notryx_protocol::{
-    ThemeBase, ThemeFont, ThemePackage, ThemePreferences, ThemeSelection, ThemeStatus, ThemeTokens,
+    DrawioPngStatus, ThemeBase, ThemeFont, ThemePackage, ThemePreferences, ThemeSelection,
+    ThemeStatus, ThemeTokens,
 };
 use schemars::{JsonSchema, schema_for};
 use ts_rs::{Config, TS};
@@ -339,6 +340,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     add_type::<WorkspaceDraftRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspacePreviewImageRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspacePreviewImage>(&config, &mut declarations, &mut schemas)?;
+    add_type::<DrawioPngStatus>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceQueueRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceExternalLinkRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceRecoveryRequest>(&config, &mut declarations, &mut schemas)?;

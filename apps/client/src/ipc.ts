@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { DrawioPngStatus } from "../../../packages/protocol-types";
 import type { M0OpenedDocument, M0SavedCheckpoint, M0SaveRequest, M0CloseRequest, NodeState, WorkspaceDraft, WorkspacePairStatus, WorkspaceRegistration, WorkspaceOpenedDocument, WorkspaceSendResult, WorkspaceDocumentOutboxState, WorkspaceOutboxEntry, WorkspaceOutboxPage, WorkspaceQueuedOperation, WorkspaceSyncState } from "../../../packages/protocol-types";
 import type { RestoreNodeRequest, TrashPage } from "../../../packages/protocol-types";
 import type { RestoreDisplay } from "./trash-panel";
@@ -1316,11 +1317,15 @@ export async function sendNextWorkspaceOperation(): Promise<WorkspaceSendResult>
   return { binding: registration(value.binding), status, operation_id, document_id, generation: current_generation, content_block };
 }
 
-export async function previewWorkspaceImage(document_id: string, edit_session_id: string, node: NodeState): Promise<Uint8Array> {
+export type PreviewImageData = { bytes: Uint8Array; drawioStatus: DrawioPngStatus };
+
+export async function previewWorkspaceImage(document_id: string, edit_session_id: string, node: NodeState): Promise<PreviewImageData> {
   const renderer_session_id = await getRendererSession();
   const value = object(await invoke("workspace_preview_image", { request: { renderer_session_id, document_id, edit_session_id, node } }));
   if (typeof value.width !== "number" || typeof value.height !== "number" || !Number.isInteger(value.width) || !Number.isInteger(value.height) || value.width <= 0 || value.height <= 0 || value.width > 8192 || value.height > 8192 || value.width * value.height > 16_000_000) throw new Error("잘못된 이미지 응답입니다.");
-  return fromBase64(string(value.png_base64));
+  const drawioStatus = value.drawio_status;
+  if (drawioStatus !== "none" && drawioStatus !== "embedded_xml" && drawioStatus !== "invalid_xml" && drawioStatus !== "unsupported_xml" && drawioStatus !== "limit_exceeded") throw new Error("잘못된 다이어그램 응답입니다.");
+  return { bytes: fromBase64(string(value.png_base64)), drawioStatus };
 }
 
 export async function openWorkspaceExternal(document_id: string, edit_session_id: string, url: string): Promise<void> {

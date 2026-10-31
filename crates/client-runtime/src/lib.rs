@@ -23,6 +23,7 @@ mod trash;
 pub use restore::RestoreMutation;
 mod write;
 pub use write::{AbandonMutation, ContentMutation, OperationLookup};
+mod drawio_png;
 mod preview_image;
 pub use preview_image::{PreviewImageError, ValidatedPreviewImage, validate_preview_image};
 mod external_url;

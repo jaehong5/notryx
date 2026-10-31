@@ -1549,6 +1549,18 @@
       "title": "DeviceRenewal",
       "type": "object"
     },
+    "DrawioPngStatus": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "none",
+        "embedded_xml",
+        "invalid_xml",
+        "unsupported_xml",
+        "limit_exceeded"
+      ],
+      "title": "DrawioPngStatus",
+      "type": "string"
+    },
     "HeadHint": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -23248,9 +23260,24 @@
       "type": "string"
     },
     "WorkspacePreviewImage": {
+      "$defs": {
+        "DrawioPngStatus": {
+          "enum": [
+            "none",
+            "embedded_xml",
+            "invalid_xml",
+            "unsupported_xml",
+            "limit_exceeded"
+          ],
+          "type": "string"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "drawio_status": {
+          "$ref": "#/$defs/DrawioPngStatus"
+        },
         "height": {
           "format": "uint32",
           "minimum": 0,
@@ -23268,7 +23295,8 @@
       "required": [
         "png_base64",
         "width",
-        "height"
+        "height",
+        "drawio_status"
       ],
       "title": "WorkspacePreviewImage",
       "type": "object"

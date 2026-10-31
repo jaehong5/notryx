@@ -36,6 +36,7 @@ def main():
     parser.add_argument("--driver", default="WebKitWebDriver")
     parser.add_argument("--binary", default="target/debug/notryx-client")
     parser.add_argument("--server", default="target/debug/notryx-server")
+    parser.add_argument("--two-clients", action="store_true", help="verify a second existing client and export both preserved drafts after restore")
     args = parser.parse_args()
     repo = Path(args.repo).resolve()
     helpers = module(repo / "scripts/m2-workspace-webdriver.py", "m2_helpers")
@@ -142,12 +143,17 @@ def main():
         server.wait(timeout=10)
         require(perf.observation_clear(perf.group_observation(server.pid, {server_identity})), "server termination unconfirmed; fixture retained")
 
+    def settle_disk():
+        if args.two_clients:
+            wait(lambda: (pressure := perf.io_psi_some_avg10()) is not None and pressure < 10,
+                "disk pressure between cold backup steps")
+
     try:
         notes, state, run = (fixture / name for name in ("notes", "state", "run"))
         for path in (notes, state, run):
             path.mkdir(mode=0o700)
         client_directories = []
-        for name in ("receiver",):
+        for name in (("receiver", "peer") if args.two_clients else ("receiver",)):
             root = fixture / name
             root.mkdir(mode=0o700)
             directories = {key: root / key for key in ("data", "xdg_data", "xdg_cache", "xdg_config")}
@@ -234,7 +240,16 @@ def main():
 
 
 
+        def focus_client(client):
+            if args.two_clients:
+                other = next((item.x11_window for item in browsers if item is not client and hasattr(item, "x11_window")), None)
+                focus = helpers.capture_remote_change_focus(exclude_window=other)
+                client.x11_window = focus[2]
+                focus[0].XCloseDisplay(focus[1])
+                wait(lambda: client.js("return document.hasFocus()"), "active client window")
+
         def pair(browser, secret, origin, phase, expected_epoch=None, retry_preconditions=None, previous_identity=None):
+            focus_client(browser)
             calls_before = proxy.route_count("pair")
             with proxy.lock:
                 successes_before = proxy.response_counts.get("pair:200", 0)
@@ -358,7 +373,10 @@ def main():
                         editor:!!document.querySelector('.cm-content'), editable:!!document.querySelector('.cm-content[contenteditable=true]'),
                         alert:alerts.length>0, compositionAlert:/조합/.test(text), sessionAlert:/session|세션|stale/i.test(text),
                         queueAlert:/queue|전송.*준비|checkpoint/i.test(text), pairingAlert:/pairing|등록|인증/i.test(text),
-                        timeline:window.__notryxPairTrace?.events || [], attempts:window.__notryxPairTrace?.attempts || [], send:window.__notryxSendTrace || null};""")
+                  alertCodes:[...document.querySelectorAll('[role=alert]')].map(e=>(e.textContent||'').trim().replace(/^Error: /,''))
+                    .filter(value=>/^[A-Za-z_]{1,80}$/.test(value)).slice(0,5),
+                  focused:document.hasFocus(),
+                  timeline:window.__notryxPairTrace?.events || [], attempts:window.__notryxPairTrace?.attempts || [], send:window.__notryxSendTrace || null};""")
                 except Exception:
                     ui = {"diagnostic":"unavailable"}
                 with proxy.lock:
@@ -393,7 +411,8 @@ def main():
                     "sync":last_sync["status"] if type(last_sync["status"]) is str and last_sync["status"] in allowed_sync else "other",
                     "epoch_matches":bool(last_sync["epoch_matches"]), "workspace_matches":bool(last_sync["workspace_matches"]),
                     "origin_matches":bool(last_sync["origin_matches"]), "identity_changed":bool(last_sync["identity_changed"]),
-                    "ui":flags, "timeline":timeline, "attempts":attempt_statuses, "send":send_counts}
+                    "ui":flags, "focused":ui.get("focused"), "alert_codes":ui.get("alertCodes", []),
+                    "timeline":timeline, "attempts":attempt_statuses, "send":send_counts}
                 print(f"Synthetic pairing diagnostic: {diagnostic}", file=sys.stderr, flush=True)
                 raise TestFailure("synthetic pairing failed") from cause
             finally:
@@ -404,12 +423,25 @@ def main():
                 except Exception:
                     pass
 
+        def observe_send(browser):
+            installed = browser.js("""const original=window.fetch, target=window.__TAURI_INTERNALS__.convertFileSrc('workspace_send_next','ipc');
+              const state={started:0,finished:0,inflight:0,paused:true,suppressed:0}; window.__notryxSendTrace=state;
+              const wrapped=function(input,init){const url=typeof input==='string'?input:input.url;
+                if(url!==target) return original.call(this,input,init);
+                if(state.paused && state.finished>0){state.suppressed++; return Promise.resolve(new Response(JSON.stringify('synthetic send paused'),{status:200,headers:{'Tauri-Response':'error','Content-Type':'application/json'}}));}
+                state.started++; state.inflight++;
+                return original.call(this,input,init).finally(()=>{state.inflight--; state.finished++;});};
+              window.fetch=wrapped; return window.fetch===wrapped;""")
+            require(installed, "send completion observation could not be installed")
+
         def open_document(browser, node_id):
+            focus_client(browser)
             wait(lambda: browser.js("return !!document.querySelector('[data-document=\"'+arguments[0]+'\"]:not(:disabled)')", node_id), "document row")
             browser.js("document.querySelector('[data-document=\"'+arguments[0]+'\"]').click()", node_id)
             wait(lambda: browser.js("return document.querySelector('[aria-current=page]')?.dataset.document===arguments[0] && !!document.querySelector('.cm-content[contenteditable=true]')", node_id), "opened editor")
 
         def begin_edit(browser, suffix):
+            focus_client(browser)
             browser.js("""const element=document.querySelector('.cm-content');
                 element.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
                 const view=element.cmTile.root.view;
@@ -420,6 +452,39 @@ def main():
                 document.querySelector('.cm-content').dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}));
                 setTimeout(done,400);""", asynchronous=True)
             wait(lambda: browser.js("return !document.querySelector('.cm-content').cmTile.root.view.composing"), "composition end")
+
+        def preserved_client(index, registration):
+            return (
+                query(index, "SELECT * FROM client_outbox WHERE registration_id=? ORDER BY operation_seq", (registration,)),
+                query(index, "SELECT c.* FROM draft_checkpoints c JOIN registered_documents d ON d.storage_id=c.document_id WHERE d.registration_id=? ORDER BY c.document_id", (registration,)),
+                query(index, "SELECT b.* FROM draft_bases b JOIN registered_documents d ON d.storage_id=b.document_id WHERE d.registration_id=? ORDER BY b.document_id", (registration,)),
+                query(index, "SELECT * FROM outbox_streams WHERE registration_id=?", (registration,)),
+            )
+
+        def export_frozen_draft(client, document_id, expected, name):
+            focus_client(client)
+            wait(lambda: client.js("return !!document.querySelector('[data-draft-document=\"'+arguments[0]+'\"]:not(:disabled)')", document_id), "preserved draft row")
+            client.js("document.querySelector('[data-draft-document=\"'+arguments[0]+'\"]').click()", document_id)
+            wait(lambda: client.js("return !!document.querySelector('#export-source:not(:disabled)') && !!document.querySelector('.cm-content') && !!document.querySelector('[data-draft-document=\"'+arguments[0]+'\"][aria-current=page]')", document_id), "selected preserved draft")
+            destination = fixture / name
+            failures = []
+            def interact():
+                try:
+                    helpers.respond_to_recovery_dialog(destination)
+                except Exception:
+                    failures.append(True)
+            worker = threading.Thread(target=interact, daemon=True)
+            worker.start()
+            try:
+                client.js("document.querySelector('#export-source').click()")
+            finally:
+                worker.join(timeout=20)
+            require(not worker.is_alive() and not failures, "preserved draft export dialog failed")
+            wait(lambda: destination.exists(), "preserved draft export")
+            wait(lambda: client.js("return !document.querySelector('#export-source').disabled"), "export completion")
+            require(destination.read_bytes() == expected, "exported preserved draft bytes differ")
+            client.js("document.querySelector('[data-testid=close-document]').click()")
+            wait(lambda: client.js("return !document.querySelector('.cm-content')"), "exported draft closed")
 
 
         try:
@@ -519,21 +584,28 @@ def main():
             old_id, workspace_id, old_epoch, old_device, old_stream, _ = old_registration[0]
             old_node = wait(lambda: cached_node(0, node_id), "old registration metadata")
             require(old_node.get("node_id") == node_id and old_node.get("name") == "Shared.md" and old_node.get("parent_id"), "old synthetic node identity differs")
+            if args.two_clients:
+                test_stage = "peer_initial_pair"
+                directories = client_directories[1]
+                peer_environment = os.environ.copy()
+                peer_environment.update(TAURI_WEBVIEW_AUTOMATION="true", NOTRYX_M0_DATA_DIR=str(directories["data"]),
+                    XDG_DATA_HOME=str(directories["xdg_data"]), XDG_CACHE_HOME=str(directories["xdg_cache"]), XDG_CONFIG_HOME=str(directories["xdg_config"]))
+                peer = DiagnosticBrowser(perf, helpers, fixture, client_binary, args.driver, peer_environment)
+                browsers.append(peer); peer.start(); browser.link(peer)
+                pair(peer, admin("issue-pairing", principal), f"http://127.0.0.1:{proxy.server_address[1]}", "peer initial")
+                peer_registration = query(1, "SELECT id,device_id,device_stream_id FROM client_registrations WHERE status='active'")[0]
+                require(peer_registration[1] != old_device and peer_registration[2] != old_stream, "clients share a device or stream")
+                with sqlite3.connect(f"file:{server_database}?mode=ro", uri=True, timeout=5) as connection:
+                    peer_node_id = connection.execute("SELECT node_id FROM nodes WHERE name='Protected.md' AND deleted=0").fetchone()[0]
+                wait(lambda: cached_node(1, peer_node_id), "peer initial metadata")
+                open_document(peer, peer_node_id)
             open_document(browser, node_id)
             test_stage = "original_send"
             begin_edit(browser, local_suffix)
             sent_checkpoint = wait(lambda: (row if (row := checkpoint(0, node_id)) and row[1] == first_local_bytes else None), "sent draft checkpoint")
             require(sent_checkpoint[2:] == (base, base_revision) and not outbox(0, node_id), "sent draft base differs")
             proxy.hold_original_success.set(); proxy.discard_original_success.set(); proxy.hold_uncertain_lookup.set()
-            installed = browser.js("""const original=window.fetch, target=window.__TAURI_INTERNALS__.convertFileSrc('workspace_send_next','ipc');
-              const state={started:0,finished:0,inflight:0,paused:true,suppressed:0}; window.__notryxSendTrace=state;
-              const wrapped=function(input,init){const url=typeof input==='string'?input:input.url;
-                if(url!==target) return original.call(this,input,init);
-                if(state.paused && state.finished>0){state.suppressed++; return Promise.resolve(new Response(JSON.stringify('synthetic send paused'),{status:200,headers:{'Tauri-Response':'error','Content-Type':'application/json'}}));}
-                state.started++; state.inflight++;
-                return original.call(this,input,init).finally(()=>{state.inflight--; state.finished++;});};
-              window.fetch=wrapped; return window.fetch===wrapped;""")
-            require(installed, "send completion observation could not be installed")
+            observe_send(browser)
             end_edit(browser); browser.js("document.querySelector('#save').click()")
             wait(proxy.original_success_held.is_set, "server committed original PUT")
             sent = wait(lambda: (rows[0] if len(rows := outbox(0, node_id)) == 1 and rows[0][6] == "sent" else None), "unconfirmed sent operation")
@@ -566,11 +638,31 @@ def main():
             proxy.failure.mark("planned_outage")
             stop_server(); os.close(server_fd)
             server = None; server_fd = None; server_identity = None
+            if args.two_clients:
+                test_stage = "peer_offline_edit"
+                observe_send(peer)
+                peer_suffix = "\nPeer unsent draft 한글\n"
+                peer_bytes = protected + peer_suffix.encode("utf-8")
+                begin_edit(peer, peer_suffix)
+                wait(lambda: (row := checkpoint(1, peer_node_id)) and row[1] == peer_bytes, "peer offline checkpoint")
+                end_edit(peer); peer.js("document.querySelector('#save').click()")
+                wait(lambda: len(outbox(1, peer_node_id)) == 1, "peer offline outbox")
+                wait(lambda: peer.js("return window.__notryxSendTrace.finished>0 && window.__notryxSendTrace.inflight===0"), "peer offline send settled")
+                require(checkpoint(1, peer_node_id)[2] == protected, "peer base changed while offline")
+                peer.js("document.querySelector('[data-testid=close-document]').click()")
+                wait(lambda: peer.js("return !document.querySelector('.cm-content')"), "peer closes document")
+                peer_before_restore = preserved_client(1, peer_registration[0])
+                require(len(peer_before_restore[0]) == 1 and (notes / "Protected.md").read_bytes() == protected, "peer edit reached stopped server")
             test_stage = "cold_backup_restore"
             backup, restored = fixture / "cold-backup", fixture / "restored"
             require(not backup.exists() and not restored.exists(), "synthetic backup and restore destinations must be new")
+            settle_disk()
             cli("backup", "--config", str(config), str(backup))
+            settle_disk()
+            cli("backup-verify", str(backup))
+            settle_disk()
             cli("restore", str(backup), str(restored))
+            settle_disk()
             notes, state = restored / "notes", restored / "state"
             server_database = state / "state.db"
             config = fixture / "restored-live.toml"
@@ -591,6 +683,7 @@ def main():
             current = wait(lambda: (row if (row := server_document()) and row[0] == node_id and row[2] == hashlib.sha256(remote_bytes).hexdigest() else None),
                 "restored current server content")
             new_grant = admin("issue-pairing", status["owner_principal_id"])
+            settle_disk()
             def retry_client_snapshot():
                 path = client_directories[0]["data"] / "drafts.sqlite3"
                 with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5) as connection:
@@ -624,6 +717,33 @@ def main():
             new_node = wait(lambda: (row if (row := cached_node(0, node_id)) and row.get("content_rev") == current[1] else None), "new registration bootstrap")
             require(new_node.get("node_id") == node_id and new_node.get("parent_id") == old_node.get("parent_id")
                 and new_node.get("name") == "Shared.md", "restored target metadata differs")
+            if args.two_clients:
+                test_stage = "peer_restored_pair"
+                settle_disk()
+                require(preserved_client(1, peer_registration[0]) == peer_before_restore, "restore changed peer drafts or outbox")
+                pair(peer, admin("issue-pairing", principal), f"http://127.0.0.1:{proxy.server_address[1]}", "peer restored", current_epoch,
+                    previous_identity=peer_registration[1:])
+                peer.js("window.__notryxSendTrace.paused=false")
+                require(query(1, "SELECT status FROM client_registrations WHERE id=?", (peer_registration[0],)) == [("frozen",)], "peer old registration was not frozen")
+                require(preserved_client(1, peer_registration[0]) == peer_before_restore, "peer re-pair changed old drafts or outbox")
+                with proxy.lock:
+                    puts_before_exports = proxy.put_requests
+                primary_before_exports = preserved_client(0, old_id)
+                test_stage = "two_client_draft_exports"
+                for client, document, expected, name in ((browser, node_id, first_local_bytes, "receiver-export.md"),
+                        (peer, peer_node_id, peer_bytes, "peer-export.md")):
+                    export_frozen_draft(client, document, expected, name)
+                    idle = client.js("""const done=arguments[arguments.length-1];
+                        window.__TAURI_INTERNALS__.invoke('m0_renderer_session')
+                          .then(owner=>window.__TAURI_INTERNALS__.invoke('workspace_send_next',{request:{renderer_session_id:owner}}))
+                          .then(value=>done(value.status==='idle')).catch(()=>done(false));""", asynchronous=True)
+                    require(idle, "restored client tried to replay an old request")
+                require(preserved_client(0, old_id) == primary_before_exports and preserved_client(1, peer_registration[0]) == peer_before_restore,
+                    "export or send changed preserved drafts, bases or outbox")
+                with proxy.lock:
+                    require(proxy.put_requests == puts_before_exports, "restored clients automatically submitted an old PUT")
+                print("AT-57 two-client checkpoint: cold restore, re-pair, byte-exact draft exports and no automatic old PUT passed.", flush=True)
+                focus_client(browser)
             draft = sent_checkpoint
             draft_text = local_text
             draft_bytes = first_local_bytes
@@ -772,6 +892,8 @@ def main():
             require(stream is not None and int(stream[0]) >= new_seq and int(stream[1]) >= new_seq,
                 "server did not confirm the new stream acknowledgement")
             require((notes / "Protected.md").read_bytes() == protected and not proxy.failure.is_set(), "protected bytes changed or proxy failed")
+            if args.two_clients:
+                require(preserved_client(1, peer_registration[0]) == peer_before_restore, "peer old data changed after primary recovery")
         finally:
             primary_failure = sys.exc_info()[1]
             if primary_failure is not None:

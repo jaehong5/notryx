@@ -500,6 +500,86 @@ async fn journal_v10_backup_current_schema_verifies_and_restores() {
 }
 
 #[tokio::test]
+async fn journal_v10_backup_preserves_retained_baseline_and_remaining_journal() {
+    let fixture = Fixture::new().await;
+    let retention_seconds = 30 * 24 * 60 * 60;
+    let budget_bytes = 64 * 1024 * 1024;
+    let mut workspace = Workspace::open(&fixture.notes, &fixture.state)
+        .await
+        .unwrap();
+    workspace
+        .retain_journal(retention_seconds, budget_bytes, fixture.now)
+        .await
+        .unwrap();
+    fs::write(fixture.notes.join("After.md"), b"remaining journal\r\n").unwrap();
+    workspace.adopt_root_document("After.md").await.unwrap();
+    workspace
+        .retain_journal(
+            retention_seconds,
+            budget_bytes,
+            fixture.now + retention_seconds as i64 + 2,
+        )
+        .await
+        .unwrap();
+    let info = workspace.server_info().await.unwrap();
+    assert_eq!(info.journal_floor_seq.get(), 2);
+    assert_eq!(info.head_seq.get(), 3);
+    workspace.close().await.unwrap();
+
+    let source_db = fixture.state.join("state.db");
+    let old = metadata(&source_db).await;
+    let rows_before = preserved_rows(&source_db).await;
+    let retention_before = retention_rows(&source_db).await;
+    assert_eq!(retention_before.0, "2");
+    assert_eq!(retention_before.1.len(), 2);
+    assert_eq!(retention_before.2.len(), 1);
+    let remaining: Value = serde_json::from_str(&retention_before.2[0]).unwrap();
+    assert_eq!(remaining[0], "3");
+    let objects_before = files(&fixture.state.join("objects"));
+    let notes_before = files(&fixture.notes);
+    let state_before = files(&fixture.state);
+    let backup = fixture._directory.path().join("backup-retained");
+    fixture.backup(&backup);
+    let backup_before = files(&backup);
+    assert!(cli(&[Path::new("backup-verify"), &backup]).status.success());
+    assert_eq!(metadata(&backup.join("state/state.db")).await, old);
+
+    let destination = fixture._directory.path().join("restore-retained");
+    let result = cli(&[Path::new("restore"), &backup, &destination]);
+    assert!(
+        result.status.success(),
+        "retained journal restore failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let restored = metadata(&destination.join("state/state.db")).await;
+    assert_eq!((&restored.0, &restored.2, restored.3), (&old.0, &old.2, 10));
+    assert_ne!(restored.1, old.1);
+    for root in [&backup, &destination] {
+        assert_eq!(
+            preserved_rows(&root.join("state/state.db")).await,
+            rows_before
+        );
+        assert_eq!(
+            retention_rows(&root.join("state/state.db")).await,
+            retention_before
+        );
+        assert_eq!(files(&root.join("state/objects")), objects_before);
+        assert_eq!(
+            fs::read(root.join("notes/Synthetic.md")).unwrap(),
+            fixture.bytes
+        );
+        assert_eq!(
+            fs::read(root.join("notes/After.md")).unwrap(),
+            b"remaining journal\r\n"
+        );
+    }
+    assert_eq!(files(&fixture.notes), notes_before);
+    assert_eq!(files(&fixture.state), state_before);
+    assert_eq!(files(&backup), backup_before);
+    assert_token_revoked(&fixture, &destination).await;
+}
+
+#[tokio::test]
 async fn journal_v10_backup_legacy_v9_verifies_restores_and_migrates_only_copy() {
     let fixture = Fixture::new().await;
     let backup = fixture._directory.path().join("backup-v9");

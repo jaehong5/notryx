@@ -74,6 +74,37 @@ pub(crate) struct PreparedEditor {
 #[derive(Default)]
 pub(crate) struct EditorSessions(Mutex<Option<EditorSession>>);
 
+impl EditorSessions {
+    fn open(&self, state: &mut RuntimeState, editor: EditorSession) -> Result<(), String> {
+        crate::preview_native::validate_editor(
+            state,
+            &editor.session,
+            &editor.snapshot,
+            &editor.request,
+        )?;
+        let mut current = self.0.lock().map_err(|_| "drawio_unavailable")?;
+        if current.is_some() {
+            return Err("drawio_busy".into());
+        }
+        // Reserve before creating the window so pairing cannot replace its registration.
+        state
+            .gate
+            .open_session(editor.label.clone())
+            .map_err(str::to_owned)?;
+        *current = Some(editor);
+        Ok(())
+    }
+
+    fn close(&self, gate: &mut crate::gate::RequestGate, label: &str) {
+        if let Ok(mut current) = self.0.lock() {
+            if current.as_ref().is_some_and(|editor| editor.label == label) {
+                *current = None;
+            }
+            let _ = gate.close_session(label);
+        }
+    }
+}
+
 fn editor_location(url: &tauri::Url) -> bool {
     let local = (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
         || (url.scheme() == "http" && url.host_str() == Some("tauri.localhost"))
@@ -114,19 +145,26 @@ fn editor_navigation(url: &tauri::Url) -> bool {
 }
 
 pub(crate) fn remove(app: &tauri::AppHandle, label: &str) {
-    if let Some(sessions) = app.try_state::<EditorSessions>()
-        && let Ok(mut session) = sessions.0.lock()
-        && session.as_ref().is_some_and(|s| s.label == label)
-    {
-        *session = None;
-    }
+    let Some(runtime) = app.try_state::<Runtime>() else {
+        return;
+    };
+    let state = runtime.0.clone();
+    let app = app.clone();
+    let label = label.to_owned();
+    tauri::async_runtime::spawn(async move {
+        let mut state = state.lock().await;
+        if let Some(sessions) = app.try_state::<EditorSessions>() {
+            sessions.close(&mut state.gate, &label);
+        }
+    });
 }
 
 pub(crate) fn cancel_all(app: &tauri::AppHandle) {
     if let Some(sessions) = app.try_state::<EditorSessions>()
         && let Ok(mut session) = sessions.0.lock()
+        && let Some(editor) = session.take()
     {
-        *session = None;
+        remove(app, &editor.label);
     }
     #[cfg(not(target_os = "android"))]
     for (label, window) in app.webview_windows() {
@@ -249,22 +287,20 @@ pub(crate) async fn drawio_open(
         crate::check_caller(&webview)?;
         let label = format!("drawio-{}", uuid::Uuid::new_v4());
         {
-            let state = runtime.0.lock().await;
-            crate::preview_native::validate_editor(&state, &session, &snapshot, &request)?;
+            let mut state = runtime.0.lock().await;
             let sessions = app.state::<EditorSessions>();
-            let mut editor = sessions.0.lock().map_err(|_| "drawio_unavailable")?;
-            if editor.is_some() {
-                return Err("drawio_busy".into());
-            }
-            *editor = Some(EditorSession {
-                label: label.clone(),
-                session,
-                snapshot,
-                request,
-                input: Some(input.input),
-                base_xml: input.base_xml,
-                base_revision: input.base_revision,
-            });
+            sessions.open(
+                &mut state,
+                EditorSession {
+                    label: label.clone(),
+                    session,
+                    snapshot,
+                    request,
+                    input: Some(input.input),
+                    base_xml: input.base_xml,
+                    base_revision: input.base_revision,
+                },
+            )?;
         }
         let result = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("drawio.html".into()))
             .title("Notryx 다이어그램 편집 (기기 초안)")
@@ -411,10 +447,10 @@ pub(crate) fn drawio_close(webview: Webview, app: tauri::AppHandle) -> Result<()
     check_editor(&webview)?;
     #[cfg(not(target_os = "android"))]
     {
-        remove(&app, webview.label());
         if let Some(window) = app.get_webview_window(webview.label()) {
             window.destroy().map_err(|_| "drawio_unavailable")?;
         }
+        remove(&app, webview.label());
     }
     Ok(())
 }
@@ -581,15 +617,21 @@ pub(crate) mod tests {
         let (session, snapshot, prepared) = editor_input(state.clone(), request).await.unwrap();
         assert!(!prepared.input.restored);
         let xml = prepared.input.xml.replace("한글", "초안 복구");
-        let sessions = EditorSessions(Mutex::new(Some(EditorSession {
-            label: "drawio-test".into(),
-            session,
-            snapshot,
-            request: request.clone(),
-            input: None,
-            base_xml: prepared.base_xml.clone(),
-            base_revision: prepared.base_revision.clone(),
-        })));
+        let sessions = EditorSessions::default();
+        sessions
+            .open(
+                &mut *state.lock().await,
+                EditorSession {
+                    label: "drawio-test".into(),
+                    session,
+                    snapshot,
+                    request: request.clone(),
+                    input: None,
+                    base_xml: prepared.base_xml.clone(),
+                    base_revision: prepared.base_revision.clone(),
+                },
+            )
+            .unwrap();
         let save = DrawioCheckpointRequest {
             generation: "0".into(),
             xml: xml.clone(),
@@ -637,6 +679,14 @@ pub(crate) mod tests {
             .product_sessions
             .remove(&request.edit_session_id)
             .unwrap();
+        {
+            let mut state = state.lock().await;
+            state.gate.close_session(&request.edit_session_id).unwrap();
+            assert!(
+                matches!(state.gate.begin_pair("owner"), Err("open_edit_sessions")),
+                "the diagram must prevent re-pairing after its Markdown parent closes"
+            );
+        }
         assert_eq!(
             checkpoint(
                 state.clone(),
@@ -669,6 +719,10 @@ pub(crate) mod tests {
             state
                 .product_sessions
                 .insert(request.edit_session_id.clone(), parent);
+            state
+                .gate
+                .open_session(request.edit_session_id.clone())
+                .unwrap();
         }
         let previous_session = state.lock().await.session.take();
         assert!(
@@ -691,7 +745,7 @@ pub(crate) mod tests {
         );
         state.lock().await.session = previous_session;
         assert_eq!(
-            editor_input(state, request)
+            editor_input(state.clone(), request)
                 .await
                 .unwrap()
                 .2
@@ -699,6 +753,21 @@ pub(crate) mod tests {
                 .generation,
             "2"
         );
+        {
+            let mut state = state.lock().await;
+            state.gate.close_session(&request.edit_session_id).unwrap();
+            sessions.close(&mut state.gate, "drawio-test");
+            assert!(sessions.0.lock().unwrap().is_none());
+            let pair = state
+                .gate
+                .begin_pair("owner")
+                .expect("closing the diagram permits re-pairing");
+            state.gate.fail_pair(&pair).unwrap();
+            state
+                .gate
+                .open_session(request.edit_session_id.clone())
+                .unwrap();
+        }
     }
 
     #[test]

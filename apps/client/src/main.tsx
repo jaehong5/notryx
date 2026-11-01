@@ -49,6 +49,12 @@ const documents = [
   ["mixed", "혼합 줄바꿈"], ["non-utf8", "비UTF-8 원문"],
 ];
 
+function connectionErrorMessage(cause: unknown): string {
+  const error = String(cause);
+  return error.includes("open_edit_sessions")
+    ? "열린 문서와 다이어그램 편집 창을 닫은 뒤 다시 연결해 주세요." : error;
+}
+
 function App() {
   const themes = useTheme();
   const currentTheme = useRef(themes.theme);
@@ -599,7 +605,7 @@ function App() {
       await refreshWorkspace();
     } catch (cause) {
       if (String(cause).includes("pairing_pending_adoption") || String(cause).includes("pairing_in_progress")) setPendingPair(true);
-      setConnectionError(String(cause));
+      setConnectionError(connectionErrorMessage(cause));
     } finally {
       connecting.current = false;
       setBusy(false);
@@ -639,7 +645,7 @@ function App() {
       }
       setPendingPair(false);
     } catch (cause) {
-      setConnectionError(String(cause));
+      setConnectionError(connectionErrorMessage(cause));
     } finally {
       connecting.current = false;
       setBusy(false);

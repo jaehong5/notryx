@@ -16,7 +16,7 @@ let input: DrawioEditorInput | undefined;
 let draft: DiagramDraftController | undefined;
 let recoveryNotice = "";
 let loaded = false;
-let exporting = false;
+let busy = false;
 let exportSequence = 0;
 let pendingExport: { requestId: string; event: "snapshot" | "export"; resolve: (value: DiagramEvent) => void;
   reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> } | undefined;
@@ -38,16 +38,25 @@ function draftStatus(state: DiagramDraftState): void {
   status.textContent = recoveryNotice + messages[state];
   retry.hidden = state !== "error";
 }
-function askClose(): void { if (!exporting && !discard.open) discard.showModal(); }
+function setBusy(value: boolean): void {
+  busy = value;
+  exportPng.disabled = value || !loaded;
+  closeButton.disabled = retry.disabled = confirmClose.disabled = value;
+  frame.inert = value;
+}
+function askClose(): void { if (!busy && !discard.open) discard.showModal(); }
 closeButton.addEventListener("click", askClose);
 document.querySelector("#keep")!.addEventListener("click", () => discard.close());
 confirmClose.addEventListener("click", () => {
-  confirmClose.disabled = true;
-  frame.inert = true;
-  void (draft?.close() ?? invoke("drawio_close")).catch(() => {
+  if (busy) return;
+  setBusy(true);
+  void (async () => {
+    if (draft && loaded) await checkpointSnapshot();
+    await (draft?.close() ?? invoke("drawio_close"));
+  })().catch(() => {
     discard.close();
     draftStatus("error");
-  }).finally(() => { confirmClose.disabled = false; frame.inert = false; });
+  }).finally(() => setBusy(false));
 });
 retry.addEventListener("click", () => { void draft?.flush().catch(() => draftStatus("error")); });
 function requestExport(event: "snapshot" | "export", xml?: string): Promise<DiagramEvent> {
@@ -62,18 +71,20 @@ function requestExport(event: "snapshot" | "export", xml?: string): Promise<Diag
       : { action: "export", format: "xmlpng", requestId, xml }));
   });
 }
+async function checkpointSnapshot(): Promise<{ xml: string; generation: string }> {
+  const snapshot = await requestExport("snapshot");
+  if (snapshot.event !== "snapshot" || !draft) throw new Error("invalid snapshot");
+  draft.change(snapshot.xml);
+  const generation = await draft.flush();
+  return { xml: snapshot.xml, generation };
+}
 exportPng.addEventListener("click", () => {
-  if (exporting || !loaded || !draft || !channel) return;
-  exporting = true;
-  exportPng.disabled = closeButton.disabled = retry.disabled = true;
-  frame.inert = true;
+  if (busy || !loaded || !draft || !channel) return;
+  setBusy(true);
   void (async () => {
-    const snapshot = await requestExport("snapshot");
-    if (snapshot.event !== "snapshot") throw new Error("invalid snapshot");
-    draft!.change(snapshot.xml);
-    const generation = await draft!.flush();
+    const { xml, generation } = await checkpointSnapshot();
     status.textContent = recoveryNotice + "초안을 저장했습니다. PNG 파일을 만드는 중입니다.";
-    const png = await requestExport("export", snapshot.xml);
+    const png = await requestExport("export", xml);
     if (png.event !== "export") throw new Error("invalid PNG");
     const request: DrawioExportRequest = { generation, png_base64: png.png };
     const saved = await invoke<boolean>("drawio_export_png", { request });
@@ -87,9 +98,7 @@ exportPng.addEventListener("click", () => {
     if (pendingExport) clearTimeout(pendingExport.timer);
     pendingExport = undefined;
     channel?.port1.postMessage(JSON.stringify({ action: "cancel-export" }));
-    exporting = false;
-    exportPng.disabled = closeButton.disabled = retry.disabled = false;
-    frame.inert = false;
+    setBusy(false);
   });
 });
 window.addEventListener("notryx-close-requested", askClose);
@@ -121,7 +130,7 @@ window.addEventListener("message", (event: MessageEvent) => {
       input = undefined;
     } else if (value.event === "load" && !loaded) {
       loaded = true;
-      exportPng.disabled = false;
+      exportPng.disabled = busy;
       clearTimeout(deadline);
       status.textContent = recoveryNotice + "기기 초안을 편집할 수 있습니다. 서버 원본은 변경하지 않습니다.";
     } else if (value.event === "autosave" && loaded) {

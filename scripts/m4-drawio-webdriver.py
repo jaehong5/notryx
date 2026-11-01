@@ -259,6 +259,23 @@ def main():
             wd("POST", f"/session/{session}/window", {"handle": main_window})
             js("document.querySelector('[data-testid=close-document]').click()")
             wait(lambda: js("return !document.querySelector('[data-testid=close-document]')"))
+            stage = "open diagram blocks re-registration"
+            prior_binding = invoke("workspace_sync_status", {"request": {"renderer_session_id": owner}})["binding"]
+            blocked_grant = admin("issue-pairing", status["owner_principal_id"])
+
+            def submit_pair(grant):
+                js("""const form=document.querySelector('.workspace-connect');
+                    form.elements.namedItem('origin').value=arguments[0];
+                    form.elements.namedItem('workspace_id').value=arguments[1];
+                    form.elements.namedItem('pairing_secret').value=arguments[2];
+                    form.requestSubmit();""", f"http://127.0.0.1:{server_port}", grant["workspace_id"], grant["pairing_secret"])
+
+            submit_pair(blocked_grant)
+            wait(lambda: js("return document.body.textContent.includes('열린 문서와 다이어그램 편집 창을 닫은 뒤 다시 연결해 주세요.')"))
+            require(invoke("workspace_sync_status", {"request": {"renderer_session_id": owner}})["binding"] == prior_binding,
+                    "rejected pairing changed the active registration")
+            require(checkpoint() == saved and len(wd("GET", f"/session/{session}/window/handles")) == 2,
+                    "rejected pairing changed the draft or closed the editor")
             wd("POST", f"/session/{session}/window", {"handle": editor_window})
             stage = "save failure keeps editor and previous draft"
             with sqlite3.connect(root / "client/drafts.sqlite3") as db:
@@ -343,8 +360,21 @@ def main():
             require(js("return document.querySelector('#discard').open"), "close discarded edits without confirmation")
             js("document.querySelector('#keep').click()")
             require(js("return !document.querySelector('#discard').open"), "keep editing failed")
+            wd("POST", f"/session/{session}/frame", {"id": frame})
+            active_label = js("""const graph=window.__notryxGraph,cell=graph.getModel().getCell('2');
+                graph.startEditingAtCell(cell);
+                const input=graph.cellEditor.textarea;
+                input.textContent='닫기 직전 입력';
+                input.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:'닫기 직전 입력'}));
+                return graph.isEditing() && cell.value === '저장 재시도 확인';""")
+            require(active_label, "close fixture must have uncommitted label input")
+            wd("POST", f"/session/{session}/frame", {"id": None})
             js("document.querySelector('#close').click();document.querySelector('#discard-confirm').click()")
             wait(lambda: len(wd("GET", f"/session/{session}/window/handles")) == 1)
+            closed = checkpoint()
+            require(closed[0] > retried[0] and closed[1] != retried[1] and closed[2:] == retried[2:],
+                    "closing lost active label input or changed the original base")
+            retried = closed
             wd("POST", f"/session/{session}/window", {"handle": main_window})
             stage = "reopen exported PNG"
             upload = server_request("POST", "/v1/uploads", exported_png, {**authorization, "Content-Type": "application/octet-stream",
@@ -375,11 +405,23 @@ def main():
             open_editor(nodes["Diagram.drawio.png"])
             require(js("return document.querySelector('#status').textContent.includes('기기 초안을 복구했습니다.')"), "draft recovery was not reported")
             wd("POST", f"/session/{session}/frame", {"id": js("return document.querySelector('#diagram')")})
-            require(js("return document.querySelector('.geDiagramContainer')?.textContent.includes('저장 재시도 확인')"), "saved diagram edit was not restored")
+            require(js("return document.querySelector('.geDiagramContainer')?.textContent.includes('닫기 직전 입력')"), "active label input was not restored after close")
             wd("POST", f"/session/{session}/frame", {"id": None})
             js("document.querySelector('#close').click();document.querySelector('#discard-confirm').click()")
             wait(lambda: len(wd("GET", f"/session/{session}/window/handles")) == 1)
+            require(checkpoint()[2:] == retried[2:], "closing the restored draft changed its original base")
+            retried = checkpoint()
             wd("POST", f"/session/{session}/window", {"handle": main_window})
+            stage = "re-registration after closing the editor"
+            wait(lambda: js("return !!document.querySelector('.workspace-connect button:not(:disabled)')"))
+            submit_pair(admin("issue-pairing", status["owner_principal_id"]))
+            wait(lambda: invoke("workspace_sync_status", {"request": {"renderer_session_id": owner}})["binding"] not in (None, prior_binding))
+            require(checkpoint() == retried, "successful re-registration discarded the old diagram draft")
+            wait(lambda: js("const button=document.querySelector('[data-document=\"'+arguments[0]+'\"]:not(:disabled)');if(!button)return false;button.click();return true", nodes["Example.md"]["node_id"]))
+            wait(lambda: js("return document.querySelector('.cm-content')?.textContent.includes('Synthetic diagram')"))
+            if not js("return !!document.querySelector('.markdown-preview')"):
+                js("document.querySelector('#preview-toggle').click()")
+            wait(lambda: js("return !!document.querySelector('.diagram-trial')"))
             open_editor(nodes["Original.drawio"])
             wd("POST", f"/session/{session}/window", {"handle": main_window})
             stage = "renderer reload cleanup"
@@ -392,6 +434,8 @@ def main():
             (output / "result.json").write_text(json.dumps({"passed": True, "platform": "Linux WebKitGTK / Xvfb",
                 "input": "synthetic graph model change; physical IME not tested", "saving": "local XML draft and editable PNG copy; server source unchanged",
                 "export": "canvas failure preserves draft; native chooser, cancellation, no overwrite, embedded XML equality and actual reopen passed",
+                "close": "active label input checkpointed before closing and recovered on reopen",
+                "re_registration": "blocked while editor is open; allowed after close and old draft remains",
                 "full_app_restart": "not tested; SQLite reopen is covered by store tests"}, indent=2) + "\n")
         except Exception:
             if session:

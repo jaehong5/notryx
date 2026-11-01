@@ -83,6 +83,17 @@ test("페어링이 끝난 뒤 session-only 상태를 다시 확인한다", async
   expect((form.elements.namedItem("pairing_secret") as HTMLInputElement).value).toBe("");
 });
 
+test("열린 편집 창 때문에 재등록이 거절되면 닫은 뒤 다시 연결하도록 안내한다", async () => {
+  fakes.pair.mockRejectedValueOnce("open_edit_sessions");
+  await startApp();
+  document.querySelector<HTMLFormElement>(".workspace-connect")!
+    .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  await vi.waitFor(() => expect(fakes.pair).toHaveBeenCalledOnce());
+  await vi.waitFor(() => expect(document.body.textContent)
+    .toContain("열린 문서와 다이어그램 편집 창을 닫은 뒤 다시 연결해 주세요."));
+  expect(document.body.textContent).not.toContain("open_edit_sessions");
+});
+
 test("늦게 도착한 이전 상태와 오류의 비밀 텍스트를 표시하지 않는다", async () => {
   await startApp();
   let resolvePrevious!: (value: { status: string; renewal_status: string }) => void;

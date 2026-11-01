@@ -2982,6 +2982,45 @@ impl ClientStore {
         for row in rows {
             let operation_id: String = row.try_get("operation_id").map_err(storage_error)?;
             let intent_id: Option<String> = row.try_get("intent_id").map_err(storage_error)?;
+            if let Some((node, _, _)) = crate::diagram_conflicts::verified_completed(
+                &mut self.connection,
+                registration,
+                binding,
+                &operation_id,
+            )
+            .await?
+            {
+                if node != document_id {
+                    return Err(StoreError::UnsupportedFormat);
+                }
+                continue;
+            }
+            let diagram: i64 = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM diagram_drafts WHERE registration_id=? AND node_id=?)",
+            )
+            .bind(registration)
+            .bind(document_id)
+            .fetch_one(&mut self.connection)
+            .await
+            .map_err(storage_error)?;
+            if diagram != 0 {
+                let row = sqlx::query(
+                    "SELECT * FROM client_outbox WHERE registration_id=? AND operation_id=?",
+                )
+                .bind(registration)
+                .bind(&operation_id)
+                .fetch_one(&mut self.connection)
+                .await
+                .map_err(storage_error)?;
+                let item = crate::outbox::operation(&row, binding, false)?;
+                if item.status != crate::OutboxStatus::Conflict || item.failure_kind.is_some() {
+                    return Err(StoreError::UnsupportedFormat);
+                }
+                return Ok(Some(ContentConflictRef {
+                    operation_id,
+                    operation_seq: item.operation_seq,
+                }));
+            }
             if intent_id.is_some()
                 && verified_completed_merge(
                     &mut self.connection,

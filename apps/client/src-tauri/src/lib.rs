@@ -1494,6 +1494,8 @@ pub fn run() {
             drawio_native::drawio_checkpoint,
             drawio_native::drawio_save,
             drawio_native::drawio_save_status,
+            drawio_native::conflict::drawio_prepare_conflict_remote,
+            drawio_native::conflict::drawio_choose_conflict_remote,
             drawio_native::drawio_export_png,
             drawio_native::drawio_close,
             mermaid_native::mermaid_render,

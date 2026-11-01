@@ -10,6 +10,7 @@ mod content_cache;
 mod content_conflict;
 mod credential;
 mod deleted_draft_copy;
+mod diagram_conflicts;
 mod diagram_drafts;
 mod outbox;
 mod recovery;
@@ -27,6 +28,7 @@ pub use deleted_draft_copy::{
     DeletedDraftCopyBlockingFollowup, DeletedDraftCopyCreateState, DeletedDraftCopyEvidence,
     DeletedDraftCopyIntent, DeletedDraftCopyRequest, DeletedDraftCopyStatus,
 };
+pub use diagram_conflicts::DiagramConflictCopy;
 pub use diagram_drafts::{DiagramDraft, DiagramDraftCheckpoint};
 pub use outbox::{
     CreateOutboxOperation, CreateOutboxPage, CreateOutboxState, DeleteOutboxOperation,
@@ -152,7 +154,7 @@ pub struct PersistedDraft {
 }
 
 const APPLICATION_ID: i64 = 0x4e545258;
-const SCHEMA_VERSION: i64 = 26;
+const SCHEMA_VERSION: i64 = 27;
 
 struct EditSession {
     // A remote refresh preserves the old checkpoint until the next local save.
@@ -311,6 +313,7 @@ impl ClientStore {
                     | 23
                     | 24
                     | 25
+                    | 26
                     | SCHEMA_VERSION
             ) || application_id != APPLICATION_ID
             {
@@ -388,6 +391,7 @@ impl ClientStore {
             || existing_version == 23
             || existing_version == 24
             || existing_version == 25
+            || existing_version == 26
         {
             // Rebuild the outbox without rewriting references in its dependent tables.
             sqlx::query("PRAGMA foreign_keys=OFF")
@@ -652,7 +656,13 @@ impl ClientStore {
                     .await
                     .map_err(storage_error)?;
             }
-            diagram_drafts::upgrade_v26(&mut transaction).await?;
+            if initialize || existing_version <= 25 {
+                diagram_drafts::upgrade_v26(&mut transaction).await?;
+            }
+            sqlx::raw_sql(diagram_conflicts::UPGRADE_V27)
+                .execute(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
             if sqlx::query("PRAGMA foreign_key_check")
                 .fetch_optional(&mut *transaction)
                 .await

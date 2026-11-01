@@ -9,6 +9,8 @@
     "allow-drawio-checkpoint",
     "allow-drawio-save",
     "allow-drawio-save-status",
+    "allow-drawio-prepare-conflict-remote",
+    "allow-drawio-choose-conflict-remote",
     "allow-drawio-export-png",
     "allow-drawio-close"
   ]

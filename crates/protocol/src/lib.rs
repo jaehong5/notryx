@@ -2048,6 +2048,21 @@ pub struct DrawioSaveState {
     pub generation: Option<String>,
     pub matches_draft: bool,
     pub status: WorkspaceSendStatus,
+    pub can_choose_remote: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct DrawioConflictRequest {
+    pub generation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct DrawioConflictChoice {
+    pub generation: String,
+    pub operation_id: String,
+    pub remote_revision: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]

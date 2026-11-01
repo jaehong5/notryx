@@ -3566,6 +3566,19 @@ impl ClientStore {
         .map_err(storage_error)?;
         let mut has_conflict = false;
         for (operation_id, generation, through) in conflicts {
+            if let Some((node, _, _)) = crate::diagram_conflicts::verified_completed(
+                &mut transaction,
+                registration_id,
+                binding,
+                &operation_id,
+            )
+            .await?
+            {
+                if node != document_id {
+                    return Err(StoreError::UnsupportedFormat);
+                }
+                continue;
+            }
             if generation.is_none() && through.is_none() {
                 if let Some((resolved_document, _)) =
                     crate::content_conflict::verified_completed_merge(

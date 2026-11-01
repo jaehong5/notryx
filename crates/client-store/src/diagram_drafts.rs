@@ -35,7 +35,7 @@ pub struct DiagramDraftCheckpoint {
     pub base_revision: String,
 }
 
-fn validate_node(node_id: &str) -> Result<(), StoreError> {
+pub(crate) fn validate_node(node_id: &str) -> Result<(), StoreError> {
     let node = node_id
         .parse::<NodeId>()
         .map_err(|_| StoreError::InvalidDocument)?;
@@ -45,7 +45,10 @@ fn validate_node(node_id: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn decode(row: sqlx::sqlite::SqliteRow, node_id: &str) -> Result<DiagramDraft, StoreError> {
+pub(crate) fn decode(
+    row: sqlx::sqlite::SqliteRow,
+    node_id: &str,
+) -> Result<DiagramDraft, StoreError> {
     let generation: i64 = row.try_get("generation").map_err(storage_error)?;
     let xml: String = row.try_get("xml").map_err(storage_error)?;
     let base_xml: String = row.try_get("base_xml").map_err(storage_error)?;
@@ -172,7 +175,11 @@ impl ClientStore {
                 return Err(StoreError::StaleGeneration);
             }
             let old_xml = operation_xml(&mut transaction, &old).await?;
-            if old.bytes.starts_with(b"\x89PNG\r\n\x1a\n") != png.is_some() {
+            if matches!(
+                old.status,
+                OutboxStatus::Queued | OutboxStatus::Sent | OutboxStatus::Committed
+            ) && old.bytes.starts_with(b"\x89PNG\r\n\x1a\n") != png.is_some()
+            {
                 return Err(StoreError::InvalidRequest);
             }
             match old.status {
@@ -199,6 +206,25 @@ impl ClientStore {
                     }
                     if draft.generation == old.generation {
                         return Err(StoreError::GenerationMismatch);
+                    }
+                }
+                OutboxStatus::Conflict if old.failure_kind.is_none() => {
+                    let Some((node, _, resolved)) = crate::diagram_conflicts::verified_completed(
+                        &mut transaction,
+                        registration_id,
+                        binding,
+                        &old.operation_id,
+                    )
+                    .await?
+                    else {
+                        return Err(StoreError::OutboxBlocked);
+                    };
+                    if node != node_id
+                        || draft.generation < resolved.generation
+                        || draft.base_xml != resolved.base_xml
+                        || draft.base_revision != resolved.base_revision
+                    {
+                        return Err(StoreError::OutboxBlocked);
                     }
                 }
                 _ => return Err(StoreError::OutboxBlocked),
@@ -333,7 +359,7 @@ pub(crate) async fn apply_commit(
 
 pub(crate) const MAX_DIAGRAM_BYTES: usize = 25 * 1024 * 1024;
 
-async fn operation_xml(
+pub(crate) async fn operation_xml(
     connection: &mut sqlx::SqliteConnection,
     item: &OutboxOperation,
 ) -> Result<String, StoreError> {

@@ -30,8 +30,10 @@ beforeEach(() => {
     constructor() { receive = value => this.port1.onmessage?.({ data: JSON.stringify(value) } as MessageEvent); }
   });
   document.body.innerHTML = new DOMParser().parseFromString(html, "text/html").body.innerHTML;
-  dialog().showModal = () => { dialog().open = true; };
-  dialog().close = () => { dialog().open = false; };
+  for (const element of document.querySelectorAll("dialog")) {
+    element.showModal = () => { element.open = true; };
+    element.close = () => { element.open = false; };
+  }
   invoke.mockReset().mockImplementation(async (command: string) => {
     if (command === "drawio_load") return {
       title: "Synthetic.drawio", xml: "<mxfile/>", generation: "0", restored: false, source_changed: false,
@@ -91,6 +93,154 @@ test("a conflict preserves the open editor and reports both copies are retained"
   expect(document.querySelector("#server-status")!.textContent).toContain("서버 원본이 바뀌어");
   expect(document.querySelector("#diagram")).not.toBeNull();
   expect(invoke).not.toHaveBeenCalledWith("drawio_close");
+});
+
+const remoteXml = '<mxfile><diagram>서버 원본</diagram></mxfile>';
+async function openConflict(): Promise<void> {
+  const previous = invoke.getMockImplementation()!;
+  let generation = 0;
+  let copied = false;
+  invoke.mockImplementation((command: string) => {
+    if (command === "drawio_checkpoint") return Promise.resolve({ generation: String(++generation) });
+    if (command === "drawio_save_status") return Promise.resolve({ generation: "0", matches_draft: false,
+      status: "conflict", can_choose_remote: copied });
+    if (command === "drawio_export_png") { copied = true; return Promise.resolve(true); }
+    if (command === "drawio_prepare_conflict_remote") return Promise.resolve({ generation: String(generation),
+      operation_id: "conflict-operation", remote_revision: "remote-revision" });
+    if (command === "drawio_choose_conflict_remote") {
+      generation += 1;
+      return Promise.resolve({ title: "Synthetic.drawio", xml: remoteXml, generation: String(generation),
+        restored: true, source_changed: false, can_save: true });
+    }
+    return previous(command);
+  });
+  await open();
+  await settle();
+}
+
+async function exportCopy(): Promise<void> {
+  button("export-png").click();
+  receive({ event: "snapshot", requestId: snapshot(), xml: latestXml });
+  await settle();
+  const request = sent.filter(value => value.action === "export").at(-1)!;
+  receive({ event: "export", requestId: request.requestId, data: "data:image/png;base64,aGVsbG8=" });
+  await settle();
+}
+
+async function prepareRemote(): Promise<void> {
+  button("choose-remote").click();
+  receive({ event: "snapshot", requestId: snapshot(), xml: latestXml });
+  await settle();
+}
+
+test("remote selection requires a PNG copy and exporting alone keeps the conflict", async () => {
+  await openConflict();
+  expect(button("choose-remote").disabled).toBe(true);
+  button("choose-remote").click();
+  expect(invoke).not.toHaveBeenCalledWith("drawio_prepare_conflict_remote", expect.anything());
+  await exportCopy();
+  expect(button("choose-remote").disabled).toBe(false);
+  expect(document.querySelector("#server-status")!.textContent).toContain("서버 원본이 바뀌어");
+  expect(invoke).not.toHaveBeenCalledWith("drawio_choose_conflict_remote", expect.anything());
+  expect(sent.filter(value => value.action === "load")).toHaveLength(1);
+});
+
+test("cancelling the separate remote confirmation preserves the local draft and conflict", async () => {
+  await openConflict();
+  await exportCopy();
+  await prepareRemote();
+  expect(invoke).toHaveBeenCalledWith("drawio_prepare_conflict_remote", { request: { generation: "2" } });
+  expect(document.querySelector<HTMLDialogElement>("#conflict-remote")!.open).toBe(true);
+  expect(document.querySelector<HTMLIFrameElement>("#diagram")!.inert).toBe(true);
+  button("remote-cancel").click();
+  await settle();
+  expect(invoke).not.toHaveBeenCalledWith("drawio_choose_conflict_remote", expect.anything());
+  expect(document.querySelector("#server-status")!.textContent).toContain("서버 원본이 바뀌어");
+  expect(sent.filter(value => value.action === "load")).toHaveLength(1);
+  receive({ event: "autosave", xml: latestXml });
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(invoke).toHaveBeenCalledWith("drawio_checkpoint", { request: { generation: "2", xml: latestXml } });
+});
+
+test("failed remote confirmation preserves the existing generation and allows editing", async () => {
+  await openConflict();
+  await exportCopy();
+  await prepareRemote();
+  const previous = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command: string) => command === "drawio_choose_conflict_remote"
+    ? Promise.reject(new Error("remote changed")) : previous(command));
+  button("remote-confirm").click();
+  await settle();
+  expect(document.querySelector("#status")!.textContent).toContain("기기 초안");
+  expect(sent.filter(value => value.action === "load")).toHaveLength(1);
+  receive({ event: "autosave", xml: latestXml });
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(invoke).toHaveBeenCalledWith("drawio_checkpoint", { request: { generation: "2", xml: latestXml } });
+});
+
+test("explicit remote confirmation resumes editing only after loading the new generation", async () => {
+  await openConflict();
+  await exportCopy();
+  await prepareRemote();
+  button("remote-confirm").click();
+  await settle();
+  expect(invoke).toHaveBeenCalledWith("drawio_choose_conflict_remote", { request: {
+    generation: "2", operation_id: "conflict-operation", remote_revision: "remote-revision",
+  } });
+  expect(sent.filter(value => value.action === "load").at(-1)?.xml).toBe(remoteXml);
+  expect(button("save-server").disabled).toBe(true);
+  receive({ event: "autosave", xml: latestXml });
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(invoke.mock.calls.filter(([command]) => command === "drawio_checkpoint")).toHaveLength(2);
+  receive({ event: "load" });
+  expect(button("save-server").disabled).toBe(false);
+  const editedXml = '<mxfile><diagram>서버 원본에서 계속 편집</diagram></mxfile>';
+  receive({ event: "autosave", xml: editedXml });
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(invoke).toHaveBeenCalledWith("drawio_checkpoint", { request: { generation: "3", xml: editedXml } });
+  expect(invoke).not.toHaveBeenCalledWith("drawio_save", expect.anything());
+});
+
+test("selecting a remote PNG changes subsequent server saves to PNG export", async () => {
+  await openConflict();
+  await exportCopy();
+  await prepareRemote();
+  const previous = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command: string) => {
+    const result = await previous(command);
+    return command === "drawio_choose_conflict_remote" ? { ...result, title: "Synthetic.drawio.png" } : result;
+  });
+  button("remote-confirm").click();
+  await settle();
+  receive({ event: "load" });
+  const previousExports = sent.filter(value => value.action === "export").length;
+  button("save-server").click();
+  receive({ event: "snapshot", requestId: snapshot(), xml: remoteXml });
+  await settle();
+  expect(sent.filter(value => value.action === "export")).toHaveLength(previousExports + 1);
+  expect(document.querySelector("#save-mode")!.textContent).toContain("PNG 원본");
+  expect(invoke).not.toHaveBeenCalledWith("drawio_save", expect.anything());
+  const request = sent.filter(value => value.action === "export").at(-1)!;
+  expect(request.xml).toBe(remoteXml);
+  receive({ event: "export", requestId: request.requestId, data: "data:image/png;base64,aGVsbG8=" });
+  await settle();
+  expect(invoke).toHaveBeenCalledWith("drawio_save", { request: { generation: "4", png_base64: "aGVsbG8=" } });
+});
+
+test("failed remote loading never checkpoints the previous XML again", async () => {
+  await openConflict();
+  await exportCopy();
+  await prepareRemote();
+  button("remote-confirm").click();
+  await settle();
+  await vi.advanceTimersByTimeAsync(30_000);
+  receive({ event: "autosave", xml: latestXml });
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(invoke.mock.calls.filter(([command]) => command === "drawio_checkpoint")).toHaveLength(2);
+  expect(button("save-server").disabled).toBe(true);
+  expect(document.querySelector("#status")!.textContent).toContain("다시 열어");
+  await confirmClose();
+  expect(invoke).toHaveBeenCalledWith("drawio_close");
 });
 
 test("polling reports authentication blockage without closing the editor or stopping local drafts", async () => {

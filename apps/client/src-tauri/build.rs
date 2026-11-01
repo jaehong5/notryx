@@ -12,6 +12,8 @@ fn main() {
             "drawio_checkpoint",
             "drawio_save",
             "drawio_save_status",
+            "drawio_prepare_conflict_remote",
+            "drawio_choose_conflict_remote",
             "drawio_export_png",
             "drawio_close",
             "mermaid_render",

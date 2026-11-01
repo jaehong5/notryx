@@ -1581,6 +1581,42 @@
       "title": "DrawioCheckpointRequest",
       "type": "object"
     },
+    "DrawioConflictChoice": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": "string"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "remote_revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "generation",
+        "operation_id",
+        "remote_revision"
+      ],
+      "title": "DrawioConflictChoice",
+      "type": "object"
+    },
+    "DrawioConflictRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "generation"
+      ],
+      "title": "DrawioConflictRequest",
+      "type": "object"
+    },
     "DrawioEditorInput": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -1688,6 +1724,9 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "can_choose_remote": {
+          "type": "boolean"
+        },
         "generation": {
           "type": [
             "string",
@@ -1703,7 +1742,8 @@
       },
       "required": [
         "matches_draft",
-        "status"
+        "status",
+        "can_choose_remote"
       ],
       "title": "DrawioSaveState",
       "type": "object"

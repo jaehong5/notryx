@@ -8,6 +8,9 @@ use notryx_protocol::{
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, Webview};
 
+#[path = "drawio_conflict_native.rs"]
+pub(crate) mod conflict;
+
 const WRAPPER_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; frame-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
 fn editor_csp(origin: &str) -> String {
     format!(
@@ -63,6 +66,7 @@ struct EditorSession {
     input: Option<DrawioEditorInput>,
     base_xml: String,
     base_revision: String,
+    remote_choice: Option<conflict::PreparedRemote>,
 }
 
 pub(crate) struct PreparedEditor {
@@ -300,6 +304,7 @@ pub(crate) async fn drawio_open(
                     input: Some(input.input),
                     base_xml: input.base_xml,
                     base_revision: input.base_revision,
+                    remote_choice: None,
                 },
             )?;
         }
@@ -557,6 +562,7 @@ async fn save_state(
         match outbox.latest.as_ref().map(|item| item.status) {
             None => WorkspaceSendStatus::Idle,
             Some(OutboxStatus::Committed) => WorkspaceSendStatus::Committed,
+            Some(OutboxStatus::Conflict) => WorkspaceSendStatus::Idle,
             Some(OutboxStatus::Queued | OutboxStatus::Sent) => {
                 if state.transmission_gate.blocked(&binding) {
                     state.transmission_gate.blocked_status(&binding)
@@ -586,6 +592,13 @@ async fn save_state(
         generation: draft.map(|item| item.generation.to_string()),
         matches_draft,
         status,
+        can_choose_remote: outbox.has_conflict
+            && state
+                .store
+                .read_diagram_conflict_copy(&binding, &node_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .is_some(),
     })
 }
 
@@ -771,14 +784,16 @@ pub(crate) async fn drawio_export_png(
         };
         let mut state = runtime.0.clone().lock_owned().await;
         export_xml(&mut state, &sessions, &label, generation).await?;
-        tokio::task::spawn_blocking(move || {
-            let _state = state;
+        let png_hash = notryx_protocol::content_hash(&bytes);
+        let export_app = app.clone();
+        let export_label = label.clone();
+        let mut state = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let sessions = app.state::<EditorSessions>();
+            let sessions = export_app.state::<EditorSessions>();
             let editor = sessions.0.lock().map_err(|_| "drawio_unavailable")?;
             if !editor
                 .as_ref()
-                .is_some_and(|current| current.label == label && current.input.is_none())
+                .is_some_and(|current| current.label == export_label && current.input.is_none())
             {
                 return Err("invalid_caller".into());
             }
@@ -789,10 +804,22 @@ pub(crate) async fn drawio_export_png(
                     "drawio_export_failed".to_owned()
                 }
             })?;
-            Ok(true)
+            Ok::<_, String>(state)
         })
         .await
-        .map_err(|_| "drawio_export_failed")?
+        .map_err(|_| "drawio_export_failed")??;
+        let editor = save_editor(&state, &sessions, &label)?;
+        state
+            .store
+            .record_diagram_conflict_copy(
+                &crate::registration_binding(editor.session.binding()),
+                &editor.request.node.node_id.to_string(),
+                generation,
+                &png_hash,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(true)
     }
 }
 
@@ -817,6 +844,7 @@ pub(crate) mod tests {
                     input: None,
                     base_xml: prepared.base_xml,
                     base_revision: prepared.base_revision,
+                    remote_choice: None,
                 },
             )
             .unwrap();
@@ -1051,6 +1079,7 @@ pub(crate) mod tests {
                     input: None,
                     base_xml: prepared.base_xml.clone(),
                     base_revision: prepared.base_revision.clone(),
+                    remote_choice: None,
                 },
             )
             .unwrap();
@@ -1223,6 +1252,8 @@ pub(crate) mod tests {
                 "allow-drawio-checkpoint",
                 "allow-drawio-save",
                 "allow-drawio-save-status",
+                "allow-drawio-prepare-conflict-remote",
+                "allow-drawio-choose-conflict-remote",
                 "allow-drawio-export-png",
                 "allow-drawio-close"
             ])

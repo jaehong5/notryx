@@ -189,6 +189,8 @@ def main():
             require(not native("drawio_checkpoint", {"request": {"generation": "0", "xml": raw.decode()}})["ok"], "main window wrote a diagram draft")
             require(not native("drawio_save", {"request": {"generation": "1"}})["ok"], "main window queued diagram content")
             require(not native("drawio_save_status")["ok"], "main window accessed diagram save status")
+            require(not native("drawio_prepare_conflict_remote", {"request": {"generation": "1"}})["ok"], "main window prepared a diagram conflict choice")
+            require(not native("drawio_choose_conflict_remote", {"request": {"generation": "1", "operation_id": WORKSPACE.operation_id(), "remote_revision": "invalid"}})["ok"], "main window resolved a diagram conflict")
             require(not native("drawio_export_png", {"request": {"generation": "1", "png_base64": ""}})["ok"], "main window exported a diagram")
             require(not native("drawio_close")["ok"], "main window closed another session")
 
@@ -545,6 +547,60 @@ def main():
             conflict_xml = xml_checkpoint()
             require("XML local conflict" in conflict_xml[1] and conflict_xml[2:] == saved_xml[2:], "conflict discarded local XML or changed base")
             require((root / "notes/Original.drawio").read_bytes() == remote_xml, "conflict overwrote remote XML")
+            stage = "diagram conflict requires a durable local PNG copy"
+            require(js("return document.querySelector('#choose-remote').disabled"), "remote choice was enabled before saving a copy")
+            require(not native("drawio_prepare_conflict_remote", {"request": {"generation": str(conflict_xml[0])}})["ok"], "native accepted remote choice without a copy")
+            export(None)
+            require(js("return document.querySelector('#choose-remote').disabled"), "cancelled export allowed conflict resolution")
+            export(existing)
+            require(js("return document.querySelector('#choose-remote').disabled"), "failed export allowed conflict resolution")
+            require(xml_checkpoint()[1:] == conflict_xml[1:] and (root / "notes/Original.drawio").read_bytes() == remote_xml,
+                    "unsuccessful conflict export lost a draft or changed the server")
+            conflict_copy = export_dir / "conflict.drawio.png"
+            export(conflict_copy)
+            require(conflict_copy.exists(), "conflict copy was not saved")
+            wait(lambda: js("return !document.querySelector('#choose-remote').disabled"))
+            require(invoke("drawio_save_status")["status"] == "conflict", "copy export silently resolved the conflict")
+            copied = xml_checkpoint()
+            js("document.querySelector('#choose-remote').click()")
+            wait(lambda: js("return document.querySelector('#conflict-remote').open"))
+            js("document.querySelector('#remote-cancel').click()")
+            require(xml_checkpoint()[1:] == copied[1:] and (root / "notes/Original.drawio").read_bytes() == remote_xml,
+                    "cancelled remote choice changed either copy")
+            stage = "diagram conflict rejects changed remote content"
+            js("document.querySelector('#choose-remote').click()")
+            wait(lambda: js("return document.querySelector('#conflict-remote').open"))
+            newer = server_request("GET", f"/v1/nodes/{current['node_id']}", headers=authorization)
+            newer_xml = raw.replace(b"XML original", b"XML newer remote")
+            server_request("PUT", f"/v1/nodes/{current['node_id']}/content", newer_xml, {**authorization,
+                "Content-Type": "application/octet-stream", "If-Match": newer["content_etag"],
+                "Content-Digest": "sha-256=:" + base64.b64encode(hashlib.sha256(newer_xml).digest()).decode() + ":",
+                "X-Workspace-Epoch": info["workspace_epoch"], "X-Device-Stream": pair["device_stream_id"],
+                "X-Operation-Seq": str(len(originals) + 3), "Idempotency-Key": WORKSPACE.operation_id()})
+            js("document.querySelector('#remote-confirm').click()")
+            wait(lambda: js("return !document.querySelector('#conflict-remote').open && !document.querySelector('#export-png').disabled"))
+            require(xml_checkpoint()[1:] == copied[1:] and (root / "notes/Original.drawio").read_bytes() == newer_xml,
+                    "stale confirmation discarded local or remote data")
+            require(invoke("drawio_save_status")["status"] == "conflict", "stale confirmation resolved the conflict")
+            stage = "diagram conflict remote choice resumes editing"
+            wait(lambda: js("return !document.querySelector('#choose-remote').disabled"))
+            js("document.querySelector('#choose-remote').click()")
+            wait(lambda: js("return document.querySelector('#conflict-remote').open"))
+            js("document.querySelector('#remote-confirm').click()")
+            wait(lambda: js("return !document.querySelector('#save-server').disabled && document.querySelector('#status').textContent.includes('서버 원본을 다시 불러왔습니다.')"))
+            restored_xml = xml_checkpoint()
+            require(restored_xml[1] == restored_xml[2] and "XML newer remote" in restored_xml[1], "remote choice did not update the durable draft and base")
+            require((root / "notes/Original.drawio").read_bytes() == newer_xml, "remote choice wrote the server source")
+            with sqlite3.connect(f"file:{root / 'client/drafts.sqlite3'}?mode=ro", uri=True) as db:
+                require(db.execute("SELECT count(*) FROM client_outbox WHERE document_id=? AND status='conflict'",
+                                   (nodes["Original.drawio"]["node_id"],)).fetchone()[0] == 1,
+                        "remote choice changed the historical conflict receipt")
+            edit_label("XML editing resumed")
+            js("document.querySelector('#save-server').click()")
+            wait(lambda: js("return document.querySelector('#server-status').textContent==='서버에 저장했습니다.'"), seconds=45)
+            conflict_xml = xml_checkpoint()
+            require("XML editing resumed" in conflict_xml[1] and conflict_xml[1] == conflict_xml[2]
+                    and (root / "notes/Original.drawio").read_bytes() == conflict_xml[1].encode(), "saving after conflict resolution did not resume")
             wd("POST", f"/session/{session}/window", {"handle": main_window})
             stage = "renderer reload cleanup"
             previous_owner = invoke("m0_renderer_session")
@@ -566,6 +622,7 @@ def main():
                 "input": "synthetic graph model change; physical IME not tested", "saving": "PNG original exact-byte save/reopen; XML save after offline queue/reconnect and concurrent conflict preservation",
                 "export": "canvas failure preserves draft; native chooser, cancellation, no overwrite, embedded XML equality and actual reopen passed",
                 "authentication": "revoked device stops transfer, shows reconnection guidance and preserves queued PNG plus later local edits",
+                "conflict_resolution": "local PNG copy required; cancellation, failed export and changed remote preserve both copies; explicit remote choice and later conditional save passed",
                 "close": "active label input checkpointed before closing and recovered on reopen",
                 "re_registration": "blocked while editor is open; allowed after close and old draft remains",
                 "full_app_restart": "not tested; SQLite reopen is covered by store tests"}, indent=2) + "\n")

@@ -479,7 +479,7 @@ async fn v24_upgrade_preserves_existing_drafts_and_credential_expiry() {
         .unwrap();
     store.close().await.unwrap();
     let mut db = connect(&path).await;
-    sqlx::raw_sql("DROP TABLE IF EXISTS diagram_save_snapshots; DROP TABLE IF EXISTS diagram_drafts; PRAGMA user_version=24;")
+    sqlx::raw_sql("DROP TABLE IF EXISTS diagram_conflict_copies; DROP TABLE IF EXISTS diagram_save_snapshots; DROP TABLE IF EXISTS diagram_drafts; PRAGMA user_version=24;")
         .execute(&mut db)
         .await
         .unwrap();
@@ -534,7 +534,7 @@ async fn v24_upgrade_preserves_existing_drafts_and_credential_expiry() {
             .fetch_one(&mut db)
             .await
             .unwrap(),
-        26
+        27
     );
 }
 

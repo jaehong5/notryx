@@ -93,6 +93,47 @@ test("a conflict preserves the open editor and reports both copies are retained"
   expect(invoke).not.toHaveBeenCalledWith("drawio_close");
 });
 
+test("polling reports authentication blockage without closing the editor or stopping local drafts", async () => {
+  const previous = invoke.getMockImplementation()!;
+  let transferStatus = "pending";
+  let generation = 0;
+  invoke.mockImplementation((command: string) => {
+    if (command === "drawio_checkpoint") return Promise.resolve({ generation: String(++generation) });
+    if (command === "drawio_save_status") return Promise.resolve({ generation: String(generation), matches_draft: true, status: transferStatus });
+    return previous(command);
+  });
+  await open();
+  button("save-server").click();
+  receive({ event: "snapshot", requestId: snapshot(), xml: latestXml });
+  await settle();
+  expect(document.querySelector("#server-status")!.textContent).toContain("서버 전송 대기");
+  transferStatus = "auth_required";
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(document.querySelector("#server-status")!.textContent).toContain("기기 인증");
+  expect(document.querySelector("#server-status")!.textContent).toContain("메인 창에서 다시 연결");
+  expect(document.querySelector("#server-status")!.textContent).toContain("기기 초안은 유지");
+  expect(invoke.mock.calls.filter(([command]) => command === "drawio_checkpoint")).toHaveLength(1);
+  expect(invoke).not.toHaveBeenCalledWith("drawio_close");
+  expect(document.querySelector("#diagram")).not.toBeNull();
+  const laterXml = "<mxfile><diagram>인증 대기 중 추가 입력</diagram></mxfile>";
+  receive({ event: "autosave", xml: laterXml });
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(invoke).toHaveBeenCalledWith("drawio_checkpoint", { request: { generation: "1", xml: laterXml } });
+  expect(document.querySelector("#status")!.textContent).toContain("기기에 초안을 저장했습니다.");
+  expect(document.querySelector("#server-status")!.textContent).toContain("메인 창에서 다시 연결");
+  expect(button("close").disabled).toBe(false);
+});
+
+test("sync_pending reports synchronization wait instead of prompting another save", async () => {
+  const previous = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command: string) => command === "drawio_save_status"
+    ? Promise.resolve({ generation: "1", matches_draft: true, status: "sync_pending" }) : previous(command));
+  await open();
+  await settle();
+  expect(document.querySelector("#server-status")!.textContent).toContain("동기화 확인을 기다리고 있습니다");
+  expect(document.querySelector("#server-status")!.textContent).toContain("기기 초안은 유지");
+});
+
 test("PNG server save exports the durable snapshot before queuing original PNG bytes", async () => {
   const previous = invoke.getMockImplementation()!;
   invoke.mockImplementation((command: string) => command === "drawio_load"

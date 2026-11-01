@@ -192,6 +192,19 @@ def main():
             require(not native("drawio_export_png", {"request": {"generation": "1", "png_base64": ""}})["ok"], "main window exported a diagram")
             require(not native("drawio_close")["ok"], "main window closed another session")
 
+            def edit_label(value):
+                wd("POST", f"/session/{session}/frame", {"id": js("return document.querySelector('#diagram')")})
+                require(js("""const original=mxGraph.prototype.dblClick;let graph;
+                    mxGraph.prototype.dblClick=function(...args){graph=this;return original.apply(this,args);};
+                    const target=document.querySelector('.geDiagramContainer svg text, .geDiagramContainer svg foreignObject');
+                    if(!target)return false;
+                    const rect=target.getBoundingClientRect();
+                    target.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,clientX:rect.x+2,clientY:rect.y+2}));
+                    mxGraph.prototype.dblClick=original;
+                    if(!graph)return false;graph.stopEditing(true);
+                    graph.cellLabelChanged(graph.getModel().getCell('2'),arguments[0]);return true;""", value), "diagram graph edit failed")
+                wd("POST", f"/session/{session}/frame", {"id": None})
+
             def open_editor(node, check_duplicate=False):
                 nonlocal stage
                 stage = "opening bundled editor"
@@ -451,6 +464,24 @@ def main():
             wd("POST", f"/session/{session}/frame", {"id": js("return document.querySelector('#diagram')")})
             require(js("return document.querySelector('.geDiagramContainer')?.textContent.includes('닫기 직전 입력')"), "saved PNG could not reopen its editing data")
             wd("POST", f"/session/{session}/frame", {"id": None})
+            stage = "revoked authentication preserves diagram edits"
+            require(admin("revoke-device", prior_binding["device_id"])["kind"] == "done", "synthetic device revoke failed")
+            edit_label("인증 확인 전 편집")
+            js("document.querySelector('#save-server').click()")
+            wait(lambda: js("return document.querySelector('#server-status').textContent.includes('메인 창에서 다시 연결')"))
+            denied_draft = checkpoint()
+            require("인증 확인 전 편집" in denied_draft[1] and denied_draft[2:] == saved_png_draft[2:],
+                    "authentication rejection changed the base or lost the draft")
+            require((root / "notes/Diagram.drawio.png").read_bytes() == saved_png, "authentication rejection changed server PNG")
+            with sqlite3.connect(f"file:{root / 'client/drafts.sqlite3'}?mode=ro", uri=True) as db:
+                pending = db.execute("SELECT bytes,status FROM client_outbox WHERE document_id=? ORDER BY operation_seq DESC LIMIT 1",
+                                     (nodes["Diagram.drawio.png"]["node_id"],)).fetchone()
+            require(pending and pending[0].startswith(b"\x89PNG\r\n\x1a\n") and pending[1] in ("queued", "sent"),
+                    "authentication rejection discarded the queued PNG")
+            edit_label("인증 확인 중 추가 편집")
+            wait(lambda: checkpoint()[0] > denied_draft[0] and "인증 확인 중 추가 편집" in checkpoint()[1])
+            require(js("return document.querySelector('#server-status').textContent.includes('메인 창에서 다시 연결')"),
+                    "local editing hid authentication recovery guidance")
             js("document.querySelector('#close').click();document.querySelector('#discard-confirm').click()")
             wait(lambda: len(wd("GET", f"/session/{session}/window/handles")) == 1)
             retried = checkpoint()
@@ -468,25 +499,12 @@ def main():
             open_editor(nodes["Original.drawio"])
             stage = "XML conditional server save"
             require(js("return !document.querySelector('#save-server').hidden"), "XML source cannot save to server")
-            def edit_xml_label(value):
-                wd("POST", f"/session/{session}/frame", {"id": js("return document.querySelector('#diagram')")})
-                require(js("""const original=mxGraph.prototype.dblClick;let graph;
-                    mxGraph.prototype.dblClick=function(...args){graph=this;return original.apply(this,args);};
-                    const target=document.querySelector('.geDiagramContainer svg text, .geDiagramContainer svg foreignObject');
-                    if(!target)return false;
-                    const rect=target.getBoundingClientRect();
-                    target.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,clientX:rect.x+2,clientY:rect.y+2}));
-                    mxGraph.prototype.dblClick=original;
-                    if(!graph)return false;graph.stopEditing(true);
-                    graph.cellLabelChanged(graph.getModel().getCell('2'),arguments[0]);return true;""", value), "XML graph edit failed")
-                wd("POST", f"/session/{session}/frame", {"id": None})
-
             def xml_checkpoint():
                 with sqlite3.connect(f"file:{root / 'client/drafts.sqlite3'}?mode=ro", uri=True) as db:
                     return db.execute("SELECT generation,xml,base_xml,base_revision FROM diagram_drafts WHERE node_id=?",
                                       (nodes["Original.drawio"]["node_id"],)).fetchone()
 
-            edit_xml_label("XML server saved")
+            edit_label("XML server saved")
             stop(server)
             server = None
             js("document.querySelector('#save-server').click()")
@@ -514,7 +532,7 @@ def main():
             open_editor(nodes["Original.drawio"])
             wait(lambda: js("return document.querySelector('#server-status').textContent==='서버에 저장했습니다.'"))
             stage = "XML concurrent server edit preserves both copies"
-            edit_xml_label("XML local conflict")
+            edit_label("XML local conflict")
             current = server_request("GET", f"/v1/nodes/{nodes['Original.drawio']['node_id']}", headers=authorization)
             remote_xml = raw.replace(b"XML original", b"XML remote edit")
             server_request("PUT", f"/v1/nodes/{current['node_id']}/content", remote_xml, {**authorization,
@@ -529,8 +547,12 @@ def main():
             require((root / "notes/Original.drawio").read_bytes() == remote_xml, "conflict overwrote remote XML")
             wd("POST", f"/session/{session}/window", {"handle": main_window})
             stage = "renderer reload cleanup"
-            wd("POST", f"/session/{session}/refresh", {})
+            previous_owner = invoke("m0_renderer_session")
+            # Reload destroys a second webview; avoid WebDriver's navigation wait and verify completion below.
+            js("setTimeout(() => location.reload(), 0)")
             wait(lambda: len(wd("GET", f"/session/{session}/window/handles")) == 1)
+            wait(lambda: js("return document.readyState === 'complete' && !!window.__TAURI_INTERNALS__"))
+            require(invoke("m0_renderer_session") != previous_owner, "renderer reload did not replace its owner")
             require(checkpoint() == retried, "renderer reload changed the diagram draft")
             require(xml_checkpoint() == conflict_xml, "renderer reload changed the conflicting XML draft")
             for name, content in originals.items():
@@ -543,10 +565,12 @@ def main():
             (output / "result.json").write_text(json.dumps({"passed": True, "platform": "Linux WebKitGTK / Xvfb",
                 "input": "synthetic graph model change; physical IME not tested", "saving": "PNG original exact-byte save/reopen; XML save after offline queue/reconnect and concurrent conflict preservation",
                 "export": "canvas failure preserves draft; native chooser, cancellation, no overwrite, embedded XML equality and actual reopen passed",
+                "authentication": "revoked device stops transfer, shows reconnection guidance and preserves queued PNG plus later local edits",
                 "close": "active label input checkpointed before closing and recovered on reopen",
                 "re_registration": "blocked while editor is open; allowed after close and old draft remains",
                 "full_app_restart": "not tested; SQLite reopen is covered by store tests"}, indent=2) + "\n")
         except Exception:
+            print("Failure stage:", stage, flush=True)
             if session:
                 try:
                     print("Editor failure state:", js("return {path:location.pathname,status:document.querySelector('#status')?.textContent,server:document.querySelector('#server-status')?.textContent,frame:document.querySelector('#diagram')?.getAttribute('src')}"), flush=True)

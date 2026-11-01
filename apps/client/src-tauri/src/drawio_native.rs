@@ -454,13 +454,11 @@ async fn checkpoint(
     })
 }
 
-async fn save_state(
-    state: &mut RuntimeState,
+fn save_editor(
+    state: &RuntimeState,
     sessions: &EditorSessions,
     label: &str,
-    generation: Option<u64>,
-    png: Option<&[u8]>,
-) -> Result<DrawioSaveState, String> {
+) -> Result<EditorSession, String> {
     let editor = sessions
         .0
         .lock()
@@ -480,53 +478,77 @@ async fn save_state(
     {
         return Err("stale_registration".into());
     }
+    Ok(editor)
+}
+
+async fn queue_save(
+    state: &mut RuntimeState,
+    sessions: &EditorSessions,
+    label: &str,
+    generation: u64,
+    png: Option<&[u8]>,
+) -> Result<DrawioSaveState, String> {
+    let editor = save_editor(state, sessions, label)?;
     let png_source = editor
         .request
         .node
         .name
         .to_ascii_lowercase()
         .ends_with(".png");
-    if generation.is_some() && png_source != png.is_some() {
+    if png_source != png.is_some() {
         return Err("drawio_unsupported_format".into());
     }
     let binding = crate::registration_binding(editor.session.binding());
     let node_id = editor.request.node.node_id.to_string();
-    let mut queue_blocked = false;
-    if let Some(generation) = generation {
+    state
+        .gate
+        .check_queue(state.gate.owner())
+        .map_err(str::to_owned)?;
+    let queued = if let Some(png) = png {
         state
-            .gate
-            .check_queue(state.gate.owner())
-            .map_err(str::to_owned)?;
-        let queued = if let Some(png) = png {
-            state
+            .store
+            .queue_diagram_png(&binding, &node_id, generation, png)
+            .await
+    } else {
+        state
+            .store
+            .queue_diagram_checkpoint(&binding, &node_id, generation)
+            .await
+    };
+    match queued {
+        Ok(_) => {}
+        Err(StoreError::OutboxBlocked) => {
+            let outbox = state
                 .store
-                .queue_diagram_png(&binding, &node_id, generation, png)
+                .document_outbox_state(&binding, &node_id)
                 .await
-        } else {
-            state
-                .store
-                .queue_diagram_checkpoint(&binding, &node_id, generation)
-                .await
-        };
-        match queued {
-            Ok(_) => {}
-            Err(StoreError::OutboxBlocked) => queue_blocked = true,
-            Err(error) => return Err(error.to_string()),
+                .map_err(|error| error.to_string())?;
+            if outbox
+                .latest
+                .as_ref()
+                .is_none_or(|item| item.status == OutboxStatus::Committed)
+            {
+                return Err(StoreError::OutboxBlocked.to_string());
+            }
         }
+        Err(error) => return Err(error.to_string()),
     }
+    save_state(state, sessions, label).await
+}
+
+async fn save_state(
+    state: &mut RuntimeState,
+    sessions: &EditorSessions,
+    label: &str,
+) -> Result<DrawioSaveState, String> {
+    let editor = save_editor(state, sessions, label)?;
+    let binding = crate::registration_binding(editor.session.binding());
+    let node_id = editor.request.node.node_id.to_string();
     let outbox = state
         .store
         .document_outbox_state(&binding, &node_id)
         .await
         .map_err(|error| error.to_string())?;
-    if queue_blocked
-        && outbox
-            .latest
-            .as_ref()
-            .is_none_or(|item| item.status == OutboxStatus::Committed)
-    {
-        return Err(StoreError::OutboxBlocked.to_string());
-    }
     let status = if outbox.has_conflict {
         WorkspaceSendStatus::Conflict
     } else if outbox.has_failure {
@@ -535,7 +557,13 @@ async fn save_state(
         match outbox.latest.as_ref().map(|item| item.status) {
             None => WorkspaceSendStatus::Idle,
             Some(OutboxStatus::Committed) => WorkspaceSendStatus::Committed,
-            Some(OutboxStatus::Queued | OutboxStatus::Sent) => WorkspaceSendStatus::Pending,
+            Some(OutboxStatus::Queued | OutboxStatus::Sent) => {
+                if state.transmission_gate.blocked(&binding) {
+                    state.transmission_gate.blocked_status(&binding)
+                } else {
+                    WorkspaceSendStatus::Pending
+                }
+            }
             Some(_) => WorkspaceSendStatus::NeedsReview,
         }
     };
@@ -599,11 +627,11 @@ pub(crate) async fn drawio_save(
     } else {
         None
     };
-    let result = save_state(
+    let result = queue_save(
         &mut *runtime.0.lock().await,
         &sessions,
         webview.label(),
-        Some(generation),
+        generation,
         png.as_deref(),
     )
     .await?;
@@ -620,14 +648,7 @@ pub(crate) async fn drawio_save_status(
     sessions: tauri::State<'_, EditorSessions>,
 ) -> Result<DrawioSaveState, String> {
     check_editor(&webview)?;
-    save_state(
-        &mut *runtime.0.lock().await,
-        &sessions,
-        webview.label(),
-        None,
-        None,
-    )
-    .await
+    save_state(&mut *runtime.0.lock().await, &sessions, webview.label()).await
 }
 
 #[tauri::command]
@@ -814,17 +835,17 @@ pub(crate) mod tests {
         {
             let mut state = state.lock().await;
             assert!(
-                save_state(&mut state, &sessions, "main", Some(1), None)
+                queue_save(&mut state, &sessions, "main", 1, None)
                     .await
                     .is_err()
             );
             assert!(
-                save_state(&mut state, &sessions, label, Some(2), None)
+                queue_save(&mut state, &sessions, label, 2, None)
                     .await
                     .is_err()
             );
             assert_eq!(
-                save_state(&mut state, &sessions, label, Some(1), None)
+                queue_save(&mut state, &sessions, label, 1, None)
                     .await
                     .unwrap()
                     .status,
@@ -832,6 +853,57 @@ pub(crate) mod tests {
             );
         }
         let binding = crate::registration_binding(session.binding());
+        {
+            let mut state = state.lock().await;
+            let draft = state
+                .store
+                .read_diagram_draft(&binding, &request.node.node_id.to_string())
+                .await
+                .unwrap();
+            let queued = state.store.next_outbox(&binding).await.unwrap();
+            state
+                .transmission_gate
+                .block(&binding, crate::send::TransmissionBlock::AuthRequired);
+            assert_eq!(
+                save_state(&mut state, &sessions, label)
+                    .await
+                    .unwrap()
+                    .status,
+                WorkspaceSendStatus::AuthRequired
+            );
+            assert_eq!(
+                queue_save(&mut state, &sessions, label, 1, None)
+                    .await
+                    .unwrap()
+                    .status,
+                WorkspaceSendStatus::AuthRequired
+            );
+            assert_eq!(state.store.next_outbox(&binding).await.unwrap(), queued);
+            assert_eq!(
+                state
+                    .store
+                    .read_diagram_draft(&binding, &request.node.node_id.to_string())
+                    .await
+                    .unwrap(),
+                draft
+            );
+            state
+                .transmission_gate
+                .clear(&binding, crate::send::TransmissionBlock::AuthRequired);
+            state
+                .transmission_gate
+                .block(&binding, crate::send::TransmissionBlock::ResyncRequired);
+            assert_eq!(
+                save_state(&mut state, &sessions, label)
+                    .await
+                    .unwrap()
+                    .status,
+                WorkspaceSendStatus::SyncPending
+            );
+            state
+                .transmission_gate
+                .clear(&binding, crate::send::TransmissionBlock::ResyncRequired);
+        }
         let pending = state
             .lock()
             .await
@@ -890,12 +962,10 @@ pub(crate) mod tests {
         .unwrap();
         {
             let mut state = state.lock().await;
-            let result = save_state(&mut state, &sessions, label, None, None)
-                .await
-                .unwrap();
+            let result = save_state(&mut state, &sessions, label).await.unwrap();
             assert_eq!(result.status, WorkspaceSendStatus::Committed);
             assert!(!result.matches_draft);
-            save_state(&mut state, &sessions, label, Some(2), None)
+            queue_save(&mut state, &sessions, label, 2, None)
                 .await
                 .unwrap();
         }
@@ -908,11 +978,22 @@ pub(crate) mod tests {
         );
         {
             let mut state = state.lock().await;
-            let result = save_state(&mut state, &sessions, label, None, None)
-                .await
-                .unwrap();
+            let result = save_state(&mut state, &sessions, label).await.unwrap();
             assert_eq!(result.status, WorkspaceSendStatus::Committed);
             assert!(result.matches_draft);
+            state
+                .transmission_gate
+                .block(&binding, crate::send::TransmissionBlock::AuthRequired);
+            assert_eq!(
+                save_state(&mut state, &sessions, label)
+                    .await
+                    .unwrap()
+                    .status,
+                WorkspaceSendStatus::Committed
+            );
+            state
+                .transmission_gate
+                .clear(&binding, crate::send::TransmissionBlock::AuthRequired);
             sessions.close(&mut state.gate, label);
         }
         let node = session
@@ -978,15 +1059,9 @@ pub(crate) mod tests {
             xml: xml.clone(),
         };
         assert_eq!(
-            save_state(
-                &mut *state.lock().await,
-                &sessions,
-                "drawio-test",
-                Some(1),
-                None
-            )
-            .await
-            .unwrap_err(),
+            queue_save(&mut *state.lock().await, &sessions, "drawio-test", 1, None)
+                .await
+                .unwrap_err(),
             "drawio_unsupported_format"
         );
         assert!(

@@ -1064,11 +1064,11 @@ function App() {
     const found = [...sessionModes.current.entries()].find(([, session]) => session.uiId === state.selected && session.mode === "workspace");
     const resolved = found && resolveWorkspaceReference(nodesRef.current, found[1].documentId, target);
     if (!found || !resolved) { setConnectionError("다이어그램이 있는 문서를 다시 열어 주세요."); return; }
-    if (!window.confirm("시험 편집에서는 저장과 초안 복구를 지원하지 않습니다. 창을 닫거나 앱을 다시 불러오면 편집 내용이 사라집니다. 원본을 변경하지 않고 열까요?")) return;
+    if (!window.confirm("다이어그램 편집 내용은 이 기기의 초안으로만 저장합니다. 서버 원본은 변경하지 않습니다. 열까요?")) return;
     void openWorkspaceDiagram(found[1].documentId, found[0], resolved.node).catch((error: unknown) => {
       const reason = error instanceof Error ? error.message : String(error);
       if (reason === "preview_busy") setConnectionError("이미지를 불러오는 중입니다. 잠시 후 다이어그램을 다시 열어 주세요.");
-      else if (reason === "drawio_busy") setConnectionError("이미 열린 다이어그램 시험 편집 창을 닫고 다시 시도해 주세요.");
+      else if (reason === "drawio_busy") setConnectionError("이미 열린 다이어그램 편집 창을 닫고 다시 시도해 주세요.");
       else if (["drawio_unsupported_format", "drawio_invalid_input", "invalid_preview_image"].includes(reason)) {
         setConnectionError("지원하는 PNG 또는 draw.io XML인지 확인해 주세요.");
       } else setConnectionError("다이어그램을 열지 못했습니다. 서버 연결을 확인하거나 문서를 다시 열어 주세요.");

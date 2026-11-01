@@ -127,7 +127,7 @@ function PreviewImage({ target, alt, load }: { target: string; alt: string; load
   }, [target, load]);
   return image ? <span className="preview-image"><img src={image.url} alt={alt} />
     {image.notice && <small className="diagram-notice">{image.editable && openDiagram ? "편집 데이터 포함" : image.notice}</small>}
-    {image.editable && openDiagram && <button type="button" className="diagram-trial" onClick={() => openDiagram(target)}>시험 편집 (저장 안 됨)</button>}
+    {image.editable && openDiagram && <button type="button" className="diagram-trial" onClick={() => openDiagram(target)}>편집 (기기 초안)</button>}
   </span> : <span>{alt || "이미지"}{failed ? " (이미지를 불러올 수 없습니다)" : ""}</span>;
 }
 

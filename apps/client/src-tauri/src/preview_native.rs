@@ -273,7 +273,8 @@ mod tests {
             assert_eq!(result.drawio_status, expected);
             let input = crate::drawio_native::editor_input(state.clone(), &diagram_request).await;
             if expected == notryx_protocol::DrawioPngStatus::EmbeddedXml {
-                let (_, _, input) = input.unwrap();
+                let (_, _, prepared) = input.unwrap();
+                let input = prepared.input;
                 assert!(input.xml.contains("한글"));
                 assert_eq!(input.title, name);
                 for invalidate in [false, true] {
@@ -319,9 +320,11 @@ mod tests {
                             .unwrap()
                             .kind = ProductSessionKind::Active;
                     } else {
-                        assert_eq!(result.unwrap().2.xml, input.xml);
+                        assert_eq!(result.unwrap().2.input.xml, input.xml);
                     }
                 }
+                crate::drawio_native::tests::checkpoint_roundtrip(state.clone(), &diagram_request)
+                    .await;
             } else {
                 assert!(input.is_err());
             }

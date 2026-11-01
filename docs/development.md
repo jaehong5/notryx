@@ -151,9 +151,13 @@ WebDriver 시험은 합성 원문으로 5종 그림 표시, 원문 보존, 오�
 
 빌드 시 `apps/client/dist/third-party-licenses.md`에 번들 의존성의 라이선스 전문을 생성하고, `third-party-sources.md`에 Mermaid와 간접 의존성 elkjs의 소스 위치를 포함한다. 이 고지는 프로젝트 자체의 라이선스 확정을 대신하지 않는다.
 
-## draw.io 미리보기와 오프라인 시험 편집
+## draw.io 미리보기와 기기 초안 편집
 
-작업 공간 문서에서 `![구성도](./assets/system.drawio.png)`처럼 상대 경로로 PNG를 참조하면 이미지를 표시하고 내장 편집 데이터의 상태를 안내한다. `.png`에도 `mxfile` 데이터가 있으면 검사한다. `.drawio.png`에 편집 데이터가 없거나 손상됐으면 이유를 표시하고 정상 픽셀은 계속 보여 준다. Linux에서는 정상 편집 데이터가 있는 PNG의 `시험 편집 (저장 안 됨)` 버튼으로 별도 창을 열 수 있다. Markdown의 `.drawio` 첨부 링크도 같은 시험 편집 창에서 연다. 열기 전에 저장과 초안 복구를 지원하지 않음을 안내하며, 창을 닫거나 앱을 다시 불러오면 시험 편집 내용은 사라진다. 서버 저장, XML 초안 복구와 PNG export는 후속 구현이다.
+작업 공간 문서에서 `![구성도](./assets/system.drawio.png)`처럼 상대 경로로 PNG를 참조하면 이미지를 표시하고 내장 편집 데이터의 상태를 안내한다. `.png`에도 `mxfile` 데이터가 있으면 검사한다. `.drawio.png`에 편집 데이터가 없거나 손상됐으면 이유를 표시하고 정상 픽셀은 계속 보여 준다. Linux에서는 정상 편집 데이터가 있는 PNG의 `편집 (기기 초안)` 버튼으로 별도 창을 열 수 있다. Markdown의 `.drawio` 첨부 링크도 같은 창에서 연다. 편집 후 1초 멈추면 XML 초안을 기기에 저장한다. 닫을 때는 남은 초안을 저장하고, 실패하면 창을 유지한다. 서버 원본 저장은 후속 구현이다.
+
+같은 등록 상태에서 다이어그램을 다시 열면 저장된 초안을 복구한다. 서버 원본의 revision이 바뀌어도 초안과 원래 base를 유지하고 변경 사실을 안내한다. 초안은 SQLite의 별도 테이블에 저장하며 일반 Markdown 초안 목록이나 outbox에 포함하지 않는다. 저장 완료 전에 앱이 종료되면 마지막 저장 이후 변경은 복구하지 못한다. 등록 교체 후 과거 초안은 DB에 보존하지만 과거 등록의 다이어그램 초안을 여는 UI는 아직 제공하지 않는다. 클라이언트 DB는 schema 25로 이전하며 기존 초안과 credential을 유지한다.
+
+Linux 편집 창의 ‘편집 가능한 PNG 내보내기’는 현재 입력 중인 도형 label을 확정하고 XML 초안을 기기에 저장한 뒤 `.drawio.png` 사본을 만든다. 저장 위치는 운영체제 파일 선택 창에서 지정한다. Rust는 PNG의 내장 XML과 저장된 초안의 일치, 이미지 디코딩과 크기를 검사하고 기존 파일을 덮어쓰지 않는다. 취소하거나 PNG 생성, 초안 저장 또는 파일 쓰기에 실패하면 편집 창과 기존 초안을 유지한다. 사본 내보내기는 서버 저장 완료를 뜻하지 않으며 `.drawio` 원본도 자동 변환하지 않는다. 현재 로컬 내보내기는 Linux에서만 제공한다.
 
 원본 PNG는 변경하지 않는다. Rust가 원본의 내장 데이터를 검사하고 표시용 PNG와 상태만 화면에 전달한다. 표시용 PNG에는 XML을 넣지 않으며 원본 저장이나 내보내기에 사용하지 않는다. 검사 통과는 실제 draw.io 편집기에서 다시 열 수 있다는 보장이 아니다.
 
@@ -167,9 +171,9 @@ cargo test --locked -j 1 -p notryx-client --lib preview_native::tests
 npm test -- apps/client/src/preview.test.ts apps/client/src/preview-image-ipc.test.ts
 ```
 
-Linux의 미리보기와 원본 보존은 `scripts/m2-workspace-webdriver.py`, 별도 편집 창은 `scripts/m4-drawio-webdriver.py`에서 합성 파일로 검사한다. 이 시험은 편집 후 export/reopen, 원본 픽셀과 XML의 시각적 일치, 초안 복구, 물리 한글 IME와 Android 실기기 검증을 대신하지 않는다.
+Linux의 미리보기와 원본 보존은 `scripts/m2-workspace-webdriver.py`에서 검사한다. 별도 편집 창의 초안 저장, 실패 후 재시도와 재열기 복구, PNG 생성 실패, 사본 내보내기와 재열기는 `scripts/m4-drawio-webdriver.py`에서 합성 파일로 검사한다. 저장소 재개방은 `cargo test --locked -j 1 -p notryx-client-store --test diagram_drafts`로 검사한다. 이 시험은 서버 저장, 모든 다이어그램의 픽셀과 XML의 시각적 일치, 물리 한글 IME, 실제 키링을 사용한 앱 전체 재시작과 Android 실기기 검증을 대신하지 않는다.
 
-편집 창은 한 번에 하나만 연다. 현재 첨부 원본을 여는 단계에는 작업 공간 서버 연결이 필요하다. 받은 XML의 편집과 편집기 자산 로드는 외부 네트워크 없이 동작한다. Rust가 현재 문서 세션과 첨부 revision을 확인하고 원본에서 추출한 XML을 편집 창에 한 번만 전달한다. main 화면에는 XML을 반환하지 않는다. draw.io는 `allow-scripts`만 허용한 opaque iframe에서 실행하고, 확인된 부모와 바인딩한 MessageChannel로 통신한다. 편집 창의 native 권한은 자기 입력 읽기와 자기 창 닫기뿐이다. 같은 WebView 엔진을 쓰므로 독립 프로세스나 CPU 제한을 보장하지 않는다.
+편집 창은 한 번에 하나만 연다. 현재 첨부 원본을 여는 단계에는 작업 공간 서버 연결이 필요하다. 받은 XML의 편집, 기기 초안 저장, PNG 생성과 편집기 자산 로드는 외부 네트워크 없이 동작한다. Rust가 현재 문서 세션과 첨부 revision을 확인하고 원본 또는 복구한 초안 XML을 편집 창에 한 번만 전달한다. main 화면에는 XML을 반환하지 않는다. draw.io는 `allow-scripts`만 허용한 opaque iframe에서 실행하고, 확인된 부모와 바인딩한 MessageChannel로 통신한다. 편집 창의 native 권한은 자기 입력 읽기, 바인딩된 다이어그램의 초안 저장, 검증된 PNG 사본 내보내기와 자기 창 닫기뿐이다. 같은 WebView 엔진을 쓰므로 독립 프로세스나 CPU 제한을 보장하지 않는다.
 
 [번들 manifest와 라이선스 고지](../third-party/drawio/NOTICE.md)에 draw.io 버전, archive 체크섬, 변경 파일과 자산별 사용 조건을 기록한다. 최초 개발 빌드는 고정 archive를 다운로드하며, 이후 아래 명령으로 네트워크 없이 준비할 수 있다. 편집기 실행에는 외부 서비스 계정이 필요 없다. Android 대상 빌드는 편집기 자산과 wrapper 페이지를 산출물에서 제외한다.
 
@@ -181,7 +185,7 @@ cargo test --locked -j 1 -p notryx-client --lib drawio_native::tests
 scripts/m3-secret-no-service.sh xvfb-run -a python3 scripts/m4-drawio-webdriver.py
 ```
 
-마지막 명령에는 `WebKitWebDriver`가 필요하다. PATH에 없으면 `--driver /path/to/WebKitWebDriver`로 지정한다. 시험 편집은 AT-33/35 일부를 다루며, 저장과 복구를 갖춘 draw.io 편집 기능의 완료를 뜻하지 않는다.
+마지막 명령에는 `WebKitWebDriver`가 필요하다. PATH에 없으면 `--driver /path/to/WebKitWebDriver`로 지정한다. 기기 초안 편집과 Linux PNG 사본 내보내기는 AT-33/35 일부를 다루며, 서버 저장을 포함한 draw.io 편집 기능 전체의 완료를 뜻하지 않는다.
 
 ## 사용자 JSON 테마
 

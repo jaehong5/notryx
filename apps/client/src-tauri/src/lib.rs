@@ -1491,6 +1491,8 @@ pub fn run() {
             m0_open_isolation,
             drawio_native::drawio_open,
             drawio_native::drawio_load,
+            drawio_native::drawio_checkpoint,
+            drawio_native::drawio_export_png,
             drawio_native::drawio_close,
             mermaid_native::mermaid_render,
             mermaid_native::mermaid_complete,

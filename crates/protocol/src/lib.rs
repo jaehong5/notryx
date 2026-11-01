@@ -2029,6 +2029,29 @@ pub struct WorkspacePreviewImageRequest {
 pub struct DrawioEditorInput {
     pub title: String,
     pub xml: String,
+    pub generation: String,
+    pub restored: bool,
+    pub source_changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct DrawioCheckpointRequest {
+    pub generation: String,
+    pub xml: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct DrawioCheckpoint {
+    pub generation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct DrawioExportRequest {
+    pub generation: String,
+    pub png_base64: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]

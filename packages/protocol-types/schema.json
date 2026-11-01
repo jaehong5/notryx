@@ -1549,10 +1549,51 @@
       "title": "DeviceRenewal",
       "type": "object"
     },
+    "DrawioCheckpoint": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "generation"
+      ],
+      "title": "DrawioCheckpoint",
+      "type": "object"
+    },
+    "DrawioCheckpointRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": "string"
+        },
+        "xml": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "generation",
+        "xml"
+      ],
+      "title": "DrawioCheckpointRequest",
+      "type": "object"
+    },
     "DrawioEditorInput": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "generation": {
+          "type": "string"
+        },
+        "restored": {
+          "type": "boolean"
+        },
+        "source_changed": {
+          "type": "boolean"
+        },
         "title": {
           "type": "string"
         },
@@ -1562,9 +1603,30 @@
       },
       "required": [
         "title",
-        "xml"
+        "xml",
+        "generation",
+        "restored",
+        "source_changed"
       ],
       "title": "DrawioEditorInput",
+      "type": "object"
+    },
+    "DrawioExportRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": "string"
+        },
+        "png_base64": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "generation",
+        "png_base64"
+      ],
+      "title": "DrawioExportRequest",
       "type": "object"
     },
     "DrawioPngStatus": {

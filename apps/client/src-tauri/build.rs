@@ -9,6 +9,8 @@ fn main() {
             "m0_open_isolation",
             "drawio_open",
             "drawio_load",
+            "drawio_checkpoint",
+            "drawio_export_png",
             "drawio_close",
             "mermaid_render",
             "mermaid_complete",

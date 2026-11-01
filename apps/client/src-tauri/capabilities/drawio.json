@@ -1,11 +1,13 @@
 {
   "identifier": "drawio",
-  "description": "Load the bound diagram once and close its trial editor",
+  "description": "Edit the bound diagram draft and export a validated PNG copy",
   "windows": [
     "drawio-*"
   ],
   "permissions": [
     "allow-drawio-load",
+    "allow-drawio-checkpoint",
+    "allow-drawio-export-png",
     "allow-drawio-close"
   ]
 }

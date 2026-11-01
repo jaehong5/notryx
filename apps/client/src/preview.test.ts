@@ -14,7 +14,7 @@ function render(source: string): string {
 }
 
 describe("AT-31 basic Markdown preview", () => {
-  test("opens only validated diagrams with an explicit unsaved trial action", async () => {
+  test("opens only validated diagrams with an explicit device draft action", async () => {
     Object.defineProperty(URL, "createObjectURL", { configurable: true, value: () => "blob:trial" });
     Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
     const container = document.createElement("div");
@@ -27,7 +27,7 @@ describe("AT-31 basic Markdown preview", () => {
       })));
       const button = container.querySelector<HTMLButtonElement>(".diagram-trial");
       if (status === "embedded_xml") {
-        expect(button?.textContent).toContain("저장 안 됨");
+        expect(button?.textContent).toContain("기기 초안");
         button!.click();
         expect(open).toHaveBeenCalledWith("diagram.drawio.png");
       } else expect(button).toBeNull();

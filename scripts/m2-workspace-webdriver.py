@@ -332,6 +332,10 @@ def respond_to_recovery_dialog(destination):
                     require(len(name) == 1 and name.isascii() and name.isalnum() or name in ("slash", "minus", "period"), "unsupported isolated test path")
                     tap(name)
             tap("Return")
+            # GTK may accept an existing path's completion before activating Save.
+            time.sleep(0.2)
+            if dialog_window() is not None:
+                tap("Return")
     finally:
         xlib.XCloseDisplay(display)
 
@@ -1614,7 +1618,7 @@ print(json.dumps({'sha256':hashlib.sha256(data).hexdigest(), 'length':len(data),
                 const images=[...document.querySelectorAll('.markdown-preview img[alt=local]')];
                 return images.length === 17 && images.every(image => image.src.startsWith('blob:') && image.complete && image.naturalWidth === 1);
             """), seconds=45)
-            require(js("return [...document.querySelectorAll('.diagram-notice')].filter(e=>e.textContent.includes('편집 데이터 포함')).length === 17 && [...document.querySelectorAll('.diagram-trial')].filter(e=>e.textContent.includes('저장 안 됨')).length === 17"), "draw.io metadata status or unsaved trial action missing")
+            require(js("return [...document.querySelectorAll('.diagram-notice')].filter(e=>e.textContent.includes('편집 데이터 포함')).length === 17 && [...document.querySelectorAll('.diagram-trial')].filter(e=>e.textContent.includes('기기 초안')).length === 17"), "draw.io metadata status or local draft action missing")
             require((notes / "Test Folder" / "pixel.png").read_bytes() == png, "diagram preview changed the original PNG metadata")
             js("""
                 window.__notryxScrolls=[];

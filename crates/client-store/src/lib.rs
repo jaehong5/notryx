@@ -10,6 +10,7 @@ mod content_cache;
 mod content_conflict;
 mod credential;
 mod deleted_draft_copy;
+mod diagram_drafts;
 mod outbox;
 mod recovery;
 mod registration;
@@ -26,6 +27,7 @@ pub use deleted_draft_copy::{
     DeletedDraftCopyBlockingFollowup, DeletedDraftCopyCreateState, DeletedDraftCopyEvidence,
     DeletedDraftCopyIntent, DeletedDraftCopyRequest, DeletedDraftCopyStatus,
 };
+pub use diagram_drafts::{DiagramDraft, DiagramDraftCheckpoint};
 pub use outbox::{
     CreateOutboxOperation, CreateOutboxPage, CreateOutboxState, DeleteOutboxOperation,
     DeleteOutboxPage, DeleteOutboxState, FrozenContentApplyApproval,
@@ -150,7 +152,7 @@ pub struct PersistedDraft {
 }
 
 const APPLICATION_ID: i64 = 0x4e545258;
-const SCHEMA_VERSION: i64 = 24;
+const SCHEMA_VERSION: i64 = 25;
 
 struct EditSession {
     // A remote refresh preserves the old checkpoint until the next local save.
@@ -307,6 +309,7 @@ impl ClientStore {
                     | 21
                     | 22
                     | 23
+                    | 24
                     | SCHEMA_VERSION
             ) || application_id != APPLICATION_ID
             {
@@ -382,6 +385,7 @@ impl ClientStore {
             || existing_version == 21
             || existing_version == 22
             || existing_version == 23
+            || existing_version == 24
         {
             let mut transaction = connection.begin().await.map_err(storage_error)?;
             if initialize || existing_version == 1 {
@@ -629,7 +633,13 @@ impl ClientStore {
                     .await
                     .map_err(storage_error)?;
             }
-            sqlx::raw_sql(credential::UPGRADE_V24)
+            if initialize || existing_version <= 23 {
+                sqlx::raw_sql(credential::UPGRADE_V24)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            sqlx::raw_sql(diagram_drafts::UPGRADE_V25)
                 .execute(&mut *transaction)
                 .await
                 .map_err(storage_error)?;

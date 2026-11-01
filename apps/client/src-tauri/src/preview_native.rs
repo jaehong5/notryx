@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tauri::Webview;
 use tokio::sync::Mutex;
 
-fn validate_editor(
+pub(crate) fn validate_editor(
     state: &RuntimeState,
     session: &Arc<Session>,
     snapshot: &RequestSnapshot,
@@ -271,6 +271,67 @@ mod tests {
             diagram_request.node = nodes.iter().find(|node| node.name == name).unwrap().clone();
             let result = load_preview(state.clone(), &diagram_request).await.unwrap();
             assert_eq!(result.drawio_status, expected);
+            let input = crate::drawio_native::editor_input(state.clone(), &diagram_request).await;
+            if expected == notryx_protocol::DrawioPngStatus::EmbeddedXml {
+                let (_, _, input) = input.unwrap();
+                assert!(input.xml.contains("한글"));
+                assert_eq!(input.title, name);
+                for invalidate in [false, true] {
+                    let permit = state
+                        .lock()
+                        .await
+                        .preview_limit
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .unwrap();
+                    let mut pending = Box::pin(crate::drawio_native::editor_input(
+                        state.clone(),
+                        &diagram_request,
+                    ));
+                    assert!(
+                        tokio::time::timeout(
+                            std::time::Duration::from_millis(20),
+                            pending.as_mut(),
+                        )
+                        .await
+                        .is_err(),
+                        "diagram open must wait while image preview is loading"
+                    );
+                    if invalidate {
+                        state
+                            .lock()
+                            .await
+                            .product_sessions
+                            .get_mut(&request.edit_session_id)
+                            .unwrap()
+                            .kind = ProductSessionKind::Recovery;
+                    }
+                    drop(permit);
+                    let result = pending.await;
+                    if invalidate {
+                        assert_eq!(result.err().as_deref(), Some("stale_session"));
+                        state
+                            .lock()
+                            .await
+                            .product_sessions
+                            .get_mut(&request.edit_session_id)
+                            .unwrap()
+                            .kind = ProductSessionKind::Active;
+                    } else {
+                        assert_eq!(result.unwrap().2.xml, input.xml);
+                    }
+                }
+            } else {
+                assert!(input.is_err());
+            }
+            let mut stale = diagram_request.clone();
+            stale.edit_session_id = "another-session".into();
+            assert!(
+                crate::drawio_native::editor_input(state.clone(), &stale)
+                    .await
+                    .is_err()
+            );
             assert_eq!((result.width, result.height), (1, 1));
             assert_eq!(
                 std::fs::read(config.workspace.notes_root.join(name)).unwrap(),

@@ -7,6 +7,8 @@ dist/
 /data/
 /backups/
 /.local/
+/apps/client/public/drawio/
+/apps/client/public/.drawio-*/
 *.log
 *.keystore
 *.jks

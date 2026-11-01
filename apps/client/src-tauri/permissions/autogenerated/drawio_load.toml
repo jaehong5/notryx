@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-drawio-load"
+description = "Enables the drawio_load command without any pre-configured scope."
+commands.allow = ["drawio_load"]
+
+[[permission]]
+identifier = "deny-drawio-load"
+description = "Denies the drawio_load command without any pre-configured scope."
+commands.deny = ["drawio_load"]

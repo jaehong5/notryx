@@ -30,6 +30,7 @@ mod create_native_tests;
 mod credential_native;
 mod credential_renewal;
 mod delete_native;
+mod drawio_native;
 mod external_native;
 #[cfg(test)]
 mod frozen_content_abandoning_tests;
@@ -1381,6 +1382,7 @@ fn m0_open_isolation(
 pub fn run() {
     tauri::Builder::default()
         .manage(mermaid_native::RenderJobs::default())
+        .manage(drawio_native::EditorSessions::default())
         .setup(|app| {
             let directory = std::env::var_os("NOTRYX_M0_DATA_DIR")
                 .map(std::path::PathBuf::from)
@@ -1417,6 +1419,9 @@ pub fn run() {
                 },
             };
             app.manage(startup);
+            tauri::WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?
+                .on_web_resource_request(drawio_native::asset_policy)
+                .build()?;
             Ok(())
         })
         .on_page_load(|webview, payload| {
@@ -1424,6 +1429,7 @@ pub fn run() {
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
             {
                 mermaid_native::cancel_all(webview.app_handle());
+                drawio_native::cancel_all(webview.app_handle());
             }
             if webview.label() == "main"
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
@@ -1446,6 +1452,22 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
+            #[cfg(not(target_os = "android"))]
+            if window.label().starts_with("drawio-") {
+                match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        if let Some(view) = window.app_handle().get_webview_window(window.label()) {
+                            let _ = view
+                                .eval("window.dispatchEvent(new Event('notryx-close-requested'))");
+                        }
+                    }
+                    tauri::WindowEvent::Destroyed => {
+                        drawio_native::remove(window.app_handle(), window.label())
+                    }
+                    _ => {}
+                }
+            }
             if window.label() == "main"
                 && let tauri::WindowEvent::Focused(active) = event
                 && let Some(foreground) = window.try_state::<ForegroundHandle>()
@@ -1467,6 +1489,9 @@ pub fn run() {
             m0_close,
             m0_exit,
             m0_open_isolation,
+            drawio_native::drawio_open,
+            drawio_native::drawio_load,
+            drawio_native::drawio_close,
             mermaid_native::mermaid_render,
             mermaid_native::mermaid_complete,
             theme_native::theme_status,

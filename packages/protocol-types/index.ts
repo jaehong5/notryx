@@ -155,6 +155,7 @@ export type WorkspaceLocalRequest = { renderer_session_id: string, };
 export type WorkspaceDraftRequest = { renderer_session_id: string, binding: WorkspaceRegistration, document_id: string, };
 export type WorkspacePreviewImageRequest = { renderer_session_id: string, document_id: string, edit_session_id: string, node: NodeState, };
 export type WorkspacePreviewImage = { png_base64: string, width: number, height: number, drawio_status: DrawioPngStatus, };
+export type DrawioEditorInput = { title: string, xml: string, };
 export type DrawioPngStatus = "none" | "embedded_xml" | "invalid_xml" | "unsupported_xml" | "limit_exceeded";
 export type WorkspaceQueueRequest = { renderer_session_id: string, document_id: string, edit_session_id: string, expected_generation: string, };
 export type WorkspaceExternalLinkRequest = { renderer_session_id: string, document_id: string, edit_session_id: string, url: string, };

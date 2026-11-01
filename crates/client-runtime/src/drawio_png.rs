@@ -11,7 +11,41 @@ const MAX_CELLS: usize = 5000;
 const MAX_DEPTH: usize = 64;
 type XmlResult<T> = Result<T, DrawioPngStatus>;
 
+// PNG callers must validate pixels separately before displaying the original image.
+pub fn drawio_editor_xml(bytes: &[u8], png: bool) -> Result<String, DrawioPngStatus> {
+    let xml = if png {
+        scan_png(bytes)
+            .map_err(|error| match error {
+                PreviewImageError::TooLarge => DrawioPngStatus::LimitExceeded,
+                _ => DrawioPngStatus::InvalidXml,
+            })?
+            .xml?
+    } else {
+        if bytes.len() > MAX_RAW_XML {
+            return Err(DrawioPngStatus::LimitExceeded);
+        }
+        inspect_xml(bytes)?;
+        bytes.to_vec()
+    };
+    String::from_utf8(xml).map_err(|_| DrawioPngStatus::InvalidXml)
+}
+
 pub(crate) fn prepare_png(bytes: &[u8]) -> Result<(Vec<u8>, DrawioPngStatus), PreviewImageError> {
+    let scanned = scan_png(bytes)?;
+    Ok((
+        scanned.pixels,
+        scanned
+            .xml
+            .map_or_else(|error| error, |_| DrawioPngStatus::EmbeddedXml),
+    ))
+}
+
+struct ScannedPng {
+    pixels: Vec<u8>,
+    xml: XmlResult<Vec<u8>>,
+}
+
+fn scan_png(bytes: &[u8]) -> Result<ScannedPng, PreviewImageError> {
     if bytes.len() > 25 * 1024 * 1024 {
         return Err(PreviewImageError::TooLarge);
     }
@@ -20,7 +54,7 @@ pub(crate) fn prepare_png(bytes: &[u8]) -> Result<(Vec<u8>, DrawioPngStatus), Pr
     }
     let mut output = bytes[..8].to_vec();
     let mut offset = 8;
-    let mut status = DrawioPngStatus::None;
+    let mut xml = Err(DrawioPngStatus::None);
     let mut found = false;
     while offset < bytes.len() {
         let header = bytes
@@ -38,9 +72,9 @@ pub(crate) fn prepare_png(bytes: &[u8]) -> Result<(Vec<u8>, DrawioPngStatus), Pr
             if data.starts_with(b"mxfile\0") || data == b"mxfile" {
                 let checksum = u32::from_be_bytes(bytes[end - 4..end].try_into().unwrap());
                 if found || crc32fast::hash(&bytes[offset + 4..end - 4]) != checksum {
-                    status = DrawioPngStatus::InvalidXml;
+                    xml = Err(DrawioPngStatus::InvalidXml);
                 } else {
-                    status = inspect_text(kind, data).unwrap_or_else(|error| error);
+                    xml = inspect_text(kind, data);
                 }
                 found = true;
             }
@@ -49,7 +83,10 @@ pub(crate) fn prepare_png(bytes: &[u8]) -> Result<(Vec<u8>, DrawioPngStatus), Pr
         }
         if kind == b"IEND" {
             return if length == 0 {
-                Ok((output, status))
+                Ok(ScannedPng {
+                    pixels: output,
+                    xml,
+                })
             } else {
                 Err(PreviewImageError::Invalid)
             };
@@ -59,7 +96,7 @@ pub(crate) fn prepare_png(bytes: &[u8]) -> Result<(Vec<u8>, DrawioPngStatus), Pr
     Err(PreviewImageError::Invalid)
 }
 
-fn inspect_text(kind: &[u8], data: &[u8]) -> XmlResult<DrawioPngStatus> {
+fn inspect_text(kind: &[u8], data: &[u8]) -> XmlResult<Vec<u8>> {
     let content = data.get(7..).ok_or(DrawioPngStatus::InvalidXml)?;
     let xml = match kind {
         b"tEXt" => decode_uri(content, MAX_RAW_XML)?,
@@ -76,12 +113,16 @@ fn inspect_text(kind: &[u8], data: &[u8]) -> XmlResult<DrawioPngStatus> {
         }
         _ => return Err(DrawioPngStatus::UnsupportedXml),
     };
+    inspect_xml(&xml)?;
+    Ok(xml)
+}
+
+fn inspect_xml(xml: &[u8]) -> XmlResult<()> {
     let mut budget = XmlBudget {
         bytes: xml.len(),
         cells: 0,
     };
-    validate_xml(&xml, false, &mut budget)?;
-    Ok(DrawioPngStatus::EmbeddedXml)
+    validate_xml(xml, false, &mut budget)
 }
 
 // Decode while reading so neither PNG metadata nor compressed pages can expand without a bound.
@@ -424,6 +465,94 @@ mod tests {
 
     fn status(xml: &str) -> DrawioPngStatus {
         prepare_png(&text_xml(xml)).unwrap().1
+    }
+
+    #[test]
+    fn editor_input_preserves_raw_and_embedded_xml() {
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<mxfile><diagram>{GRAPH}</diagram></mxfile>"
+        );
+        assert_eq!(drawio_editor_xml(xml.as_bytes(), false), Ok(xml.clone()));
+        assert_eq!(drawio_editor_xml(&text_xml(&xml), true), Ok(xml.clone()));
+        assert_eq!(
+            drawio_editor_xml(GRAPH.as_bytes(), false),
+            Ok(GRAPH.to_owned())
+        );
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(uri(&xml).as_bytes()).unwrap();
+        let mut metadata = b"mxfile\0\0".to_vec();
+        metadata.extend(encoder.finish().unwrap());
+        assert_eq!(
+            drawio_editor_xml(&with_chunk(b"zTXt", &metadata), true),
+            Ok(xml)
+        );
+
+        let mut page = DeflateEncoder::new(Vec::new(), Compression::default());
+        page.write_all(uri(GRAPH).as_bytes()).unwrap();
+        let compressed = format!(
+            "<mxfile><diagram>{}</diagram></mxfile>",
+            STANDARD.encode(page.finish().unwrap())
+        );
+        assert_eq!(
+            drawio_editor_xml(compressed.as_bytes(), false),
+            Ok(compressed.clone())
+        );
+        assert_eq!(
+            drawio_editor_xml(&text_xml(&compressed), true),
+            Ok(compressed)
+        );
+    }
+
+    #[test]
+    fn editor_input_rejects_missing_broken_or_duplicate_metadata() {
+        assert_eq!(drawio_editor_xml(&png(), true), Err(DrawioPngStatus::None));
+        assert_eq!(
+            drawio_editor_xml(b"not png", true),
+            Err(DrawioPngStatus::InvalidXml)
+        );
+        assert_eq!(
+            drawio_editor_xml(&text_xml("<mxfile>"), true),
+            Err(DrawioPngStatus::InvalidXml)
+        );
+        let mut duplicate = text_xml(GRAPH);
+        duplicate.splice(
+            33..33,
+            chunk(b"tEXt", format!("mxfile\0{GRAPH}").as_bytes()),
+        );
+        assert_eq!(
+            drawio_editor_xml(&duplicate, true),
+            Err(DrawioPngStatus::InvalidXml)
+        );
+        let mut corrupt = text_xml(GRAPH);
+        let crc_offset = 41 + u32::from_be_bytes(corrupt[33..37].try_into().unwrap()) as usize;
+        corrupt[crc_offset] ^= 1;
+        assert_eq!(
+            drawio_editor_xml(&corrupt, true),
+            Err(DrawioPngStatus::InvalidXml)
+        );
+    }
+
+    #[test]
+    fn editor_input_applies_the_same_xml_limits_before_returning_content() {
+        for (xml, expected) in [
+            ("<mxfile>".to_owned(), DrawioPngStatus::InvalidXml),
+            (
+                format!("<!DOCTYPE mxGraphModel>{GRAPH}"),
+                DrawioPngStatus::UnsupportedXml,
+            ),
+            ("x".repeat(MAX_RAW_XML + 1), DrawioPngStatus::LimitExceeded),
+            (
+                format!(
+                    "<mxGraphModel><root>{}</root></mxGraphModel>",
+                    "<mxCell/>".repeat(MAX_CELLS + 1)
+                ),
+                DrawioPngStatus::LimitExceeded,
+            ),
+        ] {
+            assert_eq!(drawio_editor_xml(xml.as_bytes(), false), Err(expected));
+            assert_eq!(drawio_editor_xml(&text_xml(&xml), true), Err(expected));
+        }
     }
 
     #[test]

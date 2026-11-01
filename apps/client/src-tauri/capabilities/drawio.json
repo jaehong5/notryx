@@ -1,0 +1,11 @@
+{
+  "identifier": "drawio",
+  "description": "Load the bound diagram once and close its trial editor",
+  "windows": [
+    "drawio-*"
+  ],
+  "permissions": [
+    "allow-drawio-load",
+    "allow-drawio-close"
+  ]
+}

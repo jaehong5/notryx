@@ -1,0 +1,13 @@
+{
+  "version": "32.6.9",
+  "commit": "3e707fd20b6930778d6f6bf6e4d0079b4bce366b",
+  "url": "https://github.com/jgraph/drawio/releases/download/v32.6.9/draw.war",
+  "sha256": "31afc82b7920c409d0591f6126ccb6c377d7800e7f11ab324f88bdf1e4249ce7",
+  "files": [
+    "index.html", "favicon.ico", "js/bootstrap.js", "js/main.js", "js/app.min.js",
+    "js/stencils.min.js", "js/shapes-14-6-5.min.js",
+    "resources/dia.txt", "resources/dia_ko.txt"
+  ],
+  "directories": ["styles/", "images/", "img/", "mxgraph/images/", "mxgraph/css/"],
+  "upstreamNotices": ["img/LICENSE", "shapes/LICENSE", "stencils/LICENSE"]
+}

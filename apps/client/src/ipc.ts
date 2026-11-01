@@ -1328,6 +1328,11 @@ export async function previewWorkspaceImage(document_id: string, edit_session_id
   return { bytes: fromBase64(string(value.png_base64)), drawioStatus };
 }
 
+export async function openWorkspaceDiagram(document_id: string, edit_session_id: string, node: NodeState): Promise<void> {
+  const renderer_session_id = await getRendererSession();
+  await invoke("drawio_open", { request: { renderer_session_id, document_id, edit_session_id, node } });
+}
+
 export async function openWorkspaceExternal(document_id: string, edit_session_id: string, url: string): Promise<void> {
   const renderer_session_id = await getRendererSession();
   await invoke("workspace_open_external", { request: { renderer_session_id, document_id, edit_session_id, url } });

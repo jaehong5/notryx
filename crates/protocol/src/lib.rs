@@ -2026,6 +2026,13 @@ pub struct WorkspacePreviewImageRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+pub struct DrawioEditorInput {
+    pub title: String,
+    pub xml: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspacePreviewImage {
     pub png_base64: String,
     pub width: u32,

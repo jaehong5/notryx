@@ -151,9 +151,9 @@ WebDriver 시험은 합성 원문으로 5종 그림 표시, 원문 보존, 오�
 
 빌드 시 `apps/client/dist/third-party-licenses.md`에 번들 의존성의 라이선스 전문을 생성하고, `third-party-sources.md`에 Mermaid와 간접 의존성 elkjs의 소스 위치를 포함한다. 이 고지는 프로젝트 자체의 라이선스 확정을 대신하지 않는다.
 
-## draw.io PNG 미리보기
+## draw.io 미리보기와 오프라인 시험 편집
 
-작업 공간 문서에서 `![구성도](./assets/system.drawio.png)`처럼 상대 경로로 PNG를 참조하면 이미지를 표시하고 내장 편집 데이터의 상태를 안내한다. `.png`에도 `mxfile` 데이터가 있으면 검사한다. `.drawio.png`에 편집 데이터가 없거나 손상됐으면 이유를 표시하고 정상 픽셀은 계속 보여 준다. 현재는 미리보기만 지원한다. 별도 draw.io 편집 창, XML 저장과 PNG export는 후속 구현이다.
+작업 공간 문서에서 `![구성도](./assets/system.drawio.png)`처럼 상대 경로로 PNG를 참조하면 이미지를 표시하고 내장 편집 데이터의 상태를 안내한다. `.png`에도 `mxfile` 데이터가 있으면 검사한다. `.drawio.png`에 편집 데이터가 없거나 손상됐으면 이유를 표시하고 정상 픽셀은 계속 보여 준다. Linux에서는 정상 편집 데이터가 있는 PNG의 `시험 편집 (저장 안 됨)` 버튼으로 별도 창을 열 수 있다. Markdown의 `.drawio` 첨부 링크도 같은 시험 편집 창에서 연다. 열기 전에 저장과 초안 복구를 지원하지 않음을 안내하며, 창을 닫거나 앱을 다시 불러오면 시험 편집 내용은 사라진다. 서버 저장, XML 초안 복구와 PNG export는 후속 구현이다.
 
 원본 PNG는 변경하지 않는다. Rust가 원본의 내장 데이터를 검사하고 표시용 PNG와 상태만 화면에 전달한다. 표시용 PNG에는 XML을 넣지 않으며 원본 저장이나 내보내기에 사용하지 않는다. 검사 통과는 실제 draw.io 편집기에서 다시 열 수 있다는 보장이 아니다.
 
@@ -167,7 +167,21 @@ cargo test --locked -j 1 -p notryx-client --lib preview_native::tests
 npm test -- apps/client/src/preview.test.ts apps/client/src/preview-image-ipc.test.ts
 ```
 
-Linux의 실제 표시와 원본 보존은 기존 `scripts/m2-workspace-webdriver.py`에서 합성 draw.io PNG로 검사한다. 실제 편집기 export/reopen, 시각적 일치, 편집 초안 복구와 Android 검증을 대신하지 않는다.
+Linux의 미리보기와 원본 보존은 `scripts/m2-workspace-webdriver.py`, 별도 편집 창은 `scripts/m4-drawio-webdriver.py`에서 합성 파일로 검사한다. 이 시험은 편집 후 export/reopen, 원본 픽셀과 XML의 시각적 일치, 초안 복구, 물리 한글 IME와 Android 실기기 검증을 대신하지 않는다.
+
+편집 창은 한 번에 하나만 연다. 현재 첨부 원본을 여는 단계에는 작업 공간 서버 연결이 필요하다. 받은 XML의 편집과 편집기 자산 로드는 외부 네트워크 없이 동작한다. Rust가 현재 문서 세션과 첨부 revision을 확인하고 원본에서 추출한 XML을 편집 창에 한 번만 전달한다. main 화면에는 XML을 반환하지 않는다. draw.io는 `allow-scripts`만 허용한 opaque iframe에서 실행하고, 확인된 부모와 바인딩한 MessageChannel로 통신한다. 편집 창의 native 권한은 자기 입력 읽기와 자기 창 닫기뿐이다. 같은 WebView 엔진을 쓰므로 독립 프로세스나 CPU 제한을 보장하지 않는다.
+
+[번들 manifest와 라이선스 고지](../third-party/drawio/NOTICE.md)에 draw.io 버전, archive 체크섬, 변경 파일과 자산별 사용 조건을 기록한다. 최초 개발 빌드는 고정 archive를 다운로드하며, 이후 아래 명령으로 네트워크 없이 준비할 수 있다. 편집기 실행에는 외부 서비스 계정이 필요 없다. Android 대상 빌드는 편집기 자산과 wrapper 페이지를 산출물에서 제외한다.
+
+```bash
+python3 scripts/prepare-drawio.py --offline
+python3 scripts/test-prepare-drawio.py
+node --test scripts/test-drawio-bridge.mjs
+cargo test --locked -j 1 -p notryx-client --lib drawio_native::tests
+scripts/m3-secret-no-service.sh xvfb-run -a python3 scripts/m4-drawio-webdriver.py
+```
+
+마지막 명령에는 `WebKitWebDriver`가 필요하다. PATH에 없으면 `--driver /path/to/WebKitWebDriver`로 지정한다. 시험 편집은 AT-33/35 일부를 다루며, 저장과 복구를 갖춘 draw.io 편집 기능의 완료를 뜻하지 않는다.
 
 ## 사용자 JSON 테마
 

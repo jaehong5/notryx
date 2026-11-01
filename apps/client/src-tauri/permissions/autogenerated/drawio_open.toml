@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-drawio-open"
+description = "Enables the drawio_open command without any pre-configured scope."
+commands.allow = ["drawio_open"]
+
+[[permission]]
+identifier = "deny-drawio-open"
+description = "Denies the drawio_open command without any pre-configured scope."
+commands.deny = ["drawio_open"]

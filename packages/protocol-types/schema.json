@@ -1549,6 +1549,24 @@
       "title": "DeviceRenewal",
       "type": "object"
     },
+    "DrawioEditorInput": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "xml": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "xml"
+      ],
+      "title": "DrawioEditorInput",
+      "type": "object"
+    },
     "DrawioPngStatus": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "enum": [

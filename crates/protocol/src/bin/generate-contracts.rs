@@ -4,8 +4,8 @@ use notryx_protocol::{
     AbandonRequest, AckRequest, AckResponse, AdminRecoverySummary, AdminRequest, AdminResponse,
     AdminResult, AdminUnsupportedItem, ApiError, ChangesPage, ClientStartupMode,
     ClientStartupStatus, CreateNodeRequest, DeviceCurrentRole, DeviceIdentity, DeviceRenewal,
-    HeadHint, InventoryPage, JournalAccounting, M0CloseRequest, M0OpenRequest, M0OpenedDocument,
-    M0SaveRequest, M0SavedCheckpoint, MigrationDraft, MigrationInventory,
+    DrawioEditorInput, HeadHint, InventoryPage, JournalAccounting, M0CloseRequest, M0OpenRequest,
+    M0OpenedDocument, M0SaveRequest, M0SavedCheckpoint, MigrationDraft, MigrationInventory,
     MigrationInventoryRequest, MigrationOperation, MigrationOperationKind, MigrationSource,
     MigrationSourceKind, MigrationSourceRequest, MoveNodeRequest, NodeKind, NodeMetadata,
     NodeState, OperationError, OperationReceipt, PairRequest, PairResponse, RestoreNodeRequest,
@@ -340,6 +340,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     add_type::<WorkspaceDraftRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspacePreviewImageRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspacePreviewImage>(&config, &mut declarations, &mut schemas)?;
+    add_type::<DrawioEditorInput>(&config, &mut declarations, &mut schemas)?;
     add_type::<DrawioPngStatus>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceQueueRequest>(&config, &mut declarations, &mut schemas)?;
     add_type::<WorkspaceExternalLinkRequest>(&config, &mut declarations, &mut schemas)?;

@@ -24,6 +24,7 @@ pub use restore::RestoreMutation;
 mod write;
 pub use write::{AbandonMutation, ContentMutation, OperationLookup};
 mod drawio_png;
+pub use drawio_png::drawio_editor_xml;
 mod preview_image;
 pub use preview_image::{PreviewImageError, ValidatedPreviewImage, validate_preview_image};
 mod external_url;

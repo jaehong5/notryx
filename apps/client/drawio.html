@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="ko">
+  <head><meta charset="UTF-8" /><title>Notryx 다이어그램 시험 편집</title></head>
+  <body>
+    <header><strong>시험 편집: 변경 내용은 저장되지 않습니다.</strong>
+      <span>창을 닫거나 앱을 다시 불러오면 편집 내용이 사라집니다. 원본은 변경하지 않습니다.</span>
+      <button id="close" type="button">시험 편집 닫기</button>
+    </header>
+    <p id="status" role="status">편집기를 준비하는 중입니다.</p>
+    <iframe id="diagram" title="draw.io 시험 편집기" sandbox="allow-scripts"></iframe>
+    <dialog id="discard"><p>시험 편집 내용을 버리고 닫을까요? 원본은 변경되지 않았습니다.</p>
+      <button id="keep" type="button">계속 편집</button><button id="discard-confirm" type="button">버리고 닫기</button></dialog>
+    <script type="module" src="/src/drawio-editor.ts"></script>
+  </body>
+</html>

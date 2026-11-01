@@ -84,6 +84,7 @@ export type MarkdownPreviewProps = {
   source: string;
   themeBase?: "light" | "dark";
   onOpenLink?: (link: PreviewLink) => void;
+  onOpenDiagram?: (target: string) => void;
   loadImage?: (target: string, signal: AbortSignal) => Promise<PreviewImageData>;
   fragment?: { fragment: string } | null;
 };
@@ -92,6 +93,7 @@ const PreviewContext = createContext<{
   article: RefObject<HTMLElement | null>;
   themeBase: "light" | "dark";
   onOpenLink?: MarkdownPreviewProps["onOpenLink"];
+  onOpenDiagram?: MarkdownPreviewProps["onOpenDiagram"];
   loadImage?: MarkdownPreviewProps["loadImage"];
 } | null>(null);
 
@@ -107,7 +109,8 @@ function diagramNotice(target: string, status: PreviewImageData["drawioStatus"])
 }
 
 function PreviewImage({ target, alt, load }: { target: string; alt: string; load: NonNullable<MarkdownPreviewProps["loadImage"]> }) {
-  const [image, setImage] = useState<{ url: string; notice: string | null }>();
+  const openDiagram = useContext(PreviewContext)?.onOpenDiagram;
+  const [image, setImage] = useState<{ url: string; notice: string | null; editable: boolean }>();
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     let active = true;
@@ -118,12 +121,13 @@ function PreviewImage({ target, alt, load }: { target: string; alt: string; load
     void load(target, controller.signal).then(({ bytes, drawioStatus }) => {
       if (!active) return;
       created = URL.createObjectURL(new Blob([Uint8Array.from(bytes).buffer], { type: "image/png" }));
-      setImage({ url: created, notice: diagramNotice(target, drawioStatus) });
+      setImage({ url: created, notice: diagramNotice(target, drawioStatus), editable: drawioStatus === "embedded_xml" });
     }).catch(() => { if (active) setFailed(true); });
     return () => { active = false; controller.abort(); if (created) URL.revokeObjectURL(created); };
   }, [target, load]);
   return image ? <span className="preview-image"><img src={image.url} alt={alt} />
-    {image.notice && <small className="diagram-notice">{image.notice}</small>}
+    {image.notice && <small className="diagram-notice">{image.editable && openDiagram ? "편집 데이터 포함" : image.notice}</small>}
+    {image.editable && openDiagram && <button type="button" className="diagram-trial" onClick={() => openDiagram(target)}>시험 편집 (저장 안 됨)</button>}
   </span> : <span>{alt || "이미지"}{failed ? " (이미지를 불러올 수 없습니다)" : ""}</span>;
 }
 
@@ -155,11 +159,11 @@ function MarkdownCodeBlock({ node, children }: { node?: PreviewNode; children?: 
     : <pre>{children}</pre>;
 }
 
-export function MarkdownPreview({ source, themeBase = "light", onOpenLink, loadImage, fragment }: MarkdownPreviewProps) {
+export function MarkdownPreview({ source, themeBase = "light", onOpenLink, onOpenDiagram, loadImage, fragment }: MarkdownPreviewProps) {
   const article = useRef<HTMLElement>(null);
   useEffect(() => { if (fragment) scrollToHeading(article.current, fragment.fragment); }, [fragment]);
   return <article ref={article} className="markdown-preview">
-    <PreviewContext.Provider value={{ article, themeBase, onOpenLink, loadImage }}>
+    <PreviewContext.Provider value={{ article, themeBase, onOpenLink, onOpenDiagram, loadImage }}>
     <Markdown
       remarkPlugins={[remarkGfm]}
       rehypePlugins={[headingAnchors]}

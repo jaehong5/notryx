@@ -14,6 +14,27 @@ function render(source: string): string {
 }
 
 describe("AT-31 basic Markdown preview", () => {
+  test("opens only validated diagrams with an explicit unsaved trial action", async () => {
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: () => "blob:trial" });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const open = vi.fn();
+    for (const status of ["embedded_xml", "invalid_xml", "none"] as const) {
+      await act(async () => root.render(createElement(MarkdownPreview, {
+        source: "![그림](diagram.drawio.png)", onOpenDiagram: open,
+        loadImage: async () => ({ bytes: new Uint8Array([137]), drawioStatus: status }),
+      })));
+      const button = container.querySelector<HTMLButtonElement>(".diagram-trial");
+      if (status === "embedded_xml") {
+        expect(button?.textContent).toContain("저장 안 됨");
+        button!.click();
+        expect(open).toHaveBeenCalledWith("diagram.drawio.png");
+      } else expect(button).toBeNull();
+    }
+    await act(async () => root.unmount());
+  });
+
   test.each([
     ["embedded_xml", "편집 데이터 포함", "diagram.png"],
     ["none", "편집 데이터가 없습니다", "diagram.drawio.png"],

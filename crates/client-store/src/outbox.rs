@@ -756,7 +756,8 @@ pub(crate) fn operation(
     let bytes: Vec<u8> = row.try_get("bytes").map_err(storage_error)?;
     let hash: String = row.try_get("payload_hash").map_err(storage_error)?;
     let payload_len: i64 = row.try_get("payload_len").map_err(storage_error)?;
-    if bytes.len() > super::MAX_DOCUMENT_BYTES
+    if bytes.len() > crate::diagram_drafts::MAX_DIAGRAM_BYTES
+        || (bytes.len() > super::MAX_DOCUMENT_BYTES && !bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
         || payload_len != bytes.len() as i64
         || payload_hash(&bytes) != hash
     {
@@ -787,7 +788,7 @@ fn summary(row: &SqliteRow, frozen: bool) -> Result<OutboxSummary, StoreError> {
     if sequence <= 0
         || generation <= 0
         || length < 0
-        || length as u64 > super::MAX_DOCUMENT_BYTES as u64
+        || length as u64 > crate::diagram_drafts::MAX_DIAGRAM_BYTES as u64
         || !matches!(retired, 0 | 1)
     {
         return Err(StoreError::UnsupportedFormat);
@@ -3448,7 +3449,7 @@ impl ClientStore {
             .execute(&mut *transaction)
             .await
             .map_err(storage_error)?;
-        let candidates = sqlx::query("SELECT x.operation_id, x.document_id, x.storage_id FROM client_outbox x WHERE x.registration_id = ? AND x.operation_kind = 'content' AND x.operation_seq <= ? AND x.status = 'committed' AND x.terminal_kind IS NULL AND x.payload_retired = 0 AND EXISTS (SELECT 1 FROM client_outbox n WHERE n.registration_id = x.registration_id AND n.document_id = x.document_id AND n.operation_kind = 'content' AND n.status = 'committed' AND n.terminal_kind IS NULL AND n.operation_seq > x.operation_seq) AND NOT EXISTS (SELECT 1 FROM client_outbox d WHERE d.registration_id = x.registration_id AND d.dependency = x.operation_id AND d.status IN ('queued', 'sent', 'conflict')) AND NOT EXISTS (SELECT 1 FROM draft_checkpoints c WHERE c.document_id = x.storage_id AND c.generation > (SELECT n.generation FROM client_outbox n WHERE n.registration_id = x.registration_id AND n.document_id = x.document_id AND n.operation_kind = 'content' AND n.status = 'committed' AND n.terminal_kind IS NULL ORDER BY n.operation_seq DESC LIMIT 1)) ORDER BY x.operation_seq LIMIT 32")
+        let candidates = sqlx::query("SELECT x.operation_id, x.document_id, x.storage_id FROM client_outbox x WHERE x.registration_id = ? AND x.operation_kind = 'content' AND NOT EXISTS (SELECT 1 FROM diagram_drafts d WHERE d.registration_id=x.registration_id AND d.node_id=x.document_id) AND x.operation_seq <= ? AND x.status = 'committed' AND x.terminal_kind IS NULL AND x.payload_retired = 0 AND EXISTS (SELECT 1 FROM client_outbox n WHERE n.registration_id = x.registration_id AND n.document_id = x.document_id AND n.operation_kind = 'content' AND n.status = 'committed' AND n.terminal_kind IS NULL AND n.operation_seq > x.operation_seq) AND NOT EXISTS (SELECT 1 FROM client_outbox d WHERE d.registration_id = x.registration_id AND d.dependency = x.operation_id AND d.status IN ('queued', 'sent', 'conflict')) AND NOT EXISTS (SELECT 1 FROM draft_checkpoints c WHERE c.document_id = x.storage_id AND c.generation > (SELECT n.generation FROM client_outbox n WHERE n.registration_id = x.registration_id AND n.document_id = x.document_id AND n.operation_kind = 'content' AND n.status = 'committed' AND n.terminal_kind IS NULL ORDER BY n.operation_seq DESC LIMIT 1)) ORDER BY x.operation_seq LIMIT 32")
             .bind(registration_id).bind(confirmed).fetch_all(&mut *transaction).await.map_err(storage_error)?;
         let mut clean_documents = std::collections::HashMap::new();
         for candidate in candidates {
@@ -5035,7 +5036,7 @@ impl ClientStore {
         {
             return Err(StoreError::InvalidReceipt);
         }
-        validate_document(&item.document_id, &item.bytes, &commit.content_revision)
+        validate_document(&item.document_id, &[], &commit.content_revision)
             .map_err(|_| StoreError::InvalidReceipt)?;
         let etag = format!("\"{}\"", commit.content_revision);
         notryx_protocol::ContentPrecondition::parse(&etag)
@@ -5054,17 +5055,27 @@ impl ClientStore {
             return Err(StoreError::InvalidReceipt);
         }
         let storage_id: String = row.try_get("storage_id").map_err(storage_error)?;
-        let changed =
-            sqlx::query("UPDATE draft_bases SET bytes = ?, revision = ? WHERE document_id = ?")
-                .bind(&item.bytes)
-                .bind(&commit.content_revision)
-                .bind(&storage_id)
-                .execute(&mut *transaction)
-                .await
-                .map_err(storage_error)?
-                .rows_affected();
-        if changed != 1 {
-            return Err(StoreError::UnsupportedFormat);
+        if !crate::diagram_drafts::apply_commit(
+            &mut transaction,
+            registration_id,
+            &storage_id,
+            &item,
+            commit,
+        )
+        .await?
+        {
+            let changed =
+                sqlx::query("UPDATE draft_bases SET bytes = ?, revision = ? WHERE document_id = ?")
+                    .bind(&item.bytes)
+                    .bind(&commit.content_revision)
+                    .bind(&storage_id)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?
+                    .rows_affected();
+            if changed != 1 {
+                return Err(StoreError::UnsupportedFormat);
+            }
         }
         sqlx::query("UPDATE client_outbox SET status = 'committed', committed_revision = ? WHERE operation_id = ?")
             .bind(&commit.content_revision).bind(&item.operation_id).execute(&mut *transaction).await.map_err(storage_error)?;
@@ -5487,11 +5498,16 @@ async fn frozen_review_summary(
     let retired: i64 = row.try_get("payload_retired").map_err(storage_error)?;
     let length: i64 = row.try_get("payload_len").map_err(storage_error)?;
     let hash: String = row.try_get("payload_hash").map_err(storage_error)?;
+    let max_payload = if kind == FrozenDocumentOperationKind::Content {
+        crate::diagram_drafts::MAX_DIAGRAM_BYTES
+    } else {
+        super::MAX_DOCUMENT_BYTES
+    };
     if parsed.to_string() != id
         || sequence <= 0
         || retired != 0
         || length < 0
-        || length as u64 > super::MAX_DOCUMENT_BYTES as u64
+        || length as u64 > max_payload as u64
         || hash.strip_prefix("sha256:").is_none_or(|hex| {
             hex.len() != 64
                 || !hex

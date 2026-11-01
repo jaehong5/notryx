@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DrawioCheckpoint, DrawioEditorInput, DrawioExportRequest } from "../../../packages/protocol-types";
+import type { DrawioCheckpoint, DrawioEditorInput, DrawioExportRequest, DrawioSaveRequest, DrawioSaveState } from "../../../packages/protocol-types";
 import { canBindDiagram, diagramEvent, MAX_DIAGRAM_XML_BYTES, type DiagramEvent } from "./drawio-bridge";
 import { DiagramDraftController, type DiagramDraftState } from "./drawio-draft-controller";
 import "./drawio-editor.css";
@@ -11,12 +11,23 @@ const retry = document.querySelector<HTMLButtonElement>("#retry")!;
 const exportPng = document.querySelector<HTMLButtonElement>("#export-png")!;
 const closeButton = document.querySelector<HTMLButtonElement>("#close")!;
 const confirmClose = document.querySelector<HTMLButtonElement>("#discard-confirm")!;
+const saveServer = document.querySelector<HTMLButtonElement>("#save-server")!;
+const serverStatus = document.querySelector<HTMLElement>("#server-status")!;
 let channel: MessageChannel | undefined;
 let input: DrawioEditorInput | undefined;
 let draft: DiagramDraftController | undefined;
 let recoveryNotice = "";
 let loaded = false;
 let busy = false;
+let canSave = false;
+let pngSource = false;
+let currentGeneration = "0";
+let localState: DiagramDraftState = "saved";
+let savedState: DrawioSaveState | undefined;
+let saveRequestFailed = false;
+let statusTimer: ReturnType<typeof setInterval> | undefined;
+let readingStatus = false;
+let disposed = false;
 let exportSequence = 0;
 let pendingExport: { requestId: string; event: "snapshot" | "export"; resolve: (value: DiagramEvent) => void;
   reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> } | undefined;
@@ -29,18 +40,42 @@ function fail(message: string): void {
   status.textContent = message;
 }
 function draftStatus(state: DiagramDraftState): void {
+  localState = state;
   const messages = {
     pending: "변경 내용을 기기에 저장할 예정입니다.",
     saving: "기기에 초안을 저장하는 중입니다.",
-    saved: "기기에 초안을 저장했습니다. 서버 원본은 변경하지 않았습니다.",
+    saved: "기기에 초안을 저장했습니다.",
     error: "초안을 저장하지 못했습니다. 창을 유지하고 재시도해 주세요. 지원 범위를 넘긴 편집은 되돌려 주세요.",
   };
   status.textContent = recoveryNotice + messages[state];
   retry.hidden = state !== "error";
+  renderServerStatus();
+}
+function renderServerStatus(): void {
+  if (!canSave || !savedState || saveRequestFailed) return;
+  const { status: result, generation } = savedState;
+  serverStatus.textContent = result === "committed"
+    ? savedState.matches_draft && generation === currentGeneration && localState === "saved" ? "서버에 저장했습니다."
+      : "이전 저장 요청은 서버에 반영됐습니다. 이후 편집은 서버에 저장을 눌러 주세요."
+    : result === "conflict" ? "서버 원본이 바뀌어 저장하지 못했습니다. 기기 초안과 서버 원본을 보존합니다."
+    : result === "failed" || result === "needs_review" ? "서버 저장에 확인이 필요합니다. 기기 초안을 보존합니다."
+    : result === "pending" ? "서버 전송 대기 중입니다. 이후 편집은 전송 완료 후 다시 저장해 주세요."
+    : "서버에 저장을 누르면 현재 초안을 전송합니다.";
+}
+async function refreshSaveStatus(): Promise<void> {
+  if (!canSave || !loaded || disposed || readingStatus || busy) return;
+  readingStatus = true;
+  try {
+    const value = await invoke<DrawioSaveState>("drawio_save_status");
+    if (!disposed && !busy) { savedState = value; renderServerStatus(); }
+  } catch {
+    if (!disposed) serverStatus.textContent = "서버 저장 상태를 확인하지 못했습니다. 기기 초안은 유지합니다.";
+  } finally { readingStatus = false; }
 }
 function setBusy(value: boolean): void {
   busy = value;
   exportPng.disabled = value || !loaded;
+  saveServer.disabled = value || !loaded || !canSave;
   closeButton.disabled = retry.disabled = confirmClose.disabled = value;
   frame.inert = value;
 }
@@ -78,6 +113,33 @@ async function checkpointSnapshot(): Promise<{ xml: string; generation: string }
   const generation = await draft.flush();
   return { xml: snapshot.xml, generation };
 }
+saveServer.addEventListener("click", () => {
+  if (busy || !loaded || !draft || !channel || !canSave) return;
+  saveRequestFailed = false;
+  setBusy(true);
+  // Status text changes the viewport dimensions serialized into draw.io XML.
+  serverStatus.textContent = "서버 저장을 준비하고 있습니다.";
+  void (async () => {
+    const { xml, generation } = await checkpointSnapshot();
+    const request: DrawioSaveRequest = { generation, png_base64: null };
+    if (pngSource) {
+      const png = await requestExport("export", xml);
+      if (png.event !== "export") throw new Error("invalid PNG");
+      request.png_base64 = png.png;
+    }
+    savedState = await invoke<DrawioSaveState>("drawio_save", { request });
+    recoveryNotice = "";
+    renderServerStatus();
+  })().catch(() => {
+    saveRequestFailed = true;
+    serverStatus.textContent = "서버 저장을 요청하지 못했습니다. 기기 초안을 유지하고 다시 시도해 주세요.";
+  }).finally(() => {
+    if (pendingExport) clearTimeout(pendingExport.timer);
+    pendingExport = undefined;
+    if (pngSource) channel?.port1.postMessage(JSON.stringify({ action: "cancel-export" }));
+    setBusy(false);
+  });
+});
 exportPng.addEventListener("click", () => {
   if (busy || !loaded || !draft || !channel) return;
   setBusy(true);
@@ -103,6 +165,8 @@ exportPng.addEventListener("click", () => {
 });
 window.addEventListener("notryx-close-requested", askClose);
 window.addEventListener("pagehide", () => {
+  disposed = true;
+  clearInterval(statusTimer);
   clearTimeout(deadline);
   if (pendingExport) clearTimeout(pendingExport.timer);
   channel?.port1.close();
@@ -131,8 +195,10 @@ window.addEventListener("message", (event: MessageEvent) => {
     } else if (value.event === "load" && !loaded) {
       loaded = true;
       exportPng.disabled = busy;
+      saveServer.disabled = busy || !canSave;
       clearTimeout(deadline);
-      status.textContent = recoveryNotice + "기기 초안을 편집할 수 있습니다. 서버 원본은 변경하지 않습니다.";
+      status.textContent = recoveryNotice + "기기 초안을 편집할 수 있습니다.";
+      void refreshSaveStatus();
     } else if (value.event === "autosave" && loaded) {
       draft?.change(value.xml);
     } else if (value.event === "draft-error") {
@@ -151,11 +217,25 @@ void invoke<DrawioEditorInput>("drawio_load").then((value) => {
   if (!value || typeof value.title !== "string" || typeof value.xml !== "string"
     || !value.xml || new TextEncoder().encode(value.xml).length > MAX_DIAGRAM_XML_BYTES
     || typeof value.generation !== "string" || !/^(0|[1-9][0-9]*)$/u.test(value.generation)
-    || typeof value.restored !== "boolean" || typeof value.source_changed !== "boolean") throw new Error("invalid input");
+    || typeof value.restored !== "boolean" || typeof value.source_changed !== "boolean"
+    || typeof value.can_save !== "boolean") throw new Error("invalid input");
+  canSave = value.can_save;
+  pngSource = value.title.toLowerCase().endsWith(".png");
+  currentGeneration = value.generation;
+  saveServer.hidden = serverStatus.hidden = !canSave;
+  if (canSave) serverStatus.textContent = "서버 저장 상태를 확인하고 있습니다.";
+  document.querySelector("#save-mode")!.textContent = pngSource
+    ? "편집 가능한 PNG 원본은 서버에 저장을 눌러 반영합니다."
+    : "XML 원본은 서버에 저장을 눌러 반영합니다.";
+  if (canSave) statusTimer = setInterval(() => { void refreshSaveStatus(); }, 2000);
   recoveryNotice = value.source_changed ? "서버 원본이 바뀌었습니다. 이전 원본의 기기 초안을 복구했습니다. "
     : value.restored ? "기기 초안을 복구했습니다. " : "";
   draft = new DiagramDraftController(value.generation, {
-    save: request => invoke<DrawioCheckpoint>("drawio_checkpoint", { request }),
+    save: async request => {
+      const result = await invoke<DrawioCheckpoint>("drawio_checkpoint", { request });
+      currentGeneration = result.generation;
+      return result;
+    },
     close: () => invoke("drawio_close"),
     status: draftStatus,
   });

@@ -1,4 +1,7 @@
-use notryx_client_store::{ClientStore, DiagramDraftCheckpoint, RegistrationBinding, StoreError};
+use notryx_client_store::{
+    ClientStore, DiagramDraftCheckpoint, OutboxCommit, OutboxConflict, OutboxOperation,
+    OutboxStatus, RegistrationBinding, StoreError,
+};
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use uuid::Uuid;
 
@@ -28,6 +31,305 @@ async fn connect(path: &std::path::Path) -> SqliteConnection {
     SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(path))
         .await
         .unwrap()
+}
+
+fn receipt(item: &OutboxOperation, revision: &str) -> OutboxCommit {
+    OutboxCommit {
+        operation_id: item.operation_id.clone(),
+        operation_seq: item.operation_seq,
+        workspace_epoch: item.binding.workspace_epoch.clone(),
+        document_id: item.document_id.clone(),
+        content_revision: revision.into(),
+        content_hash: item.payload_hash.clone(),
+    }
+}
+
+#[tokio::test]
+async fn diagram_queue_reopens_with_exact_payload_and_shares_fifo_with_markdown() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("client.sqlite");
+    let registration = binding();
+    let mut store = ClientStore::open(&path).await.unwrap();
+    store.activate_registration(&registration).await.unwrap();
+    let markdown = store
+        .open_registered_document(&registration, "markdown", b"base", "md-rev")
+        .await
+        .unwrap();
+    store
+        .save_registered_checkpoint(
+            &registration,
+            "markdown",
+            &markdown.edit_session_id,
+            1,
+            b"edited",
+        )
+        .await
+        .unwrap();
+    let first = store
+        .queue_checkpoint(&registration, "markdown", 1)
+        .await
+        .unwrap();
+    let xml = "<mxfile>first</mxfile>";
+    store
+        .save_diagram_draft(&registration, NODE, &checkpoint(0, xml))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.queue_diagram_checkpoint(&registration, NODE, 2).await,
+        Err(StoreError::GenerationMismatch)
+    );
+    let diagram = store
+        .queue_diagram_checkpoint(&registration, NODE, 1)
+        .await
+        .unwrap();
+    assert_eq!(diagram.operation_seq, first.operation_seq + 1);
+    assert_eq!(diagram.bytes, xml.as_bytes());
+    assert_eq!(
+        diagram.expected_revision.as_deref(),
+        Some("original-revision")
+    );
+    assert_eq!(
+        store
+            .queue_diagram_checkpoint(&registration, NODE, 1)
+            .await
+            .unwrap(),
+        diagram
+    );
+    store.close().await.unwrap();
+    let mut store = ClientStore::open(&path).await.unwrap();
+    assert_eq!(
+        store
+            .read_outbox_operation(&registration, &diagram.operation_id)
+            .await
+            .unwrap(),
+        Some(diagram.clone())
+    );
+    assert_eq!(
+        store.next_outbox(&registration).await.unwrap(),
+        Some(first.clone())
+    );
+    store.prepare_outbox(&registration).await.unwrap();
+    store
+        .apply_outbox_commit(&registration, &receipt(&first, "md-saved"))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.next_outbox(&registration).await.unwrap(),
+        Some(diagram)
+    );
+    assert_eq!(store.list_registered_drafts().await.unwrap().len(), 1);
+    assert!(
+        store
+            .open_registered_document(&registration, NODE, BASE.as_bytes(), "original-revision")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn diagram_late_ack_preserves_newer_xml_and_next_save_uses_committed_base() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("client.sqlite");
+    let registration = binding();
+    let mut store = ClientStore::open(&path).await.unwrap();
+    store.activate_registration(&registration).await.unwrap();
+    let first_xml = "<mxfile>first</mxfile>";
+    let newer_xml = "<mxfile>newer</mxfile>";
+    store
+        .save_diagram_draft(&registration, NODE, &checkpoint(0, first_xml))
+        .await
+        .unwrap();
+    let first = store
+        .queue_diagram_checkpoint(&registration, NODE, 1)
+        .await
+        .unwrap();
+    store.prepare_outbox(&registration).await.unwrap();
+    store
+        .save_diagram_draft(&registration, NODE, &checkpoint(1, newer_xml))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.queue_diagram_checkpoint(&registration, NODE, 2).await,
+        Err(StoreError::OutboxBlocked)
+    );
+    assert_eq!(
+        store
+            .read_outbox_operation(&registration, &first.operation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        first_xml.as_bytes()
+    );
+    store
+        .apply_outbox_commit(&registration, &receipt(&first, "saved-first"))
+        .await
+        .unwrap();
+    store
+        .apply_outbox_commit(&registration, &receipt(&first, "saved-first"))
+        .await
+        .unwrap();
+    let draft = store
+        .read_diagram_draft(&registration, NODE)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            draft.generation,
+            draft.xml.as_str(),
+            draft.base_xml.as_str(),
+            draft.base_revision.as_str()
+        ),
+        (2, newer_xml, first_xml, "saved-first")
+    );
+    let second = store
+        .queue_diagram_checkpoint(&registration, NODE, 2)
+        .await
+        .unwrap();
+    assert_eq!(second.expected_revision.as_deref(), Some("saved-first"));
+    assert_eq!(second.operation_seq, first.operation_seq + 1);
+    store.prepare_outbox(&registration).await.unwrap();
+    store
+        .apply_outbox_commit(&registration, &receipt(&second, "saved-second"))
+        .await
+        .unwrap();
+    let ack = serde_json::from_value(serde_json::json!({
+        "workspace_epoch": registration.workspace_epoch,
+        "device_stream_id": registration.device_stream_id,
+        "last_seq": "2", "retired_through": "2",
+    }))
+    .unwrap();
+    store
+        .confirm_receipt_ack(&registration, &ack)
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let mut store = ClientStore::open(&path).await.unwrap();
+    let draft = store
+        .read_diagram_draft(&registration, NODE)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(draft.xml, newer_xml);
+    assert_eq!(draft.base_xml, newer_xml);
+    assert_eq!(draft.base_revision, "saved-second");
+    assert_eq!(
+        store
+            .confirmed_receipt_through(&registration)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        store
+            .queue_diagram_checkpoint(&registration, NODE, 2)
+            .await
+            .unwrap()
+            .status,
+        OutboxStatus::Committed
+    );
+    assert!(store.list_registered_drafts().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn diagram_conflict_and_registration_change_preserve_exact_draft_and_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("client.sqlite");
+    let registration = binding();
+    let mut store = ClientStore::open(&path).await.unwrap();
+    store.activate_registration(&registration).await.unwrap();
+    store
+        .save_diagram_draft(&registration, NODE, &checkpoint(0, "<mxfile>mine</mxfile>"))
+        .await
+        .unwrap();
+    let queued = store
+        .queue_diagram_checkpoint(&registration, NODE, 1)
+        .await
+        .unwrap();
+    let before = store.read_diagram_draft(&registration, NODE).await.unwrap();
+    store.prepare_outbox(&registration).await.unwrap();
+    store
+        .apply_outbox_conflict(
+            &registration,
+            &OutboxConflict {
+                operation_id: queued.operation_id.clone(),
+                operation_seq: queued.operation_seq,
+                workspace_epoch: registration.workspace_epoch.clone(),
+                current_revision: "peer-revision".into(),
+                current_etag: "\"peer-revision\"".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.queue_diagram_checkpoint(&registration, NODE, 1).await,
+        Err(StoreError::OutboxBlocked)
+    );
+    assert_eq!(
+        store.read_diagram_draft(&registration, NODE).await.unwrap(),
+        before
+    );
+    let next = RegistrationBinding {
+        device_stream_id: Uuid::new_v4().to_string(),
+        ..registration.clone()
+    };
+    store.activate_registration(&next).await.unwrap();
+    store
+        .save_diagram_draft(&next, NODE, &checkpoint(0, BASE))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.queue_diagram_checkpoint(&next, NODE, 1).await,
+        Err(StoreError::ReconciliationRequired)
+    );
+    let retained = store
+        .read_outbox_operation(&registration, &queued.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.bytes, queued.bytes);
+    assert_eq!(retained.status, OutboxStatus::Conflict);
+    assert!(retained.frozen);
+}
+
+#[tokio::test]
+async fn diagram_queue_rejects_existing_markdown_checkpoint_without_overwriting_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("client.sqlite");
+    let registration = binding();
+    let mut store = ClientStore::open(&path).await.unwrap();
+    store.activate_registration(&registration).await.unwrap();
+    let opened = store
+        .open_registered_document(&registration, NODE, b"base", "md-rev")
+        .await
+        .unwrap();
+    store
+        .save_registered_checkpoint(&registration, NODE, &opened.edit_session_id, 1, b"markdown")
+        .await
+        .unwrap();
+    store
+        .close_registered_document(&registration, NODE, &opened.edit_session_id)
+        .await
+        .unwrap();
+    store
+        .save_diagram_draft(&registration, NODE, &checkpoint(0, BASE))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.queue_diagram_checkpoint(&registration, NODE, 1).await,
+        Err(StoreError::OutboxBlocked)
+    );
+    assert_eq!(
+        store
+            .read_registered_checkpoint(&registration, NODE)
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        b"markdown"
+    );
+    assert!(store.next_outbox(&registration).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -177,7 +479,7 @@ async fn v24_upgrade_preserves_existing_drafts_and_credential_expiry() {
         .unwrap();
     store.close().await.unwrap();
     let mut db = connect(&path).await;
-    sqlx::raw_sql("DROP TABLE IF EXISTS diagram_drafts; PRAGMA user_version=24;")
+    sqlx::raw_sql("DROP TABLE IF EXISTS diagram_save_snapshots; DROP TABLE IF EXISTS diagram_drafts; PRAGMA user_version=24;")
         .execute(&mut db)
         .await
         .unwrap();
@@ -232,7 +534,7 @@ async fn v24_upgrade_preserves_existing_drafts_and_credential_expiry() {
             .fetch_one(&mut db)
             .await
             .unwrap(),
-        25
+        26
     );
 }
 
@@ -269,5 +571,153 @@ async fn invalid_checkpoints_leave_the_previous_draft_intact() {
     assert_eq!(
         store.read_diagram_draft(&registration, NODE).await.unwrap(),
         original
+    );
+}
+
+#[tokio::test]
+async fn png_request_survives_reopen_and_late_ack_keeps_newer_xml() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("client.sqlite");
+    let registration = binding();
+    let mut store = ClientStore::open(&path).await.unwrap();
+    store.activate_registration(&registration).await.unwrap();
+    let xml = "<mxfile>PNG snapshot</mxfile>";
+    store
+        .save_diagram_draft(&registration, NODE, &checkpoint(0, xml))
+        .await
+        .unwrap();
+    let mut png = vec![23; 5 * 1024 * 1024 + 1];
+    png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    let queued = store
+        .queue_diagram_png(&registration, NODE, 1, &png)
+        .await
+        .unwrap();
+    assert_eq!(queued.bytes, png);
+    assert_eq!(
+        store
+            .read_diagram_operation_xml(&registration, &queued.operation_id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(xml)
+    );
+    assert_eq!(
+        store
+            .document_outbox_state(&registration, NODE)
+            .await
+            .unwrap()
+            .latest
+            .unwrap()
+            .payload_len,
+        png.len()
+    );
+    store.close().await.unwrap();
+    let mut store = ClientStore::open(&path).await.unwrap();
+    assert_eq!(
+        store
+            .read_outbox_operation(&registration, &queued.operation_id)
+            .await
+            .unwrap(),
+        Some(queued.clone())
+    );
+    store.prepare_outbox(&registration).await.unwrap();
+    let newer = "<mxfile>later local edit</mxfile>";
+    store
+        .save_diagram_draft(&registration, NODE, &checkpoint(1, newer))
+        .await
+        .unwrap();
+    store
+        .apply_outbox_commit(&registration, &receipt(&queued, "png-saved"))
+        .await
+        .unwrap();
+    let draft = store
+        .read_diagram_draft(&registration, NODE)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            draft.generation,
+            draft.xml.as_str(),
+            draft.base_xml.as_str(),
+            draft.base_revision.as_str()
+        ),
+        (2, newer, xml, "png-saved")
+    );
+    let second = store
+        .queue_diagram_png(&registration, NODE, 2, &png)
+        .await
+        .unwrap();
+    assert_eq!(second.expected_revision.as_deref(), Some("png-saved"));
+    assert_ne!(second.operation_id, queued.operation_id);
+    let replacement = RegistrationBinding {
+        device_id: Uuid::new_v4().to_string(),
+        device_stream_id: Uuid::new_v4().to_string(),
+        ..registration.clone()
+    };
+    store.activate_registration(&replacement).await.unwrap();
+    let frozen = store
+        .frozen_document_review(&replacement, &registration, NODE, 0, 20)
+        .await
+        .unwrap();
+    assert_eq!(frozen.operations.len(), 1);
+    assert_eq!(frozen.operations[0].operation_id, second.operation_id);
+    store.close().await.unwrap();
+    let mut recovery = notryx_client_store::RecoveryStore::open(&path)
+        .await
+        .unwrap();
+    assert_eq!(
+        recovery
+            .operation_bytes(&second.operation_id)
+            .await
+            .unwrap(),
+        png
+    );
+}
+
+#[tokio::test]
+async fn png_reexport_reuses_xml_snapshot_and_enforces_twenty_five_mib_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let registration = binding();
+    let mut store = ClientStore::open(directory.path().join("client.sqlite"))
+        .await
+        .unwrap();
+    store.activate_registration(&registration).await.unwrap();
+    let xml = "<mxfile>same drawing</mxfile>";
+    store
+        .save_diagram_draft(&registration, NODE, &checkpoint(0, xml))
+        .await
+        .unwrap();
+    let mut png = vec![11; 25 * 1024 * 1024];
+    png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    let queued = store
+        .queue_diagram_png(&registration, NODE, 1, &png)
+        .await
+        .unwrap();
+    store
+        .save_diagram_draft(&registration, NODE, &checkpoint(1, xml))
+        .await
+        .unwrap();
+    let different_encoding = b"\x89PNG\r\n\x1a\nreencoded";
+    assert_eq!(
+        store
+            .queue_diagram_png(&registration, NODE, 2, different_encoding)
+            .await
+            .unwrap(),
+        queued
+    );
+    png.push(0);
+    assert!(
+        store
+            .queue_diagram_png(&registration, NODE, 2, &png)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .read_outbox_operation(&registration, &queued.operation_id)
+            .await
+            .unwrap(),
+        Some(queued)
     );
 }

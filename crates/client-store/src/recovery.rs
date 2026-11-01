@@ -427,7 +427,9 @@ impl RecoveryStore {
         if self.schema_version < 3 {
             return Err(StoreError::MissingDraft);
         }
-        let query = if self.schema_version >= 5 {
+        let query = if self.schema_version >= 26 {
+            "SELECT bytes FROM client_outbox WHERE operation_id=? AND payload_retired=0 AND length(bytes)<=26214400"
+        } else if self.schema_version >= 5 {
             "SELECT bytes FROM client_outbox WHERE operation_id=? AND payload_retired=0 AND length(bytes)<=5242880"
         } else {
             "SELECT bytes FROM client_outbox WHERE operation_id=? AND length(bytes)<=5242880"

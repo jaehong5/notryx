@@ -246,6 +246,17 @@ impl ClientStore {
     ) -> Result<OpenedDocument, StoreError> {
         validate_document(document_id, base, base_revision)?;
         let registration_id = self.registration_id(binding, true).await?;
+        let diagram: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM diagram_drafts WHERE registration_id=? AND node_id=?)",
+        )
+        .bind(registration_id)
+        .bind(document_id)
+        .fetch_one(&mut self.connection)
+        .await
+        .map_err(storage_error)?;
+        if diagram != 0 {
+            return Err(StoreError::OutboxBlocked);
+        }
         if self
             .delete_blocks_edit(registration_id, document_id)
             .await?

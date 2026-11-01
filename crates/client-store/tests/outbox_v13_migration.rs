@@ -113,7 +113,7 @@ async fn v12_to_v13_preserves_delete_identity_draft_and_stream() {
         .fetch_one(&mut db)
         .await
         .unwrap();
-    assert_eq!(version, 25);
+    assert_eq!(version, 26);
     let errors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
         .fetch_one(&mut db)
         .await

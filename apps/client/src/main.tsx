@@ -995,6 +995,7 @@ function App() {
     const syncReady = listen("workspace-sync-status-changed", () => {
       if (modeRef.current === "workspace") void refreshWorkspaceSync().catch((cause) => setConnectionError(String(cause)));
     });
+    const diagramQueued = listen("drawio-save-queued", () => scheduler.kick());
     const credentialChanged = listen("workspace-credential-status-changed", () => { void refreshCredentialStatus(); }).catch(() => {
       if (credentialMounted.current) setCredentialMessage("인증정보 저장 상태 알림을 연결하지 못했습니다.");
       return () => {};
@@ -1049,7 +1050,7 @@ function App() {
       clearTimeout(previewTimer.current);
       void instance.dispose().then(() => scheduler.dispose()).catch(() => {});
       void stop.then((unlisten) => unlisten()).catch(() => {});
-      for (const listener of [syncReady, metadataChanged, credentialChanged]) {
+      for (const listener of [syncReady, metadataChanged, credentialChanged, diagramQueued]) {
         void listener.then((unlisten) => unlisten()).catch(() => {});
       }
     };
@@ -1070,7 +1071,7 @@ function App() {
     const found = [...sessionModes.current.entries()].find(([, session]) => session.uiId === state.selected && session.mode === "workspace");
     const resolved = found && resolveWorkspaceReference(nodesRef.current, found[1].documentId, target);
     if (!found || !resolved) { setConnectionError("다이어그램이 있는 문서를 다시 열어 주세요."); return; }
-    if (!window.confirm("다이어그램 편집 내용은 이 기기의 초안으로만 저장합니다. 서버 원본은 변경하지 않습니다. 열까요?")) return;
+    if (!window.confirm("다이어그램을 엽니다. 초안은 이 기기에 자동 저장하고, 서버 원본은 서버에 저장을 눌러 반영합니다.")) return;
     void openWorkspaceDiagram(found[1].documentId, found[0], resolved.node).catch((error: unknown) => {
       const reason = error instanceof Error ? error.message : String(error);
       if (reason === "preview_busy") setConnectionError("이미지를 불러오는 중입니다. 잠시 후 다이어그램을 다시 열어 주세요.");

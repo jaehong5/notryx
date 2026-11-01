@@ -34,11 +34,103 @@ beforeEach(() => {
   dialog().close = () => { dialog().open = false; };
   invoke.mockReset().mockImplementation(async (command: string) => {
     if (command === "drawio_load") return {
-      title: "Synthetic diagram", xml: "<mxfile/>", generation: "0", restored: false, source_changed: false,
+      title: "Synthetic.drawio", xml: "<mxfile/>", generation: "0", restored: false, source_changed: false,
+      can_save: true,
     };
     if (command === "drawio_checkpoint") return { generation: "1" };
+    if (command === "drawio_save_status") return { generation: null, matches_draft: false, status: "idle" };
+    if (command === "drawio_save") return { generation: "1", matches_draft: true, status: "pending" };
     return undefined;
   });
+});
+
+test("server save queues only the durable latest snapshot and keeps the window open", async () => {
+  await open();
+  button("save-server").click();
+  expect(invoke.mock.calls.some(([command]) => command === "drawio_save")).toBe(false);
+  receive({ event: "snapshot", requestId: snapshot(), xml: latestXml });
+  await settle();
+  expect(invoke).toHaveBeenCalledWith("drawio_save", { request: { generation: "1", png_base64: null } });
+  expect(invoke).not.toHaveBeenCalledWith("drawio_close");
+});
+
+test("failed local checkpoint never queues a server write", async () => {
+  await open();
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "drawio_checkpoint") throw new Error("disk full");
+  });
+  button("save-server").click();
+  receive({ event: "snapshot", requestId: snapshot(), xml: latestXml });
+  await settle();
+  expect(invoke.mock.calls.some(([command]) => command === "drawio_save")).toBe(false);
+  expect(button("close").disabled).toBe(false);
+  expect(document.querySelector("#status")!.textContent).toContain("초안을 저장하지 못했습니다");
+});
+
+test("a committed older snapshot does not label subsequent edits as saved to server", async () => {
+  await open();
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "drawio_checkpoint") return { generation: "1" };
+    return { generation: "1", matches_draft: true, status: "committed" };
+  });
+  button("save-server").click();
+  receive({ event: "snapshot", requestId: snapshot(), xml: latestXml });
+  await settle();
+  expect(document.querySelector("#server-status")!.textContent).toBe("서버에 저장했습니다.");
+  receive({ event: "autosave", xml: "<mxfile><diagram>추가 입력</diagram></mxfile>" });
+  expect(document.querySelector("#server-status")!.textContent).toContain("이후 편집");
+});
+
+test("a conflict preserves the open editor and reports both copies are retained", async () => {
+  await open();
+  invoke.mockImplementation(async (command: string) => command === "drawio_checkpoint"
+    ? { generation: "1" } : { generation: "1", matches_draft: true, status: "conflict" });
+  button("save-server").click();
+  receive({ event: "snapshot", requestId: snapshot(), xml: latestXml });
+  await settle();
+  expect(document.querySelector("#server-status")!.textContent).toContain("서버 원본이 바뀌어");
+  expect(document.querySelector("#diagram")).not.toBeNull();
+  expect(invoke).not.toHaveBeenCalledWith("drawio_close");
+});
+
+test("PNG server save exports the durable snapshot before queuing original PNG bytes", async () => {
+  const previous = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command: string) => command === "drawio_load"
+    ? Promise.resolve({ title: "Image.drawio.png", xml: "<mxfile/>", generation: "0",
+      restored: false, source_changed: false, can_save: true }) : previous(command));
+  await open();
+  button("save-server").click();
+  expect(document.querySelector("#server-status")!.textContent).toContain("서버 저장을 준비");
+  receive({ event: "snapshot", requestId: snapshot(), xml: latestXml });
+  await settle();
+  expect(invoke.mock.calls.some(([command]) => command === "drawio_save")).toBe(false);
+  const request = sent.filter(value => value.action === "export").at(-1)!;
+  expect(request.xml).toBe(latestXml);
+  receive({ event: "export", requestId: request.requestId, data: "data:image/png;base64,aGVsbG8=" });
+  await settle();
+  expect(invoke).toHaveBeenCalledWith("drawio_save", { request: { generation: "1", png_base64: "aGVsbG8=" } });
+  expect(invoke).not.toHaveBeenCalledWith("drawio_export_png", expect.anything());
+  expect(button("close").disabled).toBe(false);
+});
+
+test("PNG generation failure keeps the checkpoint and never requests server storage", async () => {
+  const previous = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command: string) => command === "drawio_load"
+    ? Promise.resolve({ title: "Image.drawio.png", xml: "<mxfile/>", generation: "0",
+      restored: false, source_changed: false, can_save: true }) : previous(command));
+  await open();
+  button("save-server").click();
+  receive({ event: "snapshot", requestId: snapshot(), xml: latestXml });
+  await settle();
+  const request = sent.filter(value => value.action === "export").at(-1)!;
+  receive({ event: "export-error", requestId: request?.requestId });
+  await settle();
+  expect(invoke).toHaveBeenCalledWith("drawio_checkpoint", { request: { generation: "0", xml: latestXml } });
+  expect(invoke.mock.calls.some(([command]) => command === "drawio_save")).toBe(false);
+  expect(button("close").disabled).toBe(false);
+  expect(document.querySelector("#server-status")!.textContent).toContain("기기 초안");
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(document.querySelector("#server-status")!.textContent).toContain("서버 저장을 요청하지 못했습니다.");
 });
 
 afterEach(() => {

@@ -136,6 +136,12 @@ mod tests {
         let broken_diagram =
             include_bytes!("../../../../crates/client-runtime/tests/fixtures/drawio-invalid.png");
         std::fs::write(notes.join("Diagram.drawio.png"), diagram).unwrap();
+        let xml = notryx_client_runtime::drawio_editor_xml(diagram, true).unwrap();
+        std::fs::write(notes.join("Original.drawio"), xml).unwrap();
+        workspace
+            .adopt_root_document("Original.drawio")
+            .await
+            .unwrap();
         std::fs::write(notes.join("Broken.drawio.png"), broken_diagram).unwrap();
         std::fs::write(notes.join("Bad.svg"), b"<svg onload='alert(1)'/>").unwrap();
         let document = workspace.adopt_root_document("Document.md").await.unwrap();
@@ -342,6 +348,13 @@ mod tests {
             );
             assert_ne!(STANDARD.decode(result.png_base64).unwrap(), original);
         }
+        let mut xml_request = request.clone();
+        xml_request.node = nodes
+            .iter()
+            .find(|node| node.name == "Original.drawio")
+            .unwrap()
+            .clone();
+        crate::drawio_native::tests::server_save_roundtrip(state.clone(), &xml_request).await;
         assert!(
             STANDARD
                 .decode(preview.png_base64)

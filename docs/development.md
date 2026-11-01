@@ -153,13 +153,13 @@ WebDriver 시험은 합성 원문으로 5종 그림 표시, 원문 보존, 오�
 
 ## draw.io 미리보기와 기기 초안 편집
 
-작업 공간 문서에서 `![구성도](./assets/system.drawio.png)`처럼 상대 경로로 PNG를 참조하면 이미지를 표시하고 내장 편집 데이터의 상태를 안내한다. `.png`에도 `mxfile` 데이터가 있으면 검사한다. `.drawio.png`에 편집 데이터가 없거나 손상됐으면 이유를 표시하고 정상 픽셀은 계속 보여 준다. Linux에서는 정상 편집 데이터가 있는 PNG의 `편집 (기기 초안)` 버튼으로 별도 창을 열 수 있다. Markdown의 `.drawio` 첨부 링크도 같은 창에서 연다. 편집 후 1초 멈추면 XML 초안을 기기에 저장한다. 닫을 때는 남은 초안을 저장하고, 실패하면 창을 유지한다. 서버 원본 저장은 후속 구현이다.
+작업 공간 문서에서 `![구성도](./assets/system.drawio.png)`처럼 상대 경로로 PNG를 참조하면 이미지를 표시하고 내장 편집 데이터의 상태를 안내한다. `.png`에도 `mxfile` 데이터가 있으면 검사한다. `.drawio.png`에 편집 데이터가 없거나 손상됐으면 이유를 표시하고 정상 픽셀은 계속 보여 준다. Linux에서는 정상 편집 데이터가 있는 PNG의 `편집 (기기 초안)` 버튼으로 별도 창을 열 수 있다. Markdown의 `.drawio` 첨부 링크도 같은 창에서 연다. 편집 후 1초 멈추면 XML 초안을 기기에 저장한다. 닫을 때는 남은 초안을 저장하고, 실패하면 창을 유지한다. 기존 `.drawio` XML과 편집 데이터가 있는 PNG는 `서버에 저장`을 누르면 현재 입력을 기기에 저장한 뒤 전송 큐에 넣는다. PNG는 그 초안과 같은 XML을 내장한 이미지를 생성하고 Rust가 XML 일치와 픽셀을 검사한 뒤 원본 bytes를 전송한다. PNG 생성이나 검증이 실패하면 전송하지 않고 초안을 유지한다. 원본 revision이 달라졌으면 덮어쓰지 않고 기기 초안과 서버 원본을 보존한다. 다이어그램 충돌 해결 화면은 후속 구현이다.
 
-같은 등록 상태에서 다이어그램을 다시 열면 저장된 초안을 복구한다. 서버 원본의 revision이 바뀌어도 초안과 원래 base를 유지하고 변경 사실을 안내한다. 초안은 SQLite의 별도 테이블에 저장하며 일반 Markdown 초안 목록이나 outbox에 포함하지 않는다. 저장 완료 전에 앱이 종료되면 마지막 저장 이후 변경은 복구하지 못한다. 등록 교체 후 과거 초안은 DB에 보존하지만 과거 등록의 다이어그램 초안을 여는 UI는 아직 제공하지 않는다. 클라이언트 DB는 schema 25로 이전하며 기존 초안과 credential을 유지한다.
+같은 등록 상태에서 다이어그램을 다시 열면 저장된 초안을 복구한다. 서버 원본의 revision이 바뀌어도 초안과 원래 base를 유지하고 변경 사실을 안내한다. 초안은 SQLite의 별도 테이블에 저장하며 일반 Markdown 초안 목록에 포함하지 않는다. XML과 PNG 서버 저장은 기존 outbox와 순번을 공유한다. XML 초안은 5 MiB, PNG 전송은 25 MiB를 상한으로 둔다. PNG bytes와 해당 요청의 XML snapshot을 함께 영속화해 재시도와 늦은 응답에서도 같은 내용을 사용한다. 다이어그램마다 한 저장 요청만 진행하며, 전송 중 추가한 편집은 기기에 보존하고 이전 전송이 끝난 뒤 다시 저장한다. 응답이 늦게 와도 최신 초안을 바꾸지 않고 base만 갱신한다. 큐에 넣은 요청은 창을 닫아도 유지하며 기존 재연결 경로로 재시도한다. 현재 다이어그램의 성공한 전송 payload는 자동 정리 대상에서 제외한다. 저장 완료 전에 앱이 종료되면 마지막 저장 이후 변경은 복구하지 못한다. 등록 교체 후 과거 초안은 DB에 보존하지만 과거 등록의 다이어그램 초안을 여는 UI는 아직 제공하지 않는다. 클라이언트 DB는 schema 26으로 이전하며 기존 초안, credential과 전송 요청을 유지한다.
 
 Linux 편집 창의 ‘편집 가능한 PNG 내보내기’는 현재 입력 중인 도형 label을 확정하고 XML 초안을 기기에 저장한 뒤 `.drawio.png` 사본을 만든다. 저장 위치는 운영체제 파일 선택 창에서 지정한다. Rust는 PNG의 내장 XML과 저장된 초안의 일치, 이미지 디코딩과 크기를 검사하고 기존 파일을 덮어쓰지 않는다. 취소하거나 PNG 생성, 초안 저장 또는 파일 쓰기에 실패하면 편집 창과 기존 초안을 유지한다. 사본 내보내기는 서버 저장 완료를 뜻하지 않으며 `.drawio` 원본도 자동 변환하지 않는다. 현재 로컬 내보내기는 Linux에서만 제공한다.
 
-원본 PNG는 변경하지 않는다. Rust가 원본의 내장 데이터를 검사하고 표시용 PNG와 상태만 화면에 전달한다. 표시용 PNG에는 XML을 넣지 않으며 원본 저장이나 내보내기에 사용하지 않는다. 검사 통과는 실제 draw.io 편집기에서 다시 열 수 있다는 보장이 아니다.
+미리보기는 원본 PNG를 변경하지 않는다. Rust가 원본의 내장 데이터를 검사하고 표시용 PNG와 상태만 화면에 전달한다. 표시용 PNG에는 XML을 넣지 않으며 원본 저장이나 내보내기에 사용하지 않는다. 검사 통과는 실제 draw.io 편집기에서 다시 열 수 있다는 보장이 아니다.
 
 검사 대상은 `mxfile` 키의 `tEXt`와 `zTXt`, 비압축 모델과 압축된 diagram 페이지다. XML 원문 5 MiB, 압축 해제 후 합계 20 MiB, cell 5,000개, XML 깊이 64를 상한으로 둔다. DTD, 외부 entity와 원격 이미지 참조는 지원하지 않는다. PNG 자체에는 기존 미리보기 제한인 25 MiB, 16 megapixels, 한 변 8192px가 적용된다. 설계의 draw.io 40 megapixels 지원, `iTXt` 편집 데이터, CDATA와 HTML 이미지 label은 아직 제공하지 않는다.
 
@@ -171,9 +171,9 @@ cargo test --locked -j 1 -p notryx-client --lib preview_native::tests
 npm test -- apps/client/src/preview.test.ts apps/client/src/preview-image-ipc.test.ts
 ```
 
-Linux의 미리보기와 원본 보존은 `scripts/m2-workspace-webdriver.py`에서 검사한다. 별도 편집 창의 초안 저장, 실패 후 재시도와 재열기 복구, PNG 생성 실패, 사본 내보내기와 재열기는 `scripts/m4-drawio-webdriver.py`에서 합성 파일로 검사한다. 저장소 재개방은 `cargo test --locked -j 1 -p notryx-client-store --test diagram_drafts`로 검사한다. 이 시험은 서버 저장, 모든 다이어그램의 픽셀과 XML의 시각적 일치, 물리 한글 IME, 실제 키링을 사용한 앱 전체 재시작과 Android 실기기 검증을 대신하지 않는다.
+Linux의 미리보기와 원본 보존은 `scripts/m2-workspace-webdriver.py`에서 검사한다. 별도 편집 창의 초안 저장, 실패 후 재시도와 재열기 복구, PNG 생성 실패, 사본 내보내기와 재열기, XML 조건부 서버 저장과 충돌 보존, PNG 원본 저장과 재열기는 `scripts/m4-drawio-webdriver.py`에서 합성 파일로 검사한다. 저장소 재개방과 전송 큐 보존은 `cargo test --locked -j 1 -p notryx-client-store --test diagram_drafts`로 검사한다. 이 시험은 모든 다이어그램의 픽셀과 XML의 시각적 일치, 물리 한글 IME, 실제 키링을 사용한 앱 전체 재시작과 Android 실기기 검증을 대신하지 않는다.
 
-편집 창은 한 번에 하나만 연다. 현재 첨부 원본을 여는 단계에는 작업 공간 서버 연결이 필요하다. 받은 XML의 편집, 기기 초안 저장, PNG 생성과 편집기 자산 로드는 외부 네트워크 없이 동작한다. Rust가 현재 문서 세션과 첨부 revision을 확인하고 원본 또는 복구한 초안 XML을 편집 창에 한 번만 전달한다. main 화면에는 XML을 반환하지 않는다. draw.io는 `allow-scripts`만 허용한 opaque iframe에서 실행하고, 확인된 부모와 바인딩한 MessageChannel로 통신한다. 편집 창의 native 권한은 자기 입력 읽기, 바인딩된 다이어그램의 초안 저장, 검증된 PNG 사본 내보내기와 자기 창 닫기뿐이다. 같은 WebView 엔진을 쓰므로 독립 프로세스나 CPU 제한을 보장하지 않는다.
+편집 창은 한 번에 하나만 연다. 현재 첨부 원본을 여는 단계에는 작업 공간 서버 연결이 필요하다. 받은 XML의 편집, 기기 초안 저장, PNG 생성과 편집기 자산 로드는 외부 네트워크 없이 동작한다. Rust가 현재 문서 세션과 첨부 revision을 확인하고 원본 또는 복구한 초안 XML을 편집 창에 한 번만 전달한다. main 화면에는 XML을 반환하지 않는다. draw.io는 `allow-scripts`만 허용한 opaque iframe에서 실행하고, 확인된 부모와 바인딩한 MessageChannel로 통신한다. 편집 창의 native 권한은 자기 입력 읽기, 바인딩된 다이어그램의 초안 저장, XML 또는 검증된 PNG의 서버 저장 요청과 상태 조회, 검증된 PNG 사본 내보내기와 자기 창 닫기뿐이다. 같은 WebView 엔진을 쓰므로 독립 프로세스나 CPU 제한을 보장하지 않는다.
 
 [번들 manifest와 라이선스 고지](../third-party/drawio/NOTICE.md)에 draw.io 버전, archive 체크섬, 변경 파일과 자산별 사용 조건을 기록한다. 최초 개발 빌드는 고정 archive를 다운로드하며, 이후 아래 명령으로 네트워크 없이 준비할 수 있다. 편집기 실행에는 외부 서비스 계정이 필요 없다. Android 대상 빌드는 편집기 자산과 wrapper 페이지를 산출물에서 제외한다.
 
@@ -185,7 +185,7 @@ cargo test --locked -j 1 -p notryx-client --lib drawio_native::tests
 scripts/m3-secret-no-service.sh xvfb-run -a python3 scripts/m4-drawio-webdriver.py
 ```
 
-마지막 명령에는 `WebKitWebDriver`가 필요하다. PATH에 없으면 `--driver /path/to/WebKitWebDriver`로 지정한다. 기기 초안 편집과 Linux PNG 사본 내보내기는 AT-33/35 일부를 다루며, 서버 저장을 포함한 draw.io 편집 기능 전체의 완료를 뜻하지 않는다.
+마지막 명령에는 `WebKitWebDriver`가 필요하다. PATH에 없으면 `--driver /path/to/WebKitWebDriver`로 지정한다. 기기 초안 편집, XML/PNG 조건부 저장과 Linux PNG 사본 내보내기는 AT-06/07/08/33/35 일부를 다루며, draw.io 편집 기능 전체의 완료를 뜻하지 않는다.
 
 ## 사용자 JSON 테마
 

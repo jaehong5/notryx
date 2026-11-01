@@ -2032,6 +2032,22 @@ pub struct DrawioEditorInput {
     pub generation: String,
     pub restored: bool,
     pub source_changed: bool,
+    pub can_save: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct DrawioSaveRequest {
+    pub generation: String,
+    pub png_base64: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct DrawioSaveState {
+    pub generation: Option<String>,
+    pub matches_draft: bool,
+    pub status: WorkspaceSendStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]

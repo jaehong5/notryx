@@ -66,7 +66,7 @@ async fn v17_to_v18_preserves_existing_data_and_creates_empty_history() {
     );
     store.close().await.unwrap();
 
-    assert_integrity(&path, 25).await;
+    assert_integrity(&path, 26).await;
     assert_eq!(snapshot(&path).await, before);
     assert_eq!(v16_intents(&path).await, intents);
     assert_eq!(completed_markers(&path).await, markers);
@@ -86,7 +86,7 @@ async fn v17_to_v18_preserves_existing_data_and_creates_empty_history() {
         .close()
         .await
         .unwrap();
-    assert_integrity(&path, 25).await;
+    assert_integrity(&path, 26).await;
     assert_eq!(snapshot(&path).await, before);
 }
 
@@ -129,7 +129,7 @@ async fn failed_v18_migration_rolls_back_version_and_preserves_obstruction_and_d
         .close()
         .await
         .unwrap();
-    assert_integrity(&path, 25).await;
+    assert_integrity(&path, 26).await;
     assert_eq!(snapshot(&path).await, before);
     assert_eq!(v16_intents(&path).await, intents);
     assert_eq!(completed_markers(&path).await, markers);

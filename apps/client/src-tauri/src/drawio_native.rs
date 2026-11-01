@@ -1,9 +1,9 @@
 use crate::{Runtime, RuntimeState, gate::RequestSnapshot};
 use notryx_client_runtime::{Session, drawio_editor_xml, validate_preview_image};
-use notryx_client_store::DiagramDraftCheckpoint;
+use notryx_client_store::{DiagramDraftCheckpoint, OutboxStatus, StoreError};
 use notryx_protocol::{
     DrawioCheckpoint, DrawioCheckpointRequest, DrawioEditorInput, DrawioExportRequest,
-    WorkspacePreviewImageRequest,
+    DrawioSaveRequest, DrawioSaveState, WorkspacePreviewImageRequest, WorkspaceSendStatus,
 };
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, Webview};
@@ -260,6 +260,7 @@ pub(crate) async fn editor_input(
                 generation: generation.to_string(),
                 restored,
                 source_changed: source_revision != base_revision,
+                can_save: true,
             },
             base_xml,
             base_revision,
@@ -303,7 +304,7 @@ pub(crate) async fn drawio_open(
             )?;
         }
         let result = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("drawio.html".into()))
-            .title("Notryx 다이어그램 편집 (기기 초안)")
+            .title("Notryx 다이어그램 편집")
             .inner_size(1100.0, 800.0)
             .disable_drag_drop_handler()
             .on_navigation(editor_navigation)
@@ -423,16 +424,27 @@ async fn checkpoint(
     {
         return Err("invalid_caller".into());
     }
+    let binding = crate::registration_binding(editor.session.binding());
+    let node_id = editor.request.node.node_id.to_string();
+    let previous = state
+        .store
+        .read_diagram_draft(&binding, &node_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let (base_xml, base_revision) = previous
+        .map_or((editor.base_xml, editor.base_revision), |draft| {
+            (draft.base_xml, draft.base_revision)
+        });
     let generation = state
         .store
         .save_diagram_draft(
-            &crate::registration_binding(editor.session.binding()),
-            &editor.request.node.node_id.to_string(),
+            &binding,
+            &node_id,
             &DiagramDraftCheckpoint {
                 expected_generation: generation,
                 xml,
-                base_xml: editor.base_xml,
-                base_revision: editor.base_revision,
+                base_xml,
+                base_revision,
             },
         )
         .await
@@ -440,6 +452,182 @@ async fn checkpoint(
     Ok(DrawioCheckpoint {
         generation: generation.to_string(),
     })
+}
+
+async fn save_state(
+    state: &mut RuntimeState,
+    sessions: &EditorSessions,
+    label: &str,
+    generation: Option<u64>,
+    png: Option<&[u8]>,
+) -> Result<DrawioSaveState, String> {
+    let editor = sessions
+        .0
+        .lock()
+        .map_err(|_| "drawio_unavailable")?
+        .as_ref()
+        .filter(|editor| editor.label == label && editor.input.is_none())
+        .cloned()
+        .ok_or("invalid_caller")?;
+    state
+        .gate
+        .validate(&editor.snapshot)
+        .map_err(str::to_owned)?;
+    if !state
+        .session
+        .as_ref()
+        .is_some_and(|session| Arc::ptr_eq(session, &editor.session))
+    {
+        return Err("stale_registration".into());
+    }
+    let png_source = editor
+        .request
+        .node
+        .name
+        .to_ascii_lowercase()
+        .ends_with(".png");
+    if generation.is_some() && png_source != png.is_some() {
+        return Err("drawio_unsupported_format".into());
+    }
+    let binding = crate::registration_binding(editor.session.binding());
+    let node_id = editor.request.node.node_id.to_string();
+    let mut queue_blocked = false;
+    if let Some(generation) = generation {
+        state
+            .gate
+            .check_queue(state.gate.owner())
+            .map_err(str::to_owned)?;
+        let queued = if let Some(png) = png {
+            state
+                .store
+                .queue_diagram_png(&binding, &node_id, generation, png)
+                .await
+        } else {
+            state
+                .store
+                .queue_diagram_checkpoint(&binding, &node_id, generation)
+                .await
+        };
+        match queued {
+            Ok(_) => {}
+            Err(StoreError::OutboxBlocked) => queue_blocked = true,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let outbox = state
+        .store
+        .document_outbox_state(&binding, &node_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    if queue_blocked
+        && outbox
+            .latest
+            .as_ref()
+            .is_none_or(|item| item.status == OutboxStatus::Committed)
+    {
+        return Err(StoreError::OutboxBlocked.to_string());
+    }
+    let status = if outbox.has_conflict {
+        WorkspaceSendStatus::Conflict
+    } else if outbox.has_failure {
+        WorkspaceSendStatus::Failed
+    } else {
+        match outbox.latest.as_ref().map(|item| item.status) {
+            None => WorkspaceSendStatus::Idle,
+            Some(OutboxStatus::Committed) => WorkspaceSendStatus::Committed,
+            Some(OutboxStatus::Queued | OutboxStatus::Sent) => WorkspaceSendStatus::Pending,
+            Some(_) => WorkspaceSendStatus::NeedsReview,
+        }
+    };
+    let draft = state
+        .store
+        .read_diagram_draft(&binding, &node_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let matches_draft = if let (Some(draft), Some(latest)) = (&draft, outbox.latest) {
+        let xml = state
+            .store
+            .read_diagram_operation_xml(&binding, &latest.operation_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        xml.as_deref() == Some(draft.xml.as_str())
+    } else {
+        false
+    };
+    Ok(DrawioSaveState {
+        generation: draft.map(|item| item.generation.to_string()),
+        matches_draft,
+        status,
+    })
+}
+
+#[tauri::command]
+pub(crate) async fn drawio_save(
+    webview: Webview,
+    runtime: tauri::State<'_, Runtime>,
+    sessions: tauri::State<'_, EditorSessions>,
+    request: DrawioSaveRequest,
+) -> Result<DrawioSaveState, String> {
+    use tauri::Emitter;
+    check_editor(&webview)?;
+    let generation = request
+        .generation
+        .parse::<u64>()
+        .map_err(|_| "invalid_generation")?;
+    if generation == 0 || generation.to_string() != request.generation {
+        return Err("invalid_generation".into());
+    }
+    let png = if let Some(encoded) = request.png_base64 {
+        let (xml, permit) = {
+            let mut state = runtime.0.lock().await;
+            let permit = state
+                .preview_limit
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| "preview_busy")?;
+            let xml = export_xml(&mut state, &sessions, webview.label(), generation).await?;
+            (xml, permit)
+        };
+        Some(
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                validate_export_png(&encoded, &xml)
+            })
+            .await
+            .map_err(|_| "drawio_export_failed")??,
+        )
+    } else {
+        None
+    };
+    let result = save_state(
+        &mut *runtime.0.lock().await,
+        &sessions,
+        webview.label(),
+        Some(generation),
+        png.as_deref(),
+    )
+    .await?;
+    let _ = webview
+        .app_handle()
+        .emit_to("main", "drawio-save-queued", ());
+    Ok(result)
+}
+
+#[tauri::command]
+pub(crate) async fn drawio_save_status(
+    webview: Webview,
+    runtime: tauri::State<'_, Runtime>,
+    sessions: tauri::State<'_, EditorSessions>,
+) -> Result<DrawioSaveState, String> {
+    check_editor(&webview)?;
+    save_state(
+        &mut *runtime.0.lock().await,
+        &sessions,
+        webview.label(),
+        None,
+        None,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -455,7 +643,6 @@ pub(crate) fn drawio_close(webview: Webview, app: tauri::AppHandle) -> Result<()
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", test))]
 fn validate_export_png(encoded: &str, xml: &str) -> Result<Vec<u8>, String> {
     use base64::{Engine, engine::general_purpose::STANDARD};
     const MAX_PNG_BYTES: usize = 25 * 1024 * 1024;
@@ -475,7 +662,6 @@ fn validate_export_png(encoded: &str, xml: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-#[cfg(any(target_os = "linux", test))]
 async fn export_xml(
     state: &mut RuntimeState,
     sessions: &EditorSessions,
@@ -591,6 +777,161 @@ pub(crate) async fn drawio_export_png(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    pub(crate) async fn server_save_roundtrip(
+        state: std::sync::Arc<tokio::sync::Mutex<crate::RuntimeState>>,
+        request: &notryx_protocol::WorkspacePreviewImageRequest,
+    ) {
+        use super::*;
+        let (session, snapshot, prepared) = editor_input(state.clone(), request).await.unwrap();
+        let xml = prepared.input.xml.replace("한글", "서버 저장");
+        let sessions = EditorSessions::default();
+        sessions
+            .open(
+                &mut *state.lock().await,
+                EditorSession {
+                    label: "drawio-save-test".into(),
+                    session: session.clone(),
+                    snapshot,
+                    request: request.clone(),
+                    input: None,
+                    base_xml: prepared.base_xml,
+                    base_revision: prepared.base_revision,
+                },
+            )
+            .unwrap();
+        let label = "drawio-save-test";
+        checkpoint(
+            state.clone(),
+            &sessions,
+            label,
+            DrawioCheckpointRequest {
+                generation: "0".into(),
+                xml: xml.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        {
+            let mut state = state.lock().await;
+            assert!(
+                save_state(&mut state, &sessions, "main", Some(1), None)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                save_state(&mut state, &sessions, label, Some(2), None)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                save_state(&mut state, &sessions, label, Some(1), None)
+                    .await
+                    .unwrap()
+                    .status,
+                WorkspaceSendStatus::Pending
+            );
+        }
+        let binding = crate::registration_binding(session.binding());
+        let pending = state
+            .lock()
+            .await
+            .store
+            .prepare_outbox(&binding)
+            .await
+            .unwrap()
+            .unwrap();
+        let receipt = session
+            .put_content(&notryx_client_runtime::ContentMutation {
+                binding: session.binding().clone(),
+                operation_id: pending.operation_id.parse().unwrap(),
+                operation_seq: pending.operation_seq,
+                node_id: request.node.node_id,
+                expected_revision: notryx_domain::ContentRevision::new(
+                    pending.expected_revision.as_ref().unwrap(),
+                )
+                .unwrap(),
+                bytes: pending.bytes,
+            })
+            .await
+            .unwrap();
+        // Leave the local operation sent, as if the committed response had been lost.
+        assert_eq!(
+            crate::send::send_one(state.clone(), "owner")
+                .await
+                .unwrap()
+                .status,
+            WorkspaceSendStatus::Committed
+        );
+        let node = session
+            .inventory(None)
+            .await
+            .unwrap()
+            .nodes
+            .into_iter()
+            .find(|node| node.node_id == request.node.node_id)
+            .unwrap();
+        if let notryx_protocol::OperationReceipt::Committed { content_rev, .. } = receipt {
+            assert_eq!(node.content_rev.as_ref(), Some(&content_rev));
+        } else {
+            panic!("expected committed receipt");
+        }
+        assert_eq!(session.content(&node).await.unwrap(), xml.as_bytes());
+        let second = xml.replace("서버 저장", "두 번째 저장");
+        checkpoint(
+            state.clone(),
+            &sessions,
+            label,
+            DrawioCheckpointRequest {
+                generation: "1".into(),
+                xml: second.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        {
+            let mut state = state.lock().await;
+            let result = save_state(&mut state, &sessions, label, None, None)
+                .await
+                .unwrap();
+            assert_eq!(result.status, WorkspaceSendStatus::Committed);
+            assert!(!result.matches_draft);
+            save_state(&mut state, &sessions, label, Some(2), None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            crate::send::send_one(state.clone(), "owner")
+                .await
+                .unwrap()
+                .status,
+            WorkspaceSendStatus::Committed
+        );
+        {
+            let mut state = state.lock().await;
+            let result = save_state(&mut state, &sessions, label, None, None)
+                .await
+                .unwrap();
+            assert_eq!(result.status, WorkspaceSendStatus::Committed);
+            assert!(result.matches_draft);
+            sessions.close(&mut state.gate, label);
+        }
+        let node = session
+            .inventory(None)
+            .await
+            .unwrap()
+            .nodes
+            .into_iter()
+            .find(|node| node.node_id == request.node.node_id)
+            .unwrap();
+        assert_eq!(session.content(&node).await.unwrap(), second.as_bytes());
+        let mut reopen = request.clone();
+        reopen.node = node;
+        let input = editor_input(state, &reopen).await.unwrap().2.input;
+        assert!(input.restored);
+        assert!(!input.source_changed);
+        assert_eq!(input.xml, second);
+    }
+
     #[test]
     fn exported_png_must_preserve_the_checkpoint_and_have_valid_pixels() {
         use base64::{Engine, engine::general_purpose::STANDARD};
@@ -636,6 +977,18 @@ pub(crate) mod tests {
             generation: "0".into(),
             xml: xml.clone(),
         };
+        assert_eq!(
+            save_state(
+                &mut *state.lock().await,
+                &sessions,
+                "drawio-test",
+                Some(1),
+                None
+            )
+            .await
+            .unwrap_err(),
+            "drawio_unsupported_format"
+        );
         assert!(
             checkpoint(state.clone(), &sessions, "main", save.clone())
                 .await
@@ -793,6 +1146,8 @@ pub(crate) mod tests {
             serde_json::json!([
                 "allow-drawio-load",
                 "allow-drawio-checkpoint",
+                "allow-drawio-save",
+                "allow-drawio-save-status",
                 "allow-drawio-export-png",
                 "allow-drawio-close"
             ])

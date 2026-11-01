@@ -169,6 +169,43 @@ async fn exact_retry_receipt_lookup_conflict_and_ack_use_the_real_server() {
         session.put_content(&wrong_binding).await,
         Err(Error::Binding)
     );
+    let current = session
+        .inventory(None)
+        .await
+        .unwrap()
+        .nodes
+        .into_iter()
+        .find(|node| node.node_id == document.node_id)
+        .unwrap();
+    let mut large = mutation.clone();
+    large.operation_id = uuid::Uuid::now_v7().to_string().parse().unwrap();
+    large.operation_seq = 4;
+    large.expected_revision = current.content_rev.unwrap();
+    large.bytes = vec![0xa5; 25 * 1024 * 1024];
+    let saved = session
+        .put_content(&large)
+        .await
+        .expect("25 MiB attachment content");
+    assert_eq!(
+        std::fs::read(notes.join("Example.md")).unwrap(),
+        large.bytes
+    );
+    assert_eq!(session.put_content(&large).await.unwrap(), saved);
+    assert_eq!(
+        session
+            .abandon(&AbandonMutation {
+                binding: large.binding.clone(),
+                operation_id: large.operation_id,
+                operation_seq: large.operation_seq,
+                node_id: large.node_id,
+                bytes: large.bytes.clone(),
+            })
+            .await
+            .unwrap(),
+        saved
+    );
+    large.bytes.push(0);
+    assert_eq!(session.put_content(&large).await, Err(Error::TooLarge));
     server.shutdown().await.unwrap();
 }
 

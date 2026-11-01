@@ -10,6 +10,8 @@ fn main() {
             "drawio_open",
             "drawio_load",
             "drawio_checkpoint",
+            "drawio_save",
+            "drawio_save_status",
             "drawio_export_png",
             "drawio_close",
             "mermaid_render",

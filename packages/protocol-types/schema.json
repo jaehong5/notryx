@@ -1585,6 +1585,9 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "can_save": {
+          "type": "boolean"
+        },
         "generation": {
           "type": "string"
         },
@@ -1606,7 +1609,8 @@
         "xml",
         "generation",
         "restored",
-        "source_changed"
+        "source_changed",
+        "can_save"
       ],
       "title": "DrawioEditorInput",
       "type": "object"
@@ -1640,6 +1644,69 @@
       ],
       "title": "DrawioPngStatus",
       "type": "string"
+    },
+    "DrawioSaveRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": "string"
+        },
+        "png_base64": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "generation"
+      ],
+      "title": "DrawioSaveRequest",
+      "type": "object"
+    },
+    "DrawioSaveState": {
+      "$defs": {
+        "WorkspaceSendStatus": {
+          "enum": [
+            "idle",
+            "pending",
+            "committed",
+            "conflict",
+            "failed",
+            "abandoned",
+            "permission_denied",
+            "needs_review",
+            "sync_pending",
+            "ack_pending",
+            "auth_required",
+            "gateway_auth_required"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "matches_draft": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/WorkspaceSendStatus"
+        }
+      },
+      "required": [
+        "matches_draft",
+        "status"
+      ],
+      "title": "DrawioSaveState",
+      "type": "object"
     },
     "HeadHint": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",

@@ -141,7 +141,7 @@ def main():
             authorization = {"Authorization": f"Bearer {pair['device_token']}"}
             info = server_request("GET", "/v1/server-info", headers=authorization)
             png = diagram_with_large_xml((ROOT / "crates/client-runtime/tests/fixtures/drawio-valid.png").read_bytes())
-            raw = b'<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/></root></mxGraphModel>'
+            raw = b'<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="2" value="XML original" vertex="1" parent="1"><mxGeometry x="40" y="40" width="120" height="60" as="geometry"/></mxCell></root></mxGraphModel>'
             nodes = {}
             originals = {"Example.md": b"# Synthetic diagram\n\n![diagram](Diagram.drawio.png)\n\n[XML](Original.drawio)\n", "Diagram.drawio.png": png,
                          "Original.drawio": raw,
@@ -187,6 +187,8 @@ def main():
             main_window = wd("GET", f"/session/{session}/window")
             require(not native("drawio_load")["ok"], "main window read diagram XML")
             require(not native("drawio_checkpoint", {"request": {"generation": "0", "xml": raw.decode()}})["ok"], "main window wrote a diagram draft")
+            require(not native("drawio_save", {"request": {"generation": "1"}})["ok"], "main window queued diagram content")
+            require(not native("drawio_save_status")["ok"], "main window accessed diagram save status")
             require(not native("drawio_export_png", {"request": {"generation": "1", "png_base64": ""}})["ok"], "main window exported a diagram")
             require(not native("drawio_close")["ok"], "main window closed another session")
 
@@ -208,6 +210,8 @@ def main():
                 wait(lambda: js("return document.querySelector('#status')?.textContent.includes('기기 초안을 편집할 수 있습니다.')"), seconds=45)
 
             open_editor(nodes["Diagram.drawio.png"], check_duplicate=True)
+            require(js("return !document.querySelector('#save-server').hidden"), "PNG source cannot save to server")
+            require(not native("drawio_save", {"request": {"generation": "1"}})["ok"], "PNG source accepted XML-only save")
             require(not native("drawio_load")["ok"], "replayed consumed diagram input")
             for command in ("m0_renderer_session", "workspace_inventory", "workspace_local_drafts", "drawio_open"):
                 denied = native(command, {"request": {}})
@@ -308,6 +312,14 @@ def main():
             js("document.querySelector('#export-png').click()")
             wait(lambda: js("return !document.querySelector('#export-png').disabled && document.querySelector('#status').textContent.includes('PNG를 내보내지 못했습니다.')"))
             require(not list(export_dir.iterdir()) and checkpoint()[1:] == retried[1:], "canvas failure lost the saved draft")
+            js("document.querySelector('#save-server').click()")
+            wait(lambda: js("return !document.querySelector('#save-server').disabled && document.querySelector('#server-status').textContent.includes('서버 저장을 요청하지 못했습니다.')"))
+            require(checkpoint()[1:] == retried[1:] and (root / "notes/Diagram.drawio.png").read_bytes() == png,
+                    "failed PNG export changed the source or lost the XML draft")
+            with sqlite3.connect(f"file:{root / 'client/drafts.sqlite3'}?mode=ro", uri=True) as db:
+                require(db.execute("SELECT count(*) FROM client_outbox WHERE document_id=?",
+                                   (nodes["Diagram.drawio.png"]["node_id"],)).fetchone()[0] == 0,
+                        "PNG export failure queued a server request")
             wd("POST", f"/session/{session}/frame", {"id": frame})
             require(js("return window.__canvasFailed"), "test did not reach the canvas failure")
             js("HTMLCanvasElement.prototype.toDataURL=window.__savedDataURL")
@@ -412,6 +424,37 @@ def main():
             require(checkpoint()[2:] == retried[2:], "closing the restored draft changed its original base")
             retried = checkpoint()
             wd("POST", f"/session/{session}/window", {"handle": main_window})
+            open_editor(nodes["Diagram.drawio.png"])
+            stage = "PNG original conditional server save"
+            current_draft = checkpoint()
+            require(not native("drawio_save", {"request": {"generation": str(current_draft[0]),
+                        "png_base64": base64.b64encode(png).decode()}})["ok"],
+                    "PNG save accepted editing data different from the durable checkpoint")
+            require(checkpoint() == current_draft and (root / "notes/Diagram.drawio.png").read_bytes() == png,
+                    "rejected PNG proposal changed the draft or server source")
+            js("document.querySelector('#save-server').click()")
+            wait(lambda: js("return document.querySelector('#server-status').textContent==='서버에 저장했습니다.' || document.querySelector('#server-status').textContent.includes('요청하지 못했습니다')"), seconds=45)
+            require(js("return document.querySelector('#server-status').textContent==='서버에 저장했습니다.'"), "PNG server save failed")
+            saved_png_draft = checkpoint()
+            saved_png = (root / "notes/Diagram.drawio.png").read_bytes()
+            require(saved_png.startswith(b"\x89PNG\r\n\x1a\n") and saved_png != png, "PNG save converted format or retained old bytes")
+            require(saved_png_draft[1] == saved_png_draft[2] and saved_png_draft[3] != retried[3], "PNG receipt did not update XML base")
+            with sqlite3.connect(f"file:{root / 'client/drafts.sqlite3'}?mode=ro", uri=True) as db:
+                payload = db.execute("SELECT bytes FROM client_outbox WHERE document_id=? ORDER BY operation_seq DESC LIMIT 1",
+                                     (nodes["Diagram.drawio.png"]["node_id"],)).fetchone()[0]
+            require(payload == saved_png, "PNG bytes changed between durable queue and server")
+            js("document.querySelector('#close').click();document.querySelector('#discard-confirm').click()")
+            wait(lambda: len(wd("GET", f"/session/{session}/window/handles")) == 1)
+            wd("POST", f"/session/{session}/window", {"handle": main_window})
+            open_editor(nodes["Diagram.drawio.png"])
+            wait(lambda: js("return document.querySelector('#server-status').textContent==='서버에 저장했습니다.'"))
+            wd("POST", f"/session/{session}/frame", {"id": js("return document.querySelector('#diagram')")})
+            require(js("return document.querySelector('.geDiagramContainer')?.textContent.includes('닫기 직전 입력')"), "saved PNG could not reopen its editing data")
+            wd("POST", f"/session/{session}/frame", {"id": None})
+            js("document.querySelector('#close').click();document.querySelector('#discard-confirm').click()")
+            wait(lambda: len(wd("GET", f"/session/{session}/window/handles")) == 1)
+            retried = checkpoint()
+            wd("POST", f"/session/{session}/window", {"handle": main_window})
             stage = "re-registration after closing the editor"
             wait(lambda: js("return !!document.querySelector('.workspace-connect button:not(:disabled)')"))
             submit_pair(admin("issue-pairing", status["owner_principal_id"]))
@@ -423,16 +466,82 @@ def main():
                 js("document.querySelector('#preview-toggle').click()")
             wait(lambda: js("return !!document.querySelector('.diagram-trial')"))
             open_editor(nodes["Original.drawio"])
+            stage = "XML conditional server save"
+            require(js("return !document.querySelector('#save-server').hidden"), "XML source cannot save to server")
+            def edit_xml_label(value):
+                wd("POST", f"/session/{session}/frame", {"id": js("return document.querySelector('#diagram')")})
+                require(js("""const original=mxGraph.prototype.dblClick;let graph;
+                    mxGraph.prototype.dblClick=function(...args){graph=this;return original.apply(this,args);};
+                    const target=document.querySelector('.geDiagramContainer svg text, .geDiagramContainer svg foreignObject');
+                    if(!target)return false;
+                    const rect=target.getBoundingClientRect();
+                    target.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,clientX:rect.x+2,clientY:rect.y+2}));
+                    mxGraph.prototype.dblClick=original;
+                    if(!graph)return false;graph.stopEditing(true);
+                    graph.cellLabelChanged(graph.getModel().getCell('2'),arguments[0]);return true;""", value), "XML graph edit failed")
+                wd("POST", f"/session/{session}/frame", {"id": None})
+
+            def xml_checkpoint():
+                with sqlite3.connect(f"file:{root / 'client/drafts.sqlite3'}?mode=ro", uri=True) as db:
+                    return db.execute("SELECT generation,xml,base_xml,base_revision FROM diagram_drafts WHERE node_id=?",
+                                      (nodes["Original.drawio"]["node_id"],)).fetchone()
+
+            edit_xml_label("XML server saved")
+            stop(server)
+            server = None
+            js("document.querySelector('#save-server').click()")
+            wait(lambda: js("return document.querySelector('#server-status').textContent.includes('서버 전송 대기')"))
+            pending_xml = xml_checkpoint()
+            require("XML server saved" in pending_xml[1] and (root / "notes/Original.drawio").read_bytes() == raw,
+                    "offline save did not preserve the local draft and unchanged server file")
+            with sqlite3.connect(f"file:{root / 'client/drafts.sqlite3'}?mode=ro", uri=True) as db:
+                pending = db.execute("SELECT bytes,status FROM client_outbox WHERE document_id=? ORDER BY operation_seq DESC LIMIT 1",
+                                     (nodes["Original.drawio"]["node_id"],)).fetchone()
+            require(pending and pending[0] == pending_xml[1].encode() and pending[1] in ("queued", "sent"),
+                    "offline save was not durably queued")
+            server = subprocess.Popen([server_binary, "serve", "--config", str(config)], stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+            ready, _, _ = select.select([server.stdout], [], [], 30)
+            require(ready and server.stdout.readline().strip() == "server_started", "synthetic server restart failed")
+            stage = "XML save after reconnect"
+            wait(lambda: js("return document.querySelector('#server-status').textContent==='서버에 저장했습니다.'"), seconds=60)
+            saved_xml = xml_checkpoint()
+            require(saved_xml[1] == saved_xml[2] and saved_xml[3] != nodes["Original.drawio"]["content_rev"], "XML receipt did not advance its base")
+            require((root / "notes/Original.drawio").read_bytes() == saved_xml[1].encode(), "server did not preserve XML checkpoint bytes")
+            js("document.querySelector('#close').click();document.querySelector('#discard-confirm').click()")
+            wait(lambda: len(wd("GET", f"/session/{session}/window/handles")) == 1)
+            wd("POST", f"/session/{session}/window", {"handle": main_window})
+            open_editor(nodes["Original.drawio"])
+            wait(lambda: js("return document.querySelector('#server-status').textContent==='서버에 저장했습니다.'"))
+            stage = "XML concurrent server edit preserves both copies"
+            edit_xml_label("XML local conflict")
+            current = server_request("GET", f"/v1/nodes/{nodes['Original.drawio']['node_id']}", headers=authorization)
+            remote_xml = raw.replace(b"XML original", b"XML remote edit")
+            server_request("PUT", f"/v1/nodes/{current['node_id']}/content", remote_xml, {**authorization,
+                "Content-Type": "application/octet-stream", "If-Match": current["content_etag"],
+                "Content-Digest": "sha-256=:" + base64.b64encode(hashlib.sha256(remote_xml).digest()).decode() + ":",
+                "X-Workspace-Epoch": info["workspace_epoch"], "X-Device-Stream": pair["device_stream_id"],
+                "X-Operation-Seq": str(len(originals) + 2), "Idempotency-Key": WORKSPACE.operation_id()})
+            js("document.querySelector('#save-server').click()")
+            wait(lambda: js("return document.querySelector('#server-status').textContent.includes('서버 원본이 바뀌어')"))
+            conflict_xml = xml_checkpoint()
+            require("XML local conflict" in conflict_xml[1] and conflict_xml[2:] == saved_xml[2:], "conflict discarded local XML or changed base")
+            require((root / "notes/Original.drawio").read_bytes() == remote_xml, "conflict overwrote remote XML")
             wd("POST", f"/session/{session}/window", {"handle": main_window})
             stage = "renderer reload cleanup"
             wd("POST", f"/session/{session}/refresh", {})
             wait(lambda: len(wd("GET", f"/session/{session}/window/handles")) == 1)
             require(checkpoint() == retried, "renderer reload changed the diagram draft")
+            require(xml_checkpoint() == conflict_xml, "renderer reload changed the conflicting XML draft")
             for name, content in originals.items():
+                if name == "Original.drawio":
+                    continue
+                if name == "Diagram.drawio.png":
+                    content = saved_png
                 require((root / "notes" / name).read_bytes() == content, "trial editor modified original bytes")
-            print("Local draft checkpoint, failure/retry, close/reopen recovery, raw XML load, reload preservation and original bytes passed", flush=True)
+            print("Local draft recovery, PNG export and original save/reopen, XML save/reconnect, conflict preservation and exact server bytes passed", flush=True)
             (output / "result.json").write_text(json.dumps({"passed": True, "platform": "Linux WebKitGTK / Xvfb",
-                "input": "synthetic graph model change; physical IME not tested", "saving": "local XML draft and editable PNG copy; server source unchanged",
+                "input": "synthetic graph model change; physical IME not tested", "saving": "PNG original exact-byte save/reopen; XML save after offline queue/reconnect and concurrent conflict preservation",
                 "export": "canvas failure preserves draft; native chooser, cancellation, no overwrite, embedded XML equality and actual reopen passed",
                 "close": "active label input checkpointed before closing and recovered on reopen",
                 "re_registration": "blocked while editor is open; allowed after close and old draft remains",
@@ -440,7 +549,7 @@ def main():
         except Exception:
             if session:
                 try:
-                    print("Editor failure state:", js("return {path:location.pathname,status:document.querySelector('#status')?.textContent,frame:document.querySelector('#diagram')?.getAttribute('src')}"), flush=True)
+                    print("Editor failure state:", js("return {path:location.pathname,status:document.querySelector('#status')?.textContent,server:document.querySelector('#server-status')?.textContent,frame:document.querySelector('#diagram')?.getAttribute('src')}"), flush=True)
                     (output / "failure.png").write_bytes(base64.b64decode(wd("GET", f"/session/{session}/screenshot")))
                 except (OSError, WORKSPACE.TestFailure):
                     pass

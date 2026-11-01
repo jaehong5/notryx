@@ -1,6 +1,6 @@
 use crate::{
-    Binding, Error, MAX_EDITABLE_DOCUMENT_BYTES, MAX_JSON_BYTES, Session, bounded_body,
-    check_response, content_type, json,
+    Binding, Error, MAX_CONTENT_BYTES, MAX_JSON_BYTES, Session, bounded_body, check_response,
+    content_type, json,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use notryx_domain::{ChangeSeq, ContentRevision, NodeId, OperationId};
@@ -53,7 +53,7 @@ impl ContentMutation {
         if self.operation_seq == 0 {
             return Err(Error::InvalidRequest);
         }
-        if self.bytes.len() > MAX_EDITABLE_DOCUMENT_BYTES {
+        if self.bytes.len() > MAX_CONTENT_BYTES {
             return Err(Error::TooLarge);
         }
         StrongEtag::from_content_revision(&self.expected_revision)
@@ -238,7 +238,7 @@ impl Session {
         if request.operation_seq == 0 {
             return Err(Error::InvalidRequest);
         }
-        if request.bytes.len() > MAX_EDITABLE_DOCUMENT_BYTES {
+        if request.bytes.len() > MAX_CONTENT_BYTES {
             return Err(Error::TooLarge);
         }
         let body = AbandonRequest {

@@ -152,7 +152,7 @@ pub struct PersistedDraft {
 }
 
 const APPLICATION_ID: i64 = 0x4e545258;
-const SCHEMA_VERSION: i64 = 25;
+const SCHEMA_VERSION: i64 = 26;
 
 struct EditSession {
     // A remote refresh preserves the old checkpoint until the next local save.
@@ -310,6 +310,7 @@ impl ClientStore {
                     | 22
                     | 23
                     | 24
+                    | 25
                     | SCHEMA_VERSION
             ) || application_id != APPLICATION_ID
             {
@@ -386,7 +387,13 @@ impl ClientStore {
             || existing_version == 22
             || existing_version == 23
             || existing_version == 24
+            || existing_version == 25
         {
+            // Rebuild the outbox without rewriting references in its dependent tables.
+            sqlx::query("PRAGMA foreign_keys=OFF")
+                .execute(&mut connection)
+                .await
+                .map_err(storage_error)?;
             let mut transaction = connection.begin().await.map_err(storage_error)?;
             if initialize || existing_version == 1 {
                 sqlx::raw_sql(registration::CREATE_SCHEMA)
@@ -639,11 +646,26 @@ impl ClientStore {
                     .await
                     .map_err(storage_error)?;
             }
-            sqlx::raw_sql(diagram_drafts::UPGRADE_V25)
-                .execute(&mut *transaction)
+            if initialize || existing_version <= 24 {
+                sqlx::raw_sql(diagram_drafts::UPGRADE_V25)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            diagram_drafts::upgrade_v26(&mut transaction).await?;
+            if sqlx::query("PRAGMA foreign_key_check")
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(storage_error)?
+                .is_some()
+            {
+                return Err(StoreError::UnsupportedFormat);
+            }
+            transaction.commit().await.map_err(storage_error)?;
+            sqlx::query("PRAGMA foreign_keys=ON")
+                .execute(&mut connection)
                 .await
                 .map_err(storage_error)?;
-            transaction.commit().await.map_err(storage_error)?;
         }
         Ok(Self {
             connection,

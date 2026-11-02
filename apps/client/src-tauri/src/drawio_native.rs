@@ -200,23 +200,6 @@ pub(crate) async fn editor_input(
         .await
         .map_err(|_| "preview_busy")?
         .map_err(|_| "drawio_unavailable")?;
-    {
-        let state = state.lock().await;
-        crate::preview_native::validate_editor(&state, &session, &snapshot, request)?;
-    }
-    let bytes = session
-        .content(&request.node)
-        .await
-        .map_err(|error| format!("{error:?}"))?;
-    let xml = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        if png {
-            validate_preview_image(&bytes).map_err(|_| "invalid_preview_image")?;
-        }
-        drawio_editor_xml(&bytes, png).map_err(|_| "drawio_invalid_input")
-    })
-    .await
-    .map_err(|_| "drawio_unavailable")??;
     let source_revision = request
         .node
         .content_rev
@@ -224,7 +207,7 @@ pub(crate) async fn editor_input(
         .ok_or("drawio_invalid_input")?
         .as_str()
         .to_owned();
-    let draft = {
+    let mut draft = {
         let mut state = state.lock().await;
         crate::preview_native::validate_editor(&state, &session, &snapshot, request)?;
         state
@@ -236,22 +219,47 @@ pub(crate) async fn editor_input(
             .await
             .map_err(|error| error.to_string())?
     };
-    let (xml, base_xml, base_revision, generation, restored) = if let Some(draft) = draft {
-        let xml =
-            tokio::task::spawn_blocking(move || drawio_editor_xml(draft.xml.as_bytes(), false))
-                .await
-                .map_err(|_| "drawio_unavailable")?
-                .map_err(|_| "drawio_invalid_input")?;
+    let source = if draft.is_none() {
+        let bytes = session
+            .content(&request.node)
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        let mut state = state.lock().await;
+        crate::preview_native::validate_editor(&state, &session, &snapshot, request)?;
+        // A checkpoint created while downloading still takes precedence over the server copy.
+        draft = state
+            .store
+            .read_diagram_draft(
+                &crate::registration_binding(session.binding()),
+                &request.node.node_id.to_string(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Some(bytes)
+    } else {
+        None
+    };
+    let (bytes, png, base, generation, restored) = if let Some(draft) = draft {
         (
-            xml,
-            draft.base_xml,
-            draft.base_revision,
+            draft.xml.into_bytes(),
+            false,
+            Some((draft.base_xml, draft.base_revision)),
             draft.generation,
             true,
         )
     } else {
-        (xml.clone(), xml, source_revision.clone(), 0, false)
+        (source.ok_or("drawio_invalid_input")?, png, None, 0, false)
     };
+    let xml = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        if png {
+            validate_preview_image(&bytes).map_err(|_| "invalid_preview_image")?;
+        }
+        drawio_editor_xml(&bytes, png).map_err(|_| "drawio_invalid_input")
+    })
+    .await
+    .map_err(|_| "drawio_unavailable")??;
+    let (base_xml, base_revision) = base.unwrap_or_else(|| (xml.clone(), source_revision.clone()));
     let state = state.lock().await;
     crate::preview_native::validate_editor(&state, &session, &snapshot, request)?;
     Ok((
@@ -825,6 +833,87 @@ pub(crate) async fn drawio_export_png(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    pub(crate) async fn offline_draft_roundtrip(
+        state: std::sync::Arc<tokio::sync::Mutex<crate::RuntimeState>>,
+        request: &notryx_protocol::WorkspacePreviewImageRequest,
+    ) {
+        use super::*;
+        let binding =
+            crate::registration_binding(state.lock().await.session.as_ref().unwrap().binding());
+        let node_id = request.node.node_id.to_string();
+        let before = state
+            .lock()
+            .await
+            .store
+            .read_diagram_draft(&binding, &node_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let (session, snapshot, prepared) = editor_input(state.clone(), request)
+            .await
+            .expect("a saved diagram must reopen while its server is stopped");
+        assert!(prepared.input.restored);
+        assert_eq!(prepared.input.xml, before.xml);
+        assert_eq!(prepared.input.generation, before.generation.to_string());
+        assert_eq!(prepared.base_xml, before.base_xml);
+        assert_eq!(prepared.base_revision, before.base_revision);
+        let sessions = EditorSessions::default();
+        sessions
+            .open(
+                &mut *state.lock().await,
+                EditorSession {
+                    label: "drawio-offline-test".into(),
+                    session,
+                    snapshot,
+                    request: request.clone(),
+                    input: None,
+                    base_xml: prepared.base_xml,
+                    base_revision: prepared.base_revision,
+                    remote_choice: None,
+                },
+            )
+            .unwrap();
+        let xml = before
+            .xml
+            .replace("</mxfile>", "<!-- offline edit --></mxfile>");
+        checkpoint(
+            state.clone(),
+            &sessions,
+            "drawio-offline-test",
+            DrawioCheckpointRequest {
+                generation: before.generation.to_string(),
+                xml: xml.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let after = state
+            .lock()
+            .await
+            .store
+            .read_diagram_draft(&binding, &node_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.xml, xml);
+        assert_eq!(after.generation, before.generation + 1);
+        assert_eq!(after.base_xml, before.base_xml);
+        assert_eq!(after.base_revision, before.base_revision);
+        sessions.close(&mut state.lock().await.gate, "drawio-offline-test");
+        let mut stale = request.clone();
+        stale.edit_session_id = "closed-parent".into();
+        assert_eq!(
+            editor_input(state.clone(), &stale).await.err().as_deref(),
+            Some("stale_session")
+        );
+        let previous = state.lock().await.session.take();
+        assert_eq!(
+            editor_input(state.clone(), request).await.err().as_deref(),
+            Some("not_connected")
+        );
+        state.lock().await.session = previous;
+    }
+
     pub(crate) async fn server_save_roundtrip(
         state: std::sync::Arc<tokio::sync::Mutex<crate::RuntimeState>>,
         request: &notryx_protocol::WorkspacePreviewImageRequest,

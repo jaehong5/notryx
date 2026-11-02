@@ -128,7 +128,10 @@ function PreviewImage({ target, alt, load }: { target: string; alt: string; load
   return image ? <span className="preview-image"><img src={image.url} alt={alt} />
     {image.notice && <small className="diagram-notice">{image.editable && openDiagram ? "편집 데이터 포함" : image.notice}</small>}
     {image.editable && openDiagram && <button type="button" className="diagram-trial" onClick={() => openDiagram(target)}>편집 (기기 초안)</button>}
-  </span> : <span>{alt || "이미지"}{failed ? " (이미지를 불러올 수 없습니다)" : ""}</span>;
+  </span> : <span>{alt || "이미지"}{failed ? " (이미지를 불러올 수 없습니다)" : ""}
+    {failed && openDiagram && /\.drawio\.png$/iu.test(decodeURIComponent(target).split(/[?#]/u, 1)[0])
+      && <button type="button" className="diagram-trial" onClick={() => openDiagram(target)}>기기 초안 열기</button>}
+  </span>;
 }
 
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {

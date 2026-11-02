@@ -214,7 +214,7 @@ def main():
                     wait(lambda: js("const button=[...document.querySelectorAll('.markdown-preview button')].find(b=>b.textContent==='XML');if(!button)return false;window.confirm=()=>true;button.click();return true"))
                 else:
                     alt = "exported" if node["name"] == "Exported.drawio.png" else "diagram"
-                    wait(lambda: js("const button=[...document.querySelectorAll('.preview-image')].find(e=>e.querySelector('img')?.alt===arguments[0])?.querySelector('.diagram-trial');if(!button)return false;window.confirm=()=>true;button.click();return true", alt))
+                    wait(lambda: js("const button=[...document.querySelectorAll('.diagram-trial')].find(b=>b.parentElement?.querySelector('img')?.alt===arguments[0]||(b.textContent==='기기 초안 열기'&&b.parentElement?.textContent.startsWith(arguments[0]+' (')));if(!button)return false;window.confirm=()=>true;button.click();return true", alt))
                 handles = wait(lambda: (items if len(items := wd("GET", f"/session/{session}/window/handles")) == 2 else None))
                 if check_duplicate:
                     js("document.querySelector('.diagram-trial').click()")
@@ -461,7 +461,25 @@ def main():
             js("document.querySelector('#close').click();document.querySelector('#discard-confirm').click()")
             wait(lambda: len(wd("GET", f"/session/{session}/window/handles")) == 1)
             wd("POST", f"/session/{session}/window", {"handle": main_window})
+            stage = "PNG device draft reopen without server"
+            stop(server)
+            server = None
+            js("document.querySelector('#preview-toggle').click()")
+            wait(lambda: js("return !document.querySelector('.markdown-preview')"))
+            js("document.querySelector('#preview-toggle').click()")
+            wait(lambda: js("return [...document.querySelectorAll('.diagram-trial')].some(b=>b.textContent==='기기 초안 열기')"))
             open_editor(nodes["Diagram.drawio.png"])
+            require(js("return document.querySelector('#status').textContent.includes('기기 초안을 복구했습니다.')"), "offline PNG draft recovery was not reported")
+            require(checkpoint()[1:] == saved_png_draft[1:], "offline PNG reopen changed the saved draft or base")
+            offline_copy = export_dir / "offline.drawio.png"
+            export(offline_copy)
+            require(offline_copy.read_bytes().startswith(b"\x89PNG\r\n\x1a\n") and checkpoint()[2:] == saved_png_draft[2:]
+                    and (root / "notes/Diagram.drawio.png").read_bytes() == saved_png,
+                    "offline export lost the base or changed the server original")
+            server = subprocess.Popen([server_binary, "serve", "--config", str(config)], stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+            ready, _, _ = select.select([server.stdout], [], [], 30)
+            require(ready and server.stdout.readline().strip() == "server_started", "synthetic server restart failed")
             wait(lambda: js("return document.querySelector('#server-status').textContent==='서버에 저장했습니다.'"))
             wd("POST", f"/session/{session}/frame", {"id": js("return document.querySelector('#diagram')")})
             require(js("return document.querySelector('.geDiagramContainer')?.textContent.includes('닫기 직전 입력')"), "saved PNG could not reopen its editing data")
@@ -519,11 +537,24 @@ def main():
                                      (nodes["Original.drawio"]["node_id"],)).fetchone()
             require(pending and pending[0] == pending_xml[1].encode() and pending[1] in ("queued", "sent"),
                     "offline save was not durably queued")
+            stage = "XML device draft reopen without server"
+            js("document.querySelector('#close').click();document.querySelector('#discard-confirm').click()")
+            wait(lambda: len(wd("GET", f"/session/{session}/window/handles")) == 1)
+            wd("POST", f"/session/{session}/window", {"handle": main_window})
+            open_editor(nodes["Original.drawio"])
+            require(js("return document.querySelector('#status').textContent.includes('기기 초안을 복구했습니다.')"), "offline XML draft recovery was not reported")
+            require(xml_checkpoint()[1:] == pending_xml[1:], "offline XML reopen lost the draft or base")
+            edit_label("XML edited after offline reopen")
+            wait(lambda: "XML edited after offline reopen" in xml_checkpoint()[1])
+            require(xml_checkpoint()[2:] == pending_xml[2:], "offline XML edit changed its original base")
             server = subprocess.Popen([server_binary, "serve", "--config", str(config)], stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL, text=True, start_new_session=True)
             ready, _, _ = select.select([server.stdout], [], [], 30)
             require(ready and server.stdout.readline().strip() == "server_started", "synthetic server restart failed")
             stage = "XML save after reconnect"
+            wait(lambda: js("return document.querySelector('#server-status').textContent.startsWith('이전 저장 요청은 서버에 반영됐습니다.')"), seconds=60)
+            require("XML edited after offline reopen" in xml_checkpoint()[1], "late ACK replaced the offline edit")
+            js("document.querySelector('#save-server').click()")
             wait(lambda: js("return document.querySelector('#server-status').textContent==='서버에 저장했습니다.'"), seconds=60)
             saved_xml = xml_checkpoint()
             require(saved_xml[1] == saved_xml[2] and saved_xml[3] != nodes["Original.drawio"]["content_rev"], "XML receipt did not advance its base")
@@ -624,6 +655,7 @@ def main():
                 "authentication": "revoked device stops transfer, shows reconnection guidance and preserves queued PNG plus later local edits",
                 "conflict_resolution": "local PNG copy required; cancellation, failed export and changed remote preserve both copies; explicit remote choice and later conditional save passed",
                 "close": "active label input checkpointed before closing and recovered on reopen",
+                "offline_reopen": "stopped server: PNG draft opened from failed preview and exported; XML draft reopened, edited and saved after reconnect without losing its base or pending request",
                 "re_registration": "blocked while editor is open; allowed after close and old draft remains",
                 "full_app_restart": "not tested; SQLite reopen is covered by store tests"}, indent=2) + "\n")
         except Exception:

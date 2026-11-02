@@ -328,7 +328,7 @@ void invoke<DrawioEditorInput>("drawio_load").then((value) => {
   saveServer.hidden = serverStatus.hidden = chooseRemote.hidden = !canSave;
   if (canSave) serverStatus.textContent = "서버 저장 상태를 확인하고 있습니다.";
   if (canSave) statusTimer = setInterval(() => { void refreshSaveStatus(); }, 2000);
-  recoveryNotice = value.source_changed ? "서버 원본이 바뀌었습니다. 이전 원본의 기기 초안을 복구했습니다. "
+  recoveryNotice = value.source_changed ? "기기에 받은 서버 정보와 초안의 기준이 다릅니다. 기기 초안을 복구했습니다. "
     : value.restored ? "기기 초안을 복구했습니다. " : "";
   draft = createDraft(value.generation);
   input = value;

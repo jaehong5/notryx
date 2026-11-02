@@ -14,6 +14,40 @@ function render(source: string): string {
 }
 
 describe("AT-31 basic Markdown preview", () => {
+  test("offers saved device drafts only for local drawio PNGs after image loading fails", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const open = vi.fn();
+    const loadImage = vi.fn(async () => { throw new Error("offline"); });
+    await act(async () => root.render(createElement(MarkdownPreview, {
+      source: "![그림](./diagram.drawio.png) ![다른 그림](./my%20diagram.DRAWIO.PNG#part) ![일반 이미지](image.png) ![외부](https://example.invalid/diagram.drawio.png)",
+      onOpenDiagram: open,
+      loadImage,
+    })));
+    const buttons = container.querySelectorAll<HTMLButtonElement>(".diagram-trial");
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].textContent).toBe("기기 초안 열기");
+    expect(container.textContent).toContain("이미지를 불러올 수 없습니다");
+    expect(container.querySelector("img")).toBeNull();
+    await act(async () => buttons[0].click());
+    await act(async () => buttons[1].click());
+    expect(open.mock.calls).toEqual([["./diagram.drawio.png"], ["./my%20diagram.DRAWIO.PNG#part"]]);
+    expect(loadImage).toHaveBeenCalledTimes(3);
+    await act(async () => root.unmount());
+  });
+
+  test("does not offer device drafts without a diagram opener", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(MarkdownPreview, {
+      source: "![그림](diagram.drawio.png)",
+      loadImage: async () => { throw new Error("offline"); },
+    })));
+    expect(container.textContent).toContain("이미지를 불러올 수 없습니다");
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () => root.unmount());
+  });
+
   test("opens only validated diagrams with an explicit device draft action", async () => {
     Object.defineProperty(URL, "createObjectURL", { configurable: true, value: () => "blob:trial" });
     Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });

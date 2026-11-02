@@ -423,6 +423,23 @@ mod tests {
             Err("preview_busy".into())
         );
         drop(slots);
+        server.shutdown().await.unwrap();
+        for name in ["Diagram.drawio.png", "Original.drawio"] {
+            let mut offline = request.clone();
+            offline.node = nodes.iter().find(|node| node.name == name).unwrap().clone();
+            crate::drawio_native::tests::offline_draft_roundtrip(state.clone(), &offline).await;
+        }
+        let mut uncached = request.clone();
+        uncached.node = nodes
+            .iter()
+            .find(|node| node.name == "Broken.drawio.png")
+            .unwrap()
+            .clone();
+        assert!(
+            crate::drawio_native::editor_input(state.clone(), &uncached)
+                .await
+                .is_err()
+        );
         let permit = state
             .lock()
             .await
@@ -445,6 +462,5 @@ mod tests {
             load_preview(state.clone(), &request).await,
             Err("stale_renderer_session".into())
         );
-        server.shutdown().await.unwrap();
     }
 }

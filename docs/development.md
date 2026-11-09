@@ -149,7 +149,7 @@ xvfb-run -a python3 scripts/m4-mermaid-webdriver.py
 
 WebDriver 시험은 합성 원문으로 5종 그림 표시, 원문 보존, 오류와 상한 초과 시 원문 표시, 렌더러의 앱 명령과 외부 통신 차단, 재로드 시 창 정리를 확인한다. 이 시험은 Linux CI에도 연결한다. 물리 키보드 입력이나 Android 시험을 대신하지 않는다.
 
-빌드 시 `apps/client/dist/third-party-licenses.md`에 번들 의존성의 라이선스 전문을 생성하고, `third-party-sources.md`에 Mermaid와 간접 의존성 elkjs의 소스 위치를 포함한다. 이 고지는 프로젝트 자체의 라이선스 확정을 대신하지 않는다.
+빌드 시 `apps/client/dist/third-party-licenses.md`에 번들 의존성의 라이선스 전문을 생성하고, `third-party-sources.md`에 Mermaid와 간접 의존성 elkjs의 소스 위치를 포함한다. Notryx 자체 코드와 문서의 MIT 원문은 `apps/client/dist/LICENSE`에 포함하며 외부 의존성 고지와 구분한다. 서버 Docker 이미지에는 `/usr/share/licenses/notryx/LICENSE`로 포함한다.
 
 ## draw.io 미리보기와 기기 초안 편집
 

@@ -14,6 +14,7 @@ RUN cargo +1.99.1 test --locked -p notryx-server -p notryx-server-storage --feat
 FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8 AS runtime
 WORKDIR /app
 COPY --from=build --chmod=0555 /workspace/target/release/notryx-server /app/notryx-server
+COPY LICENSE /usr/share/licenses/notryx/LICENSE
 USER 1000:1000
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \

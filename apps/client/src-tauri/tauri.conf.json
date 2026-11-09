@@ -17,5 +17,5 @@
       "capabilities": ["main", "mermaid", "drawio"]
     }
   },
-  "bundle": { "active": false }
+  "bundle": { "active": false, "licenseFile": "../../../LICENSE" }
 }

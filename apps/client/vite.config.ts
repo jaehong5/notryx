@@ -2,6 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 
 export default defineConfig(() => {
   const android = process.env.TAURI_ENV_PLATFORM?.startsWith("android") ||
@@ -11,7 +12,12 @@ export default defineConfig(() => {
     "--target", android ? "android" : "desktop",
   ], { stdio: "inherit" });
   return {
-    plugins: [react()],
+    plugins: [react(), {
+      name: "notryx-license",
+      generateBundle() {
+        this.emitFile({ type: "asset", fileName: "LICENSE", source: readFileSync(new URL("../../LICENSE", import.meta.url), "utf8") });
+      },
+    }],
     clearScreen: false,
     server: {
       host: "127.0.0.1", port: 1420, strictPort: true,

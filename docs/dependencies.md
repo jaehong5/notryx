@@ -27,4 +27,4 @@ python3 scripts/dependency-inventory.py > .artifacts/dependencies.json
 
 MIT, Apache-2.0, BSD, ISC, Unicode-3.0 등과 MPL-2.0 항목이 포함되어 있다. Metadata 조회는 배포 고지와 소스 제공 의무 검토를 대신하지 않는다. 시스템 WebKitGTK와 GTK, Android 템플릿 및 번들 자산도 공개 배포 시 별도로 확인한다. 추가 폰트나 외부 이미지는 내려받지 않았으며 데스크톱 아이콘 원본은 저장소의 SVG다.
 
-프로젝트 자체의 라이선스 결정과 배포용 고지 파일은 아직 미완료다.
+Notryx 자체 코드와 문서는 [MIT 라이선스](../LICENSE)를 적용한다. 외부 라이브러리, 폰트, 아이콘과 번들 자산은 각각의 원래 라이선스를 유지하며 MIT로 재라이선스하지 않는다. 전체 배포물의 고지와 소스 제공 의무 검토는 아직 미완료다.

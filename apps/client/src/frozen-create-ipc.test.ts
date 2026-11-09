@@ -19,6 +19,16 @@ function respond(value: unknown) { mocked.invoke.mockImplementation(async (comma
 function page(item: unknown = entry, current: WorkspaceRegistration = binding) { return { binding:current, entries:[item], next_after_id:null }; }
 beforeEach(() => mocked.invoke.mockReset());
 
+test("previous diagram uploads can be reviewed without reusing their upload identity", async () => {
+  const diagram = { ...entry, request: { ...request, kind: "file", name: "old.drawio.png", upload_id: "019a1000-0000-4000-8000-000000000005" }, current_same_id: null, current_same_name: [] };
+  respond(page(diagram));
+  expect((await workspaceFrozenCreates(binding, null)).entries[0]).toMatchObject({ kind: "file", name: "old.drawio.png", uploaded_diagram: true });
+  for (const change of [{ upload_id: node }, { name: "ordinary.md" }, { kind: "folder" }]) {
+    respond(page({ ...diagram, request: { ...diagram.request, ...change } }));
+    await expect(workspaceFrozenCreates(binding, null)).rejects.toThrow();
+  }
+});
+
 test("이전 생성 페이지는 renderer와 binding을 전달하고 현재 상태와 이전 요청을 구분한다", async () => {
   respond(page());
   const result = await workspaceFrozenCreates(binding,null);

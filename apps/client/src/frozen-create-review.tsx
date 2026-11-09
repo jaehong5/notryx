@@ -10,6 +10,7 @@ export type FrozenCreateReviewItem = {
   parent_id: string;
   name: string;
   kind: "file" | "folder";
+  uploaded_diagram?: boolean;
   status: "queued" | "sent" | "abandoning" | "failed";
   reason?: string | null;
   current_same_id: ObservedNode | null;
@@ -94,6 +95,7 @@ export function FrozenCreateReview({ binding, ports, onApplied }: FrozenCreateRe
 
   async function decide(next: Pending) {
     if (actionBusy.current || !current(scope.current) || next.bindingKey !== key || next.item.old_binding.workspace_id !== binding.workspace_id) return;
+    if (next.choice.kind === "apply" && next.item.uploaded_diagram) return;
     if (next.choice.kind === "apply" && next.item.kind === "file" && !next.choice.name.toLowerCase().endsWith(".md")) { setMessage("문서 이름은 .md로 끝나야 합니다."); return; }
     const generation = scope.current;
     actionBusy.current = true; setBusy(true); setMessage(""); setPending(next);
@@ -128,13 +130,13 @@ export function FrozenCreateReview({ binding, ports, onApplied }: FrozenCreateRe
       <p>현재 같은 ID: {item.current_same_id ? label(item.current_same_id) : "목록에서 확인되지 않음"}</p>
       <p>현재 같은 이름: {item.current_same_name.length ? item.current_same_name.map(label).join(", ") : "목록에서 확인되지 않음"}</p>
       {item.reason === "recovery_conflict" ? <p>서버 복구 중 충돌해 이전 요청의 적용 여부를 확인할 수 없습니다. 현재 상태를 대조하세요.</p> : item.status === "failed" ? <p>서버 처리 실패: {failureReason(item.reason)}</p> : <p>같은 이름이나 ID가 보여도 이전 요청의 서버 결과는 확정하지 않습니다.</p>}
-      <label>현재 목적지<select data-testid="review-parent" value={parent} disabled={busy || pending !== null} onChange={(event) => setParent(event.target.value)}>
+      {item.uploaded_diagram ? <p>이전 업로드는 새 등록에서 재사용할 수 없습니다. 기록은 보존됩니다. 서버 생성 여부를 확인한 뒤 미적용으로 정리할 수 있습니다.</p> : <><label>현재 목적지<select data-testid="review-parent" value={parent} disabled={busy || pending !== null} onChange={(event) => setParent(event.target.value)}>
         <option value="">폴더 선택</option>{folders.map((folder) => <option key={folder.node_id} value={folder.node_id}>{label(folder)}</option>)}
       </select></label>
       {folderAfter !== null && <button disabled={busy || pending !== null} onClick={() => void loadFolders(folderAfter, scope.current)}>다음 폴더</button>}
       <button disabled={busy || pending !== null} onClick={() => void loadFolders(null, scope.current)}>처음 폴더</button>
       <label>새 {item.kind === "file" ? "문서" : "폴더"} 이름<input data-testid="review-name" value={name} disabled={busy || pending !== null} onChange={(event) => setName(event.target.value)} /></label>
-      <button data-testid="review-apply" disabled={busy || pending !== null || !name || !folders.some((folder) => folder.node_id === parent)} onClick={() => void decide({ bindingKey: key, item, choice: { kind: "apply", parent_id: parent, name } })}>새 생성 요청으로 적용</button>
+      <button data-testid="review-apply" disabled={busy || pending !== null || !name || !folders.some((folder) => folder.node_id === parent)} onClick={() => void decide({ bindingKey: key, item, choice: { kind: "apply", parent_id: parent, name } })}>새 생성 요청으로 적용</button></>}
       <button data-testid="review-dismiss" disabled={busy || pending !== null} onClick={() => setConfirmDismiss(true)}>이전 요청 미적용</button>
       {confirmDismiss && !pending && <div role="alert"><p>이 요청을 적용하지 않습니다. 이전 기록은 보존하며 서버 항목은 삭제하지 않습니다.</p><button data-testid="review-dismiss-confirm" disabled={busy} onClick={() => void decide({ bindingKey: key, item, choice: { kind: "dismiss" } })}>미적용 확인</button><button disabled={busy} onClick={() => setConfirmDismiss(false)}>돌아가기</button></div>}
     </div>}

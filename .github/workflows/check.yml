@@ -25,7 +25,6 @@ jobs:
       - run: xvfb-run -a python3 scripts/m4-mermaid-webdriver.py --output ci-artifacts/mermaid
       - run: xvfb-run -a python3 scripts/m4-theme-webdriver.py --output ci-artifacts/theme
       - run: cargo build --locked -p notryx-server
-      - run: scripts/m3-secret-no-service.sh xvfb-run -a python3 scripts/m4-drawio-webdriver.py --output ci-artifacts/drawio
       - run: xvfb-run -a python3 scripts/m2-workspace-webdriver.py
       - run: xvfb-run -a python3 scripts/m2-migration-recovery-webdriver.py
       - name: Verify M3 two-client lifecycle
@@ -44,7 +43,6 @@ jobs:
             ci-artifacts/webdriver/
             ci-artifacts/mermaid/
             ci-artifacts/theme/
-            ci-artifacts/drawio/
             ci-artifacts/m3-lifecycle.log
           if-no-files-found: ignore
           retention-days: 7

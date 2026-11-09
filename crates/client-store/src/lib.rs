@@ -11,6 +11,7 @@ mod content_conflict;
 mod credential;
 mod deleted_draft_copy;
 mod diagram_conflicts;
+mod diagram_creation;
 mod diagram_drafts;
 mod outbox;
 mod recovery;
@@ -154,7 +155,7 @@ pub struct PersistedDraft {
 }
 
 const APPLICATION_ID: i64 = 0x4e545258;
-const SCHEMA_VERSION: i64 = 27;
+const SCHEMA_VERSION: i64 = 28;
 
 struct EditSession {
     // A remote refresh preserves the old checkpoint until the next local save.
@@ -314,6 +315,7 @@ impl ClientStore {
                     | 24
                     | 25
                     | 26
+                    | 27
                     | SCHEMA_VERSION
             ) || application_id != APPLICATION_ID
             {
@@ -392,6 +394,7 @@ impl ClientStore {
             || existing_version == 24
             || existing_version == 25
             || existing_version == 26
+            || existing_version == 27
         {
             // Rebuild the outbox without rewriting references in its dependent tables.
             sqlx::query("PRAGMA foreign_keys=OFF")
@@ -659,7 +662,13 @@ impl ClientStore {
             if initialize || existing_version <= 25 {
                 diagram_drafts::upgrade_v26(&mut transaction).await?;
             }
-            sqlx::raw_sql(diagram_conflicts::UPGRADE_V27)
+            if initialize || existing_version <= 26 {
+                sqlx::raw_sql(diagram_conflicts::UPGRADE_V27)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage_error)?;
+            }
+            sqlx::raw_sql(diagram_creation::UPGRADE_V28)
                 .execute(&mut *transaction)
                 .await
                 .map_err(storage_error)?;

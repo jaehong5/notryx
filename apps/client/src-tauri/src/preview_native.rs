@@ -85,7 +85,6 @@ pub async fn load_preview(
         png_base64: STANDARD.encode(image.png_bytes),
         width: image.width,
         height: image.height,
-        drawio_status: image.drawio_status,
     })
 }
 
@@ -136,12 +135,6 @@ mod tests {
         let broken_diagram =
             include_bytes!("../../../../crates/client-runtime/tests/fixtures/drawio-invalid.png");
         std::fs::write(notes.join("Diagram.drawio.png"), diagram).unwrap();
-        let xml = notryx_client_runtime::drawio_editor_xml(diagram, true).unwrap();
-        std::fs::write(notes.join("Original.drawio"), xml).unwrap();
-        workspace
-            .adopt_root_document("Original.drawio")
-            .await
-            .unwrap();
         std::fs::write(notes.join("Broken.drawio.png"), broken_diagram).unwrap();
         std::fs::write(notes.join("Bad.svg"), b"<svg onload='alert(1)'/>").unwrap();
         let document = workspace.adopt_root_document("Document.md").await.unwrap();
@@ -257,90 +250,13 @@ mod tests {
         };
         let preview = load_preview(state.clone(), &request).await.unwrap();
         assert_eq!((preview.width, preview.height), (1, 1));
-        assert_eq!(
-            preview.drawio_status,
-            notryx_protocol::DrawioPngStatus::None
-        );
-        for (name, expected, original) in [
-            (
-                "Diagram.drawio.png",
-                notryx_protocol::DrawioPngStatus::EmbeddedXml,
-                diagram.as_slice(),
-            ),
-            (
-                "Broken.drawio.png",
-                notryx_protocol::DrawioPngStatus::InvalidXml,
-                broken_diagram.as_slice(),
-            ),
+        for (name, original) in [
+            ("Diagram.drawio.png", diagram.as_slice()),
+            ("Broken.drawio.png", broken_diagram.as_slice()),
         ] {
-            let mut diagram_request = request.clone();
-            diagram_request.node = nodes.iter().find(|node| node.name == name).unwrap().clone();
-            let result = load_preview(state.clone(), &diagram_request).await.unwrap();
-            assert_eq!(result.drawio_status, expected);
-            let input = crate::drawio_native::editor_input(state.clone(), &diagram_request).await;
-            if expected == notryx_protocol::DrawioPngStatus::EmbeddedXml {
-                let (_, _, prepared) = input.unwrap();
-                let input = prepared.input;
-                assert!(input.xml.contains("한글"));
-                assert_eq!(input.title, name);
-                for invalidate in [false, true] {
-                    let permit = state
-                        .lock()
-                        .await
-                        .preview_limit
-                        .clone()
-                        .acquire_owned()
-                        .await
-                        .unwrap();
-                    let mut pending = Box::pin(crate::drawio_native::editor_input(
-                        state.clone(),
-                        &diagram_request,
-                    ));
-                    assert!(
-                        tokio::time::timeout(
-                            std::time::Duration::from_millis(20),
-                            pending.as_mut(),
-                        )
-                        .await
-                        .is_err(),
-                        "diagram open must wait while image preview is loading"
-                    );
-                    if invalidate {
-                        state
-                            .lock()
-                            .await
-                            .product_sessions
-                            .get_mut(&request.edit_session_id)
-                            .unwrap()
-                            .kind = ProductSessionKind::Recovery;
-                    }
-                    drop(permit);
-                    let result = pending.await;
-                    if invalidate {
-                        assert_eq!(result.err().as_deref(), Some("stale_session"));
-                        state
-                            .lock()
-                            .await
-                            .product_sessions
-                            .get_mut(&request.edit_session_id)
-                            .unwrap()
-                            .kind = ProductSessionKind::Active;
-                    } else {
-                        assert_eq!(result.unwrap().2.input.xml, input.xml);
-                    }
-                }
-                crate::drawio_native::tests::checkpoint_roundtrip(state.clone(), &diagram_request)
-                    .await;
-            } else {
-                assert!(input.is_err());
-            }
-            let mut stale = diagram_request.clone();
-            stale.edit_session_id = "another-session".into();
-            assert!(
-                crate::drawio_native::editor_input(state.clone(), &stale)
-                    .await
-                    .is_err()
-            );
+            let mut image_request = request.clone();
+            image_request.node = nodes.iter().find(|node| node.name == name).unwrap().clone();
+            let result = load_preview(state.clone(), &image_request).await.unwrap();
             assert_eq!((result.width, result.height), (1, 1));
             assert_eq!(
                 std::fs::read(config.workspace.notes_root.join(name)).unwrap(),
@@ -348,13 +264,6 @@ mod tests {
             );
             assert_ne!(STANDARD.decode(result.png_base64).unwrap(), original);
         }
-        let mut xml_request = request.clone();
-        xml_request.node = nodes
-            .iter()
-            .find(|node| node.name == "Original.drawio")
-            .unwrap()
-            .clone();
-        crate::drawio_native::tests::server_save_roundtrip(state.clone(), &xml_request).await;
         assert!(
             STANDARD
                 .decode(preview.png_base64)
@@ -424,22 +333,6 @@ mod tests {
         );
         drop(slots);
         server.shutdown().await.unwrap();
-        for name in ["Diagram.drawio.png", "Original.drawio"] {
-            let mut offline = request.clone();
-            offline.node = nodes.iter().find(|node| node.name == name).unwrap().clone();
-            crate::drawio_native::tests::offline_draft_roundtrip(state.clone(), &offline).await;
-        }
-        let mut uncached = request.clone();
-        uncached.node = nodes
-            .iter()
-            .find(|node| node.name == "Broken.drawio.png")
-            .unwrap()
-            .clone();
-        assert!(
-            crate::drawio_native::editor_input(state.clone(), &uncached)
-                .await
-                .is_err()
-        );
         let permit = state
             .lock()
             .await

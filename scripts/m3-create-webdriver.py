@@ -159,17 +159,17 @@ def main():
             parent = wait(root_id, "cached root")
 
             def open_panel():
-                wait(lambda: js("return !!document.querySelector('[aria-label=\"새 폴더 또는 문서\"]') || [...document.querySelectorAll('button')].some(x=>x.textContent.trim()==='새 폴더 또는 문서' && !x.disabled)"), "create control")
-                js("if(!document.querySelector('[aria-label=\"새 폴더 또는 문서\"]')) [...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='새 폴더 또는 문서').click()")
+                wait(lambda: js("return !!document.querySelector('.create-panel') || [...document.querySelectorAll('button')].some(x=>x.textContent.trim()==='새 폴더 또는 문서' && !x.disabled)"), "create control")
+                js("if(!document.querySelector('.create-panel')) [...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='새 폴더 또는 문서').click()")
                 wait(lambda: js("return !!document.querySelector('[data-testid=create-parent] option[value=\"'+arguments[0]+'\"]')", parent), "cached parent")
             def visual_check(label):
-                info = js("""const panel=document.querySelector('[aria-label=\"새 폴더 또는 문서\"]');
+                info = js("""const panel=document.querySelector('.create-panel');
                   if (!panel) return null;
                   const selectors=['[data-testid=create-parent]','[data-testid=create-name]','[data-testid=create-submit]'];
                   const controls=selectors.map(selector=>panel.querySelector(selector));
                   const visible=controls.every(element=>{ if (!element) return false; const rect=element.getBoundingClientRect(); const style=getComputedStyle(element); return rect.width>0 && rect.height>0 && style.display!=='none' && style.visibility!=='hidden'; });
                   return {visible, overflow:panel.scrollWidth>panel.clientWidth+1, panelWidth:panel.clientWidth, panelScrollWidth:panel.scrollWidth, viewportWidth:window.innerWidth, controls:controls.map(element=>element ? {width:element.getBoundingClientRect().width, left:element.getBoundingClientRect().left, right:element.getBoundingClientRect().right} : null)};""")
-                js("document.querySelector('[aria-label=\"새 폴더 또는 문서\"]').scrollIntoView({block:'start'})")
+                js("document.querySelector('.create-panel').scrollIntoView({block:'start'})")
                 encoded = wd("GET", f"/session/{session_id}/screenshot")
                 screenshot = screenshots / (label + ".png")
                 screenshot.write_bytes(base64.b64decode(encoded, validate=True))
@@ -207,7 +207,7 @@ def main():
             open_panel()
             wait(lambda: js("return !!document.querySelector('[data-create-cancel=\"'+arguments[0]+'\"]:not(:disabled)')", pending[0]), "offline cancel control")
             js("document.querySelector('[data-create-cancel=\"'+arguments[0]+'\"]').click()", pending[0])
-            wait(lambda: js("return document.querySelector('[aria-label=\"새 폴더 또는 문서\"]')?.textContent.includes('취소 처리 중')"), "offline cancellation pending")
+            wait(lambda: js("return document.querySelector('.create-panel')?.textContent.includes('취소 처리 중')"), "offline cancellation pending")
             def cancellation_requested():
                 found = rows()
                 return found[1] if len(found) == 2 and found[1][0] == pending[0] and found[1][3] == "queued" and found[1][4] == "requested" and found[1][6] is None else None
@@ -220,7 +220,7 @@ def main():
             wait(lambda: js("return document.body.textContent.includes('서버에 연결되지 않음')"), "second offline restart")
             require(wait(cancellation_requested, "cancellation intent after restart")[0] == pending[0], "restart changed cancellation intent")
             open_panel()
-            wait(lambda: js("return document.querySelector('[aria-label=\"새 폴더 또는 문서\"]')?.textContent.includes('취소 처리 중')"), "pending cancellation after restart")
+            wait(lambda: js("return document.querySelector('.create-panel')?.textContent.includes('취소 처리 중')"), "pending cancellation after restart")
             visual_check("04-offline-cancellation-after-restart")
             require((notes / "Online Folder").is_dir() and not (notes / "Offline Folder").exists(), "offline work altered synthetic server files")
         finally:

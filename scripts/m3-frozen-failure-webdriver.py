@@ -208,8 +208,8 @@ def main():
             def root_parent():
                 return root_id()
             def open_panel():
-                wait(lambda: js("return !!document.querySelector('[aria-label=\"새 폴더 또는 문서\"]') || [...document.querySelectorAll('button')].some(x=>x.textContent.trim()==='새 폴더 또는 문서' && !x.disabled)"), "create control")
-                js("if(!document.querySelector('[aria-label=\"새 폴더 또는 문서\"]')) [...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='새 폴더 또는 문서').click()")
+                wait(lambda: js("return !!document.querySelector('.create-panel') || [...document.querySelectorAll('button')].some(x=>x.textContent.trim()==='새 폴더 또는 문서' && !x.disabled)"), "create control")
+                js("if(!document.querySelector('.create-panel')) [...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='새 폴더 또는 문서').click()")
                 wait(lambda: js("return !!document.querySelector('[data-testid=create-parent] option[value=\"'+arguments[0]+'\"]')", parent), "root destination")
             def create(name):
                 open_panel()

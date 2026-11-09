@@ -108,6 +108,7 @@ pub(crate) async fn workspace_create_parents(
 fn entry(
     operation: CreateOutboxOperation,
     receipt: Option<OperationReceipt>,
+    upload_unavailable: bool,
 ) -> Result<WorkspaceCreateEntry, String> {
     let status = match operation.status {
         OutboxStatus::Queued => WorkspaceCreateStatus::Queued,
@@ -125,6 +126,7 @@ fn entry(
         request: operation.request,
         status,
         receipt,
+        upload_unavailable,
     })
 }
 
@@ -145,7 +147,7 @@ pub(crate) async fn workspace_queue_create(
         request.kind,
     )
     .await?;
-    entry(operation, None)
+    entry(operation, None, false)
 }
 
 #[tauri::command]
@@ -171,7 +173,7 @@ pub(crate) async fn workspace_create_status(
     let entries = page
         .entries
         .into_iter()
-        .map(|item| entry(item.operation, item.receipt))
+        .map(|item| entry(item.operation, item.receipt, item.upload_unavailable))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(WorkspaceCreatePage {
         binding: to_contract(binding),
@@ -578,6 +580,88 @@ mod tests {
             operation_seq: item.operation_seq,
             request: item.request.clone(),
         }
+    }
+
+    #[tokio::test]
+    async fn missing_diagram_upload_finishes_same_sequence_and_next_create_can_proceed() {
+        let rig = rig().await;
+        let session = rig.state.lock().await.session.clone().unwrap();
+        let runtime = crate::Runtime(rig.state.clone());
+        let snapshot = rig.state.lock().await.gate.snapshot("owner").unwrap();
+        crate::sync_bootstrap::bootstrap_metadata(&runtime, &snapshot, &session)
+            .await
+            .unwrap();
+        let parent = session.server_info().await.unwrap().root_id;
+        let bytes =
+            include_bytes!("../../../../crates/client-runtime/tests/fixtures/drawio-valid.png");
+        let upload = notryx_protocol::UploadResponse {
+            upload_id: uuid::Uuid::new_v4().to_string(),
+            content_hash: notryx_protocol::content_hash(bytes),
+            size: bytes.len().to_string(),
+            expires_at: "2000000000".into(),
+        };
+        let request = CreateNodeRequest {
+            node_id: uuid::Uuid::now_v7().to_string().parse().unwrap(),
+            parent_id: parent,
+            name: "Expired.drawio.png".into(),
+            kind: notryx_protocol::NodeKind::File,
+            upload_id: Some(upload.upload_id.parse().unwrap()),
+        };
+        let queued = rig
+            .state
+            .lock()
+            .await
+            .store
+            .queue_diagram_create(&rig.binding, &request, &upload)
+            .await
+            .unwrap();
+        let first = crate::send::send_one(rig.state.clone(), "owner")
+            .await
+            .unwrap();
+        assert_eq!(first.status, notryx_protocol::WorkspaceSendStatus::Pending);
+        let page = create_status_for_renderer(&rig.state, "owner", &rig.binding, 0, 100)
+            .await
+            .unwrap();
+        assert!(page.entries[0].upload_unavailable);
+        assert_eq!(page.entries[0].operation.status, OutboxStatus::Abandoning);
+        crate::send::send_one(rig.state.clone(), "owner")
+            .await
+            .unwrap();
+        let page = create_status_for_renderer(&rig.state, "owner", &rig.binding, 0, 100)
+            .await
+            .unwrap();
+        assert_eq!(page.entries[0].operation.operation_id, queued.operation_id);
+        assert_eq!(page.entries[0].operation.request, request);
+        assert_eq!(page.entries[0].operation.status, OutboxStatus::Abandoned);
+        assert_eq!(
+            rig.state
+                .lock()
+                .await
+                .store
+                .receipt_ack_through(&rig.binding)
+                .await
+                .unwrap(),
+            queued.operation_seq
+        );
+        let next = queue_node_for_renderer(
+            &rig.state,
+            "owner",
+            &rig.binding,
+            parent,
+            "Next.md",
+            notryx_protocol::NodeKind::File,
+        )
+        .await
+        .unwrap();
+        assert_eq!(next.operation_seq, queued.operation_seq + 1);
+        crate::send::send_one(rig.state.clone(), "owner")
+            .await
+            .unwrap();
+        let page = create_status_for_renderer(&rig.state, "owner", &rig.binding, 0, 100)
+            .await
+            .unwrap();
+        assert_eq!(page.entries[1].operation.status, OutboxStatus::Committed);
+        rig.server.shutdown().await.unwrap();
     }
 
     #[tokio::test]

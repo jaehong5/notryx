@@ -6,7 +6,6 @@ use image::{
         webp::WebPDecoder,
     },
 };
-use notryx_protocol::DrawioPngStatus;
 use std::io::{self, Cursor, Write};
 
 const MAX_INPUT_BYTES: usize = 25 * 1024 * 1024;
@@ -21,7 +20,6 @@ pub struct ValidatedPreviewImage {
     pub png_bytes: Vec<u8>,
     pub width: u32,
     pub height: u32,
-    pub drawio_status: DrawioPngStatus,
 }
 
 impl std::fmt::Debug for ValidatedPreviewImage {
@@ -162,8 +160,37 @@ fn decode_preview<D: ImageDecoder>(
         png_bytes: output.bytes,
         width,
         height,
-        drawio_status: DrawioPngStatus::None,
     })
+}
+
+// Text metadata is irrelevant to preview pixels and may expand far beyond the input size.
+fn png_without_text(bytes: &[u8]) -> Result<Vec<u8>, PreviewImageError> {
+    let mut output = bytes.get(..8).ok_or(PreviewImageError::Invalid)?.to_vec();
+    let mut offset = 8usize;
+    while offset < bytes.len() {
+        let header = bytes
+            .get(offset..offset + 8)
+            .ok_or(PreviewImageError::Invalid)?;
+        let length = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+        let end = offset
+            .checked_add(12)
+            .and_then(|n| n.checked_add(length))
+            .filter(|end| *end <= bytes.len())
+            .ok_or(PreviewImageError::Invalid)?;
+        let kind = &header[4..8];
+        if !matches!(kind, b"tEXt" | b"zTXt" | b"iTXt") {
+            output.extend_from_slice(&bytes[offset..end]);
+        }
+        if kind == b"IEND" {
+            return if length == 0 {
+                Ok(output)
+            } else {
+                Err(PreviewImageError::Invalid)
+            };
+        }
+        offset = end;
+    }
+    Err(PreviewImageError::Invalid)
 }
 
 pub fn validate_preview_image(bytes: &[u8]) -> Result<ValidatedPreviewImage, PreviewImageError> {
@@ -173,15 +200,13 @@ pub fn validate_preview_image(bytes: &[u8]) -> Result<ValidatedPreviewImage, Pre
     let format = image::guess_format(bytes).map_err(|_| PreviewImageError::Unsupported)?;
     match format {
         ImageFormat::Png => {
-            let (display_bytes, drawio_status) = crate::drawio_png::prepare_png(bytes)?;
+            let display_bytes = png_without_text(bytes)?;
             let decoder = PngDecoder::with_limits(Cursor::new(display_bytes), limits())
                 .map_err(decode_error)?;
             if decoder.is_apng().map_err(decode_error)? {
                 return Err(PreviewImageError::AnimationUnsupported);
             }
-            let mut image = decode_preview(decoder)?;
-            image.drawio_status = drawio_status;
-            Ok(image)
+            decode_preview(decoder)
         }
         ImageFormat::Jpeg => {
             decode_preview(JpegDecoder::new(Cursor::new(bytes)).map_err(decode_error)?)
@@ -219,7 +244,6 @@ mod tests {
             png_bytes: b"private".to_vec(),
             width: 2,
             height: 3,
-            drawio_status: DrawioPngStatus::None,
         };
         assert_eq!(
             format!("{image:?}"),

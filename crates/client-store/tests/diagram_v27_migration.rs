@@ -42,7 +42,7 @@ async fn v26_fixture(path: &Path, collision: bool) -> (RegistrationBinding, Stri
         .unwrap();
     store.close().await.unwrap();
     let mut db = connect(path).await;
-    sqlx::raw_sql("DROP TABLE diagram_conflict_copies; PRAGMA user_version=26;")
+    sqlx::raw_sql("DROP TABLE IF EXISTS diagram_creations; DROP TABLE diagram_conflict_copies; PRAGMA user_version=26;")
         .execute(&mut db)
         .await
         .unwrap();
@@ -94,7 +94,7 @@ async fn v27_preserves_pending_png_and_xml_and_adds_empty_copy_records() {
             .fetch_one(&mut db)
             .await
             .unwrap(),
-        27
+        28
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM diagram_conflict_copies")

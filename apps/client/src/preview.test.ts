@@ -5,89 +5,40 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { classifyPreviewLink, MarkdownPreview } from "./preview";
 import type { PreviewImageData } from "./ipc";
-import type { DrawioPngStatus } from "../../../packages/protocol-types";
 
-const plainImage = (bytes: Uint8Array): PreviewImageData => ({ bytes, drawioStatus: "none" });
+const plainImage = (bytes: Uint8Array): PreviewImageData => ({ bytes });
 
 function render(source: string): string {
   return renderToStaticMarkup(createElement(MarkdownPreview, { source }));
 }
 
 describe("AT-31 basic Markdown preview", () => {
-  test("offers saved device drafts only for local drawio PNGs after image loading fails", async () => {
+  test("keeps draw.io attachments passive when image loading fails", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);
-    const open = vi.fn();
     const loadImage = vi.fn(async () => { throw new Error("offline"); });
     await act(async () => root.render(createElement(MarkdownPreview, {
-      source: "![그림](./diagram.drawio.png) ![다른 그림](./my%20diagram.DRAWIO.PNG#part) ![일반 이미지](image.png) ![외부](https://example.invalid/diagram.drawio.png)",
-      onOpenDiagram: open,
+      source: "![그림](./diagram.drawio.png) ![일반 이미지](image.png) ![외부](https://example.invalid/diagram.drawio.png)",
       loadImage,
     })));
-    const buttons = container.querySelectorAll<HTMLButtonElement>(".diagram-trial");
-    expect(buttons).toHaveLength(2);
-    expect(buttons[0].textContent).toBe("기기 초안 열기");
     expect(container.textContent).toContain("이미지를 불러올 수 없습니다");
-    expect(container.querySelector("img")).toBeNull();
-    await act(async () => buttons[0].click());
-    await act(async () => buttons[1].click());
-    expect(open.mock.calls).toEqual([["./diagram.drawio.png"], ["./my%20diagram.DRAWIO.PNG#part"]]);
-    expect(loadImage).toHaveBeenCalledTimes(3);
+    expect(container.querySelector("button, img, iframe")).toBeNull();
+    expect(loadImage).toHaveBeenCalledTimes(2);
     await act(async () => root.unmount());
   });
 
-  test("does not offer device drafts without a diagram opener", async () => {
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    await act(async () => root.render(createElement(MarkdownPreview, {
-      source: "![그림](diagram.drawio.png)",
-      loadImage: async () => { throw new Error("offline"); },
-    })));
-    expect(container.textContent).toContain("이미지를 불러올 수 없습니다");
-    expect(container.querySelector("button")).toBeNull();
-    await act(async () => root.unmount());
-  });
-
-  test("opens only validated diagrams with an explicit device draft action", async () => {
-    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: () => "blob:trial" });
-    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    const open = vi.fn();
-    for (const status of ["embedded_xml", "invalid_xml", "none"] as const) {
-      await act(async () => root.render(createElement(MarkdownPreview, {
-        source: "![그림](diagram.drawio.png)", onOpenDiagram: open,
-        loadImage: async () => ({ bytes: new Uint8Array([137]), drawioStatus: status }),
-      })));
-      const button = container.querySelector<HTMLButtonElement>(".diagram-trial");
-      if (status === "embedded_xml") {
-        expect(button?.textContent).toContain("기기 초안");
-        button!.click();
-        expect(open).toHaveBeenCalledWith("diagram.drawio.png");
-      } else expect(button).toBeNull();
-    }
-    await act(async () => root.unmount());
-  });
-
-  test.each([
-    ["embedded_xml", "편집 데이터 포함", "diagram.png"],
-    ["none", "편집 데이터가 없습니다", "diagram.drawio.png"],
-    ["invalid_xml", "편집 데이터가 손상되었습니다", "diagram.drawio.png"],
-    ["unsupported_xml", "지원하지 않는 편집 데이터입니다", "diagram.drawio.png"],
-    ["limit_exceeded", "편집 데이터가 검사 한도를 초과했습니다", "diagram.drawio.png"],
-  ])("keeps the passive image and explains %s metadata", async (drawioStatus, message, target) => {
-    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: () => "blob:drawio" });
+  test("shows draw.io PNGs as ordinary images without editing actions", async () => {
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: () => "blob:png" });
     Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
     const container = document.createElement("div");
     const root = createRoot(container);
     const bytes = new Uint8Array([137, 80, 78, 71]);
     await act(async () => root.render(createElement(MarkdownPreview, {
-      source: `![그림](${target})`, loadImage: async () => ({ bytes, drawioStatus: drawioStatus as DrawioPngStatus }),
+      source: "![그림](diagram.drawio.png)", loadImage: async () => ({ bytes }),
     })));
-    expect(container.querySelector("img")?.getAttribute("src")).toBe("blob:drawio");
-    expect(container.textContent).toContain(message);
-    if (drawioStatus === "embedded_xml") expect(container.textContent).toContain("현재 미리보기만 지원");
-    expect(container.querySelector("iframe, svg, a")).toBeNull();
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("blob:png");
+    expect(container.querySelector("button, iframe, svg, a")).toBeNull();
+    expect(container.textContent).not.toContain("편집");
     await act(async () => root.unmount());
   });
 

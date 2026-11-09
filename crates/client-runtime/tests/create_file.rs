@@ -201,7 +201,7 @@ async fn reader_is_denied_without_creating_or_admitting_file() {
 }
 
 #[tokio::test]
-async fn file_create_rejects_foreign_binding_and_upload() {
+async fn file_create_rejects_foreign_binding_and_invalid_upload_id() {
     let rig = rig().await;
     let request = mutation(&rig.editor, 1, "Local.md").await;
     let mut foreign = request.clone();
@@ -215,5 +215,35 @@ async fn file_create_rejects_foreign_binding_and_upload() {
         OperationLookup::Missing
     );
     assert!(!rig.notes.join("Local.md").exists());
+    rig.server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn missing_upload_is_unadmitted_and_can_be_abandoned_without_a_file() {
+    let rig = rig().await;
+    let mut request = mutation(&rig.editor, 1, "Missing.drawio.png").await;
+    request.request.upload_id = Some(Uuid::new_v4());
+    assert_eq!(
+        rig.editor.create(&request).await,
+        Err(Error::UploadUnavailable)
+    );
+    assert_eq!(
+        rig.editor.create_operation(&request).await.unwrap(),
+        OperationLookup::Missing
+    );
+    assert!(!rig.notes.join("Missing.drawio.png").exists());
+    assert!(matches!(
+        rig.editor
+            .prepare_abandon_create(&request)
+            .unwrap()
+            .await
+            .unwrap(),
+        OperationReceipt::Abandoned { .. }
+    ));
+    let next = mutation(&rig.editor, 2, "Next.md").await;
+    assert!(matches!(
+        rig.editor.create(&next).await.unwrap(),
+        OperationReceipt::Created { .. }
+    ));
     rig.server.shutdown().await.unwrap();
 }

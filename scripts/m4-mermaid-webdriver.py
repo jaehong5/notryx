@@ -84,6 +84,12 @@ def main():
             request("POST", f"/session/{session}/timeouts", {"script": 30000})
             wait(lambda: js("return !!document.querySelector('.cm-content[contenteditable=true]')"))
             main_window = request("GET", f"/session/{session}/window")
+            for command in ("drawio_open", "drawio_load", "drawio_checkpoint", "drawio_save",
+                            "drawio_export_png", "workspace_queue_diagram"):
+                result = native(command)
+                assert not result["ok"] and any(reason in result["error"].lower()
+                    for reason in ("not found", "not allowed")), result
+            print("Deferred diagram editor commands are unavailable", flush=True)
             diagrams = ["flowchart LR\n A[한글 시작] --> B[완료]", "sequenceDiagram\n A->>B: 한글 메시지",
                         "classDiagram\n A --> B", "stateDiagram-v2\n A --> B", "erDiagram\n A ||--o{ B : has"]
             for index, diagram in enumerate(diagrams):
@@ -145,7 +151,8 @@ def main():
             wait(lambda: len(request("GET", f"/session/{session}/window/handles")) == 1)
             print("Renderer privilege/network/frame denial and reload cleanup passed", flush=True)
             (output / "result.json").write_text(json.dumps({"passed": True, "platform": "Linux WebKitGTK / Xvfb",
-                "diagrams": len(diagrams), "physical_input": "not tested"}, indent=2) + "\n")
+                "diagrams": len(diagrams), "deferred_editor_commands": "unavailable",
+                "physical_input": "not tested"}, indent=2) + "\n")
         finally:
             if session:
                 try:

@@ -1687,6 +1687,8 @@ pub struct WorkspaceCreateEntry {
     pub request: CreateNodeRequest,
     pub status: WorkspaceCreateStatus,
     pub receipt: Option<OperationReceipt>,
+    #[serde(default)]
+    pub upload_unavailable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -2026,83 +2028,10 @@ pub struct WorkspacePreviewImageRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
-pub struct DrawioEditorInput {
-    pub title: String,
-    pub xml: String,
-    pub generation: String,
-    pub restored: bool,
-    pub source_changed: bool,
-    pub can_save: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(deny_unknown_fields)]
-pub struct DrawioSaveRequest {
-    pub generation: String,
-    pub png_base64: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(deny_unknown_fields)]
-pub struct DrawioSaveState {
-    pub generation: Option<String>,
-    pub matches_draft: bool,
-    pub status: WorkspaceSendStatus,
-    pub can_choose_remote: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(deny_unknown_fields)]
-pub struct DrawioConflictRequest {
-    pub generation: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(deny_unknown_fields)]
-pub struct DrawioConflictChoice {
-    pub generation: String,
-    pub operation_id: String,
-    pub remote_revision: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(deny_unknown_fields)]
-pub struct DrawioCheckpointRequest {
-    pub generation: String,
-    pub xml: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(deny_unknown_fields)]
-pub struct DrawioCheckpoint {
-    pub generation: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(deny_unknown_fields)]
-pub struct DrawioExportRequest {
-    pub generation: String,
-    pub png_base64: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(deny_unknown_fields)]
 pub struct WorkspacePreviewImage {
     pub png_base64: String,
     pub width: u32,
     pub height: u32,
-    pub drawio_status: DrawioPngStatus,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(rename_all = "snake_case")]
-pub enum DrawioPngStatus {
-    None,
-    EmbeddedXml,
-    InvalidXml,
-    UnsupportedXml,
-    LimitExceeded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]

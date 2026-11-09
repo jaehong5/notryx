@@ -71,7 +71,7 @@ async function showCreatePanel() {
   await import("./main");
   await vi.waitFor(() => expect([...document.querySelectorAll("button")].some((button) => button.textContent === "새 폴더 또는 문서")).toBe(true));
   [...document.querySelectorAll("button")].find((button) => button.textContent === "새 폴더 또는 문서")!.click();
-  await vi.waitFor(() => expect(document.querySelector('[aria-label="새 폴더 또는 문서"]')).not.toBeNull());
+  await vi.waitFor(() => expect(document.querySelector('.create-panel')).not.toBeNull());
   await vi.waitFor(() => expect(document.querySelector(`[data-testid="create-parent"] option[value="${rootId}"]`)).not.toBeNull());
   change(document.querySelector<HTMLSelectElement>('[data-testid="create-parent"]')!,rootId);
   change(document.querySelector<HTMLInputElement>('[data-testid="create-name"]')!,"메모");

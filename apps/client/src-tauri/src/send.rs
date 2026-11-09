@@ -434,6 +434,17 @@ async fn create_failure(
         };
         return Ok(create_outcome(binding, status, item));
     }
+    if create_submission
+        && error == notryx_client_runtime::Error::UploadUnavailable
+        && item.request.upload_id.is_some()
+    {
+        state
+            .store
+            .abandon_unavailable_diagram_upload(binding, item)
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(create_outcome(binding, WorkspaceSendStatus::Pending, item));
+    }
     if let Some(reason) = block_reason(error) {
         state.transmission_gate.block(binding, reason);
     }

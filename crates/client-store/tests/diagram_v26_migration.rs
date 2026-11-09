@@ -59,7 +59,7 @@ async fn v25_fixture(path: &Path, collision: bool) -> (RegistrationBinding, Stri
         .execute(&mut *tx)
         .await
         .unwrap();
-    sqlx::raw_sql("INSERT INTO client_outbox_v25 SELECT * FROM client_outbox; DROP TABLE client_outbox; ALTER TABLE client_outbox_v25 RENAME TO client_outbox; DROP TABLE IF EXISTS diagram_conflict_copies; DROP TABLE IF EXISTS diagram_save_snapshots; PRAGMA user_version=25;").execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql("INSERT INTO client_outbox_v25 SELECT * FROM client_outbox; DROP TABLE client_outbox; ALTER TABLE client_outbox_v25 RENAME TO client_outbox; DROP TABLE IF EXISTS diagram_creations; DROP TABLE IF EXISTS diagram_conflict_copies; DROP TABLE IF EXISTS diagram_save_snapshots; PRAGMA user_version=25;").execute(&mut *tx).await.unwrap();
     for index in indexes {
         sqlx::raw_sql(sqlx::AssertSqlSafe(index))
             .execute(&mut *tx)
@@ -123,7 +123,7 @@ async fn v26_migration_preserves_xml_requests_foreign_keys_indexes_and_triggers(
             .fetch_one(&mut db)
             .await
             .unwrap(),
-        27
+        28
     );
     assert!(
         sqlx::query("PRAGMA foreign_key_check")

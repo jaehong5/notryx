@@ -443,6 +443,7 @@ pub struct CreateOutboxState {
     pub operation: CreateOutboxOperation,
     pub receipt: Option<notryx_protocol::OperationReceipt>,
     pub frozen: bool,
+    pub upload_unavailable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1137,7 +1138,9 @@ pub(crate) fn pending_create_operation(
         || parsed_operation.to_string() != operation_id
         || request.node_id.to_string() != node
         || request.node_id == request.parent_id
-        || request.upload_id.is_some()
+        || (request.upload_id.is_some()
+            && (request.kind != notryx_protocol::NodeKind::File
+                || !request.name.to_ascii_lowercase().ends_with(".drawio.png")))
         || payload_len != bytes.len() as i64
         || payload_hash(&bytes) != hash
         || retired != 0
@@ -1372,7 +1375,7 @@ fn move_receipt_for_display(
     Ok(receipt)
 }
 
-fn matches_empty_created_node(
+fn matches_created_node(
     request: &notryx_protocol::CreateNodeRequest,
     node: &notryx_protocol::NodeState,
     commit_seq: notryx_domain::ChangeSeq,
@@ -1409,15 +1412,30 @@ fn matches_empty_created_node(
                 .and_then(|rev| StrongEtag::from_content_revision(rev).ok());
             etag.as_ref().map(StrongEtag::as_str) == node.content_etag.as_deref()
                 && node.content_rev.is_some()
-                && node.content_hash.as_deref()
-                    == Some(
-                        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-                    )
-                && node
-                    .size
-                    .as_deref()
-                    .and_then(|size| size.parse::<u64>().ok())
-                    == Some(0)
+                && if request.upload_id.is_some() {
+                    node.content_hash.as_deref().is_some_and(|hash| {
+                        hash.strip_prefix("sha256:").is_some_and(|digest| {
+                            digest.len() == 64
+                                && digest
+                                    .bytes()
+                                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                        })
+                    }) && node
+                        .size
+                        .as_deref()
+                        .and_then(|size| size.parse::<u64>().ok())
+                        .is_some_and(|size| size > 0 && size <= 25 * 1024 * 1024)
+                } else {
+                    node.content_hash.as_deref()
+                        == Some(
+                            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                        )
+                        && node
+                            .size
+                            .as_deref()
+                            .and_then(|size| size.parse::<u64>().ok())
+                            == Some(0)
+                }
         }
     }
 }
@@ -1471,7 +1489,7 @@ fn create_receipt_for_display(
     if let OperationReceipt::Created {
         node, commit_seq, ..
     } = &receipt
-        && !matches_empty_created_node(&item.request, node, *commit_seq)
+        && !matches_created_node(&item.request, node, *commit_seq)
     {
         return Err(StoreError::UnsupportedFormat);
     }
@@ -1695,8 +1713,7 @@ pub(crate) async fn queue_create_on_connection(
     id: &str,
 ) -> Result<CreateOutboxOperation, StoreError> {
     let bytes = serde_json::to_vec(request).map_err(|_| StoreError::InvalidRequest)?;
-    if request.upload_id.is_some()
-        || request.parent_id == request.node_id
+    if request.parent_id == request.node_id
         || serde_json::from_slice::<notryx_protocol::CreateNodeRequest>(&bytes)
             .ok()
             .as_ref()
@@ -3167,7 +3184,14 @@ impl ClientStore {
             } else {
                 None
             };
+            let upload_unavailable = crate::diagram_creation::validate_upload(
+                &mut self.connection,
+                &item,
+                receipt.as_ref(),
+            )
+            .await?;
             entries.push(CreateOutboxState {
+                upload_unavailable,
                 operation: item,
                 receipt,
                 frozen: true,
@@ -3254,6 +3278,12 @@ impl ClientStore {
         let row = sqlx::query("SELECT operation_id,operation_seq,operation_kind,document_id,storage_id,generation,dependency,expected_revision,bytes,payload_hash,payload_len,payload_retired,CASE WHEN status IN ('committed','conflict') THEN 'sent' ELSE status END AS status,abandon_state,NULL AS terminal_kind,status AS actual_status,terminal_kind AS actual_terminal,receipt_json FROM client_outbox WHERE registration_id=? AND operation_id=? AND operation_kind='create'")
             .bind(old_registration).bind(operation_id).fetch_optional(&mut *tx).await.map_err(storage_error)?.ok_or(StoreError::InvalidRequest)?;
         let old_item = validated_create_record(&row, old_binding)?;
+        if old_item.request.upload_id.is_some()
+            && matches!(choice, FrozenCreateChoice::Apply { .. })
+        {
+            return Err(StoreError::InvalidRequest);
+        }
+
         if !matches!(
             old_item.status,
             OutboxStatus::Queued
@@ -4212,7 +4242,14 @@ impl ClientStore {
                 }
                 _ => return Err(StoreError::UnsupportedFormat),
             };
+            let upload_unavailable = crate::diagram_creation::validate_upload(
+                &mut self.connection,
+                &operation,
+                receipt.as_ref(),
+            )
+            .await?;
             entries.push(CreateOutboxState {
+                upload_unavailable,
                 operation,
                 receipt,
                 frozen: status == "frozen",
@@ -4234,6 +4271,9 @@ impl ClientStore {
         binding: &RegistrationBinding,
         request: &notryx_protocol::CreateNodeRequest,
     ) -> Result<CreateOutboxOperation, StoreError> {
+        if request.upload_id.is_some() {
+            return Err(StoreError::InvalidRequest);
+        }
         let registration_id = self.registration_id(binding, true).await?;
         let id = uuid::Uuid::now_v7().to_string();
         let mut tx = self.connection.begin().await.map_err(storage_error)?;
@@ -4479,6 +4519,7 @@ impl ClientStore {
                 Ok(Some(PendingOutboxOperation::Restore(item)))
             }
             PendingOutboxOperation::Create(mut item) => {
+                crate::diagram_creation::validate_upload(&mut transaction, &item, None).await?;
                 if item.abandon_state == OutboxAbandonState::Requested {
                     let result = sqlx::query("UPDATE client_outbox SET abandon_state='sent' WHERE registration_id=? AND operation_id=? AND abandon_state='requested'")
                         .bind(registration_id).bind(&item.operation_id).execute(&mut *transaction).await.map_err(storage_error)?;
@@ -4646,6 +4687,7 @@ impl ClientStore {
             return Ok(());
         }
         let item = pending_create_operation(&row, binding)?;
+        crate::diagram_creation::validate_upload(&mut tx, &item, Some(receipt)).await?;
         if !matches!(item.status, OutboxStatus::Sent | OutboxStatus::Abandoning)
             || (terminal == Some("abandoned") && item.abandon_state != OutboxAbandonState::Sent)
         {
@@ -4654,7 +4696,7 @@ impl ClientStore {
         if let OperationReceipt::Created {
             node, commit_seq, ..
         } = receipt
-            && !matches_empty_created_node(&item.request, node, *commit_seq)
+            && !matches_created_node(&item.request, node, *commit_seq)
         {
             return Err(StoreError::InvalidReceipt);
         }

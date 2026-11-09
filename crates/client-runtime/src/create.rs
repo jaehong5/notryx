@@ -25,7 +25,7 @@ impl CreateMutation {
         }
         let json = serde_json::to_vec(&self.request).map_err(|_| Error::InvalidRequest)?;
         if self.operation_seq == 0
-            || self.request.upload_id.is_some()
+            || (self.request.upload_id.is_some() && self.request.kind != NodeKind::File)
             || self.request.node_id == self.request.parent_id
             || serde_json::from_slice::<CreateNodeRequest>(&json)
                 .ok()
@@ -75,21 +75,29 @@ impl CreateMutation {
                     }
                     NodeKind::File => {
                         let revision = node.content_rev.as_ref().ok_or(Error::Contract)?;
+                        let hash = node.content_hash.as_deref().ok_or(Error::Contract)?;
+                        let size = node
+                            .size
+                            .as_deref()
+                            .and_then(|size| size.parse::<u64>().ok())
+                            .ok_or(Error::Contract)?;
                         if node.content_etag.as_deref()
                             != Some(
                                 StrongEtag::from_content_revision(revision)
                                     .map_err(|_| Error::Contract)?
                                     .as_str(),
                             )
-                            || node.content_hash.as_deref()
-                                != Some(
-                                    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-                                )
-                            || node
-                                .size
-                                .as_deref()
-                                .and_then(|size| size.parse::<u64>().ok())
-                                != Some(0)
+                            || !hash.strip_prefix("sha256:").is_some_and(|hash| {
+                                hash.len() == 64
+                                    && hash.bytes().all(|byte| {
+                                        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                                    })
+                            })
+                            || size > crate::MAX_CONTENT_BYTES as u64
+                            || (self.request.upload_id.is_none()
+                                && (size != 0
+                                    || hash
+                                        != "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"))
                         {
                             return Err(Error::Contract);
                         }
@@ -190,7 +198,13 @@ fn decode_operation(
         Ok(error.operation)
     } else {
         let error = serde_json::from_slice::<ApiError>(bytes).map_err(|_| Error::Contract)?;
-        Err(api_error(status, &error))
+        Err(
+            if status == StatusCode::GONE && error.code == "upload_unavailable" {
+                Error::UploadUnavailable
+            } else {
+                api_error(status, &error)
+            },
+        )
     }
 }
 

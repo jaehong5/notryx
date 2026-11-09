@@ -1549,205 +1549,6 @@
       "title": "DeviceRenewal",
       "type": "object"
     },
-    "DrawioCheckpoint": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
-      "properties": {
-        "generation": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "generation"
-      ],
-      "title": "DrawioCheckpoint",
-      "type": "object"
-    },
-    "DrawioCheckpointRequest": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
-      "properties": {
-        "generation": {
-          "type": "string"
-        },
-        "xml": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "generation",
-        "xml"
-      ],
-      "title": "DrawioCheckpointRequest",
-      "type": "object"
-    },
-    "DrawioConflictChoice": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
-      "properties": {
-        "generation": {
-          "type": "string"
-        },
-        "operation_id": {
-          "type": "string"
-        },
-        "remote_revision": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "generation",
-        "operation_id",
-        "remote_revision"
-      ],
-      "title": "DrawioConflictChoice",
-      "type": "object"
-    },
-    "DrawioConflictRequest": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
-      "properties": {
-        "generation": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "generation"
-      ],
-      "title": "DrawioConflictRequest",
-      "type": "object"
-    },
-    "DrawioEditorInput": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
-      "properties": {
-        "can_save": {
-          "type": "boolean"
-        },
-        "generation": {
-          "type": "string"
-        },
-        "restored": {
-          "type": "boolean"
-        },
-        "source_changed": {
-          "type": "boolean"
-        },
-        "title": {
-          "type": "string"
-        },
-        "xml": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "title",
-        "xml",
-        "generation",
-        "restored",
-        "source_changed",
-        "can_save"
-      ],
-      "title": "DrawioEditorInput",
-      "type": "object"
-    },
-    "DrawioExportRequest": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
-      "properties": {
-        "generation": {
-          "type": "string"
-        },
-        "png_base64": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "generation",
-        "png_base64"
-      ],
-      "title": "DrawioExportRequest",
-      "type": "object"
-    },
-    "DrawioPngStatus": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "enum": [
-        "none",
-        "embedded_xml",
-        "invalid_xml",
-        "unsupported_xml",
-        "limit_exceeded"
-      ],
-      "title": "DrawioPngStatus",
-      "type": "string"
-    },
-    "DrawioSaveRequest": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
-      "properties": {
-        "generation": {
-          "type": "string"
-        },
-        "png_base64": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "generation"
-      ],
-      "title": "DrawioSaveRequest",
-      "type": "object"
-    },
-    "DrawioSaveState": {
-      "$defs": {
-        "WorkspaceSendStatus": {
-          "enum": [
-            "idle",
-            "pending",
-            "committed",
-            "conflict",
-            "failed",
-            "abandoned",
-            "permission_denied",
-            "needs_review",
-            "sync_pending",
-            "ack_pending",
-            "auth_required",
-            "gateway_auth_required"
-          ],
-          "type": "string"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
-      "properties": {
-        "can_choose_remote": {
-          "type": "boolean"
-        },
-        "generation": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "matches_draft": {
-          "type": "boolean"
-        },
-        "status": {
-          "$ref": "#/$defs/WorkspaceSendStatus"
-        }
-      },
-      "required": [
-        "matches_draft",
-        "status",
-        "can_choose_remote"
-      ],
-      "title": "DrawioSaveState",
-      "type": "object"
-    },
     "HeadHint": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -8199,6 +8000,10 @@
         },
         "status": {
           "$ref": "#/$defs/WorkspaceCreateStatus"
+        },
+        "upload_unavailable": {
+          "default": false,
+          "type": "boolean"
         }
       },
       "required": [
@@ -9114,6 +8919,10 @@
             },
             "status": {
               "$ref": "#/$defs/WorkspaceCreateStatus"
+            },
+            "upload_unavailable": {
+              "default": false,
+              "type": "boolean"
             }
           },
           "required": [
@@ -23447,24 +23256,9 @@
       "type": "string"
     },
     "WorkspacePreviewImage": {
-      "$defs": {
-        "DrawioPngStatus": {
-          "enum": [
-            "none",
-            "embedded_xml",
-            "invalid_xml",
-            "unsupported_xml",
-            "limit_exceeded"
-          ],
-          "type": "string"
-        }
-      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
-        "drawio_status": {
-          "$ref": "#/$defs/DrawioPngStatus"
-        },
         "height": {
           "format": "uint32",
           "minimum": 0,
@@ -23482,8 +23276,7 @@
       "required": [
         "png_base64",
         "width",
-        "height",
-        "drawio_status"
+        "height"
       ],
       "title": "WorkspacePreviewImage",
       "type": "object"

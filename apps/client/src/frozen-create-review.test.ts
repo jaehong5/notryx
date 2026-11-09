@@ -37,6 +37,21 @@ async function setDestination(container:HTMLElement) {
 beforeEach(()=>vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT",true));
 afterEach(()=>{document.body.replaceChildren();vi.unstubAllGlobals();});
 
+test("previous diagram uploads permit review and dismissal but cannot be applied as new requests", async () => {
+  const api = ports();
+  api.list = vi.fn(async (current) => ({ binding: current, entries: [{ ...item, kind: "file" as const, name: "old.drawio.png", uploaded_diagram: true }], next_after_id: null }));
+  const { container, root, applied } = await show(api);
+  expect(container.textContent).toContain("이전 업로드는 새 등록에서 재사용할 수 없습니다. 기록은 보존됩니다. 서버 생성 여부를 확인한 뒤 미적용으로 정리할 수 있습니다.");
+  expect(container.querySelector('[data-testid="review-apply"]')).toBeNull();
+  expect(container.querySelector('[data-testid="review-parent"]')).toBeNull();
+  await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="review-dismiss"]')!.click());
+  expect(api.decide).not.toHaveBeenCalled();
+  await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="review-dismiss-confirm"]')!.click());
+  expect(api.decide).toHaveBeenCalledExactlyOnceWith(binding, old, "old-operation", { kind: "dismiss" });
+  expect(applied).not.toHaveBeenCalled();
+  await act(async () => root.unmount());
+});
+
 test("이전 요청과 현재 같은 ID·이름을 별도로 보여 주고 성공을 추정하지 않는다",async()=>{
   const api=ports(); const {container,root}=await show(api);
   expect(container.textContent).toContain("이전 node ID: old-node");expect(container.textContent).toContain("이전 부모 ID: old-parent");expect(container.textContent).toContain("이전 이름: original");

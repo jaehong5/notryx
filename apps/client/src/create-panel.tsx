@@ -37,6 +37,7 @@ function statusText(entry: CreateDisplay, denied: boolean): string {
   if (entry.status === "queued") return "전송 대기";
   if (entry.status === "sent") return "서버 결과 확인 중";
   if (entry.status === "abandoning") return "취소 처리 중";
+  if ((entry.status === "abandoned" || entry.status === "failed") && entry.reason === "upload_unavailable") return "업로드를 사용할 수 없어 이전 생성 요청을 완료하지 못했습니다.";
   if (entry.status === "abandoned") return "취소 완료";
   if (entry.status === "committed") return "생성 완료";
   switch (entry.reason) {

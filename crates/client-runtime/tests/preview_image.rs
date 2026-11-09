@@ -50,21 +50,13 @@ fn supported_formats_are_decoded_and_reencoded_as_passive_png_without_mutating_s
 }
 
 #[test]
-fn drawio_metadata_is_reported_without_exposing_it_in_the_display_png() {
-    use notryx_protocol::DrawioPngStatus;
-    for (source, expected) in [
-        (
-            include_bytes!("fixtures/drawio-valid.png").as_slice(),
-            DrawioPngStatus::EmbeddedXml,
-        ),
-        (
-            include_bytes!("fixtures/drawio-invalid.png").as_slice(),
-            DrawioPngStatus::InvalidXml,
-        ),
+fn embedded_metadata_is_ignored_without_mutating_the_original_png() {
+    for source in [
+        include_bytes!("fixtures/drawio-valid.png").as_slice(),
+        include_bytes!("fixtures/drawio-invalid.png").as_slice(),
     ] {
         let original = source.to_vec();
         let preview = validate_preview_image(source).unwrap();
-        assert_eq!(preview.drawio_status, expected);
         assert_eq!((preview.width, preview.height), (1, 1));
         assert_eq!(
             image::load_from_memory(&preview.png_bytes).unwrap().width(),

@@ -155,7 +155,7 @@ async fn credential_expiry_migrates_v23_without_inventing_expiry_or_changing_use
     let (store, binding) = fixture(&path).await;
     store.close().await.unwrap();
     let mut db = connect(&path).await;
-    sqlx::raw_sql("DROP TABLE IF EXISTS diagram_conflict_copies; DROP TABLE IF EXISTS diagram_save_snapshots; DROP TABLE IF EXISTS diagram_drafts; DROP TABLE IF EXISTS credential_expiry; PRAGMA user_version=23;")
+    sqlx::raw_sql("DROP TABLE IF EXISTS diagram_creations; DROP TABLE IF EXISTS diagram_conflict_copies; DROP TABLE IF EXISTS diagram_save_snapshots; DROP TABLE IF EXISTS diagram_drafts; DROP TABLE IF EXISTS credential_expiry; PRAGMA user_version=23;")
         .execute(&mut db)
         .await
         .unwrap();
@@ -169,7 +169,7 @@ async fn credential_expiry_migrates_v23_without_inventing_expiry_or_changing_use
         .fetch_one(&mut db)
         .await
         .unwrap();
-    assert_eq!(version, 27);
+    assert_eq!(version, 28);
     db.close().await.unwrap();
     let mut store = ClientStore::open(&path).await.unwrap();
     assert_eq!(store.credential_expiry(&binding).await.unwrap(), None);
@@ -183,7 +183,7 @@ async fn credential_expiry_migration_collision_preserves_v23_and_recovery_data()
     let (store, binding) = fixture(&path).await;
     store.close().await.unwrap();
     let mut db = connect(&path).await;
-    sqlx::raw_sql("DROP TABLE IF EXISTS diagram_conflict_copies; DROP TABLE IF EXISTS diagram_save_snapshots; DROP TABLE IF EXISTS diagram_drafts; DROP TABLE IF EXISTS credential_expiry; CREATE TABLE credential_expiry(sentinel TEXT); INSERT INTO credential_expiry VALUES('preserve-me'); PRAGMA user_version=23;").execute(&mut db).await.unwrap();
+    sqlx::raw_sql("DROP TABLE IF EXISTS diagram_creations; DROP TABLE IF EXISTS diagram_conflict_copies; DROP TABLE IF EXISTS diagram_save_snapshots; DROP TABLE IF EXISTS diagram_drafts; DROP TABLE IF EXISTS credential_expiry; CREATE TABLE credential_expiry(sentinel TEXT); INSERT INTO credential_expiry VALUES('preserve-me'); PRAGMA user_version=23;").execute(&mut db).await.unwrap();
     db.close().await.unwrap();
     assert!(ClientStore::open(&path).await.is_err());
     let mut db = connect(&path).await;
@@ -567,7 +567,7 @@ async fn credential_v8_migration_preserves_data_and_rolls_back_on_schema_collisi
             .fetch_one(&mut db)
             .await
             .unwrap(),
-        27
+        28
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pragma_foreign_key_check")

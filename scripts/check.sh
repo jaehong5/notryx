@@ -10,6 +10,4 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo run --locked -p notryx-protocol --bin generate-contracts -- --check
 python3 scripts/check-boundaries.py
-python3 scripts/test-prepare-drawio.py
-node --test scripts/test-drawio-bridge.mjs
 npm audit --audit-level=high

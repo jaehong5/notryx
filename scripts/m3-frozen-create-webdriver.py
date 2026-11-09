@@ -209,8 +209,8 @@ def main():
             def root_parent():
                 return root_id()
             def open_panel():
-                wait(lambda: js("return !!document.querySelector('[aria-label=\"새 폴더 또는 문서\"]') || [...document.querySelectorAll('button')].some(x=>x.textContent.trim()==='새 폴더 또는 문서' && !x.disabled)"), "create control")
-                js("if(!document.querySelector('[aria-label=\"새 폴더 또는 문서\"]')) [...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='새 폴더 또는 문서').click()")
+                wait(lambda: js("return !!document.querySelector('.create-panel') || [...document.querySelectorAll('button')].some(x=>x.textContent.trim()==='새 폴더 또는 문서' && !x.disabled)"), "create control")
+                js("if(!document.querySelector('.create-panel')) [...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='새 폴더 또는 문서').click()")
                 wait(lambda: js("return !!document.querySelector('[data-testid=create-parent] option[value=\"'+arguments[0]+'\"]')", parent), "root destination")
             def create(name):
                 open_panel()
@@ -239,7 +239,7 @@ def main():
             create("Uncertain Folder")
             wait(lambda: proxy.count("restore", 403) > 0, "actual reader create 403")
             first = wait(lambda: (r[0] if len(r := rows()) == 1 and r[0][3] == "sent" and r[0][6] is None else None), "sent unconfirmed create")
-            wait(lambda: js("return document.querySelector('[aria-label=\"새 폴더 또는 문서\"]')?.textContent.includes('생성 권한이 없습니다')"), "reader permission notice")
+            wait(lambda: js("return document.querySelector('.create-panel')?.textContent.includes('생성 권한이 없습니다')"), "reader permission notice")
             with proxy.lock:
                 require(proxy.restore_operation == first[0] and len(proxy.restore_requests) >= 1, "denied request identity disagreed")
                 first_wire = tuple(proxy.restore_requests)

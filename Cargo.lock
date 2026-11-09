@@ -2497,14 +2497,11 @@ name = "notryx-client-runtime"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
- "crc32fast",
- "flate2",
  "image",
  "notryx-domain",
  "notryx-protocol",
  "notryx-server",
  "open",
- "quick-xml",
  "reqwest",
  "serde",
  "serde_json",

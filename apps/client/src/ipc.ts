@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DrawioPngStatus } from "../../../packages/protocol-types";
 import type { M0OpenedDocument, M0SavedCheckpoint, M0SaveRequest, M0CloseRequest, NodeState, WorkspaceDraft, WorkspacePairStatus, WorkspaceRegistration, WorkspaceOpenedDocument, WorkspaceSendResult, WorkspaceDocumentOutboxState, WorkspaceOutboxEntry, WorkspaceOutboxPage, WorkspaceQueuedOperation, WorkspaceSyncState } from "../../../packages/protocol-types";
 import type { RestoreNodeRequest, TrashPage } from "../../../packages/protocol-types";
 import type { RestoreDisplay } from "./trash-panel";
@@ -157,12 +156,21 @@ export async function requestWorkspaceRestoreAbandon(binding: WorkspaceRegistrat
   await invoke("workspace_request_restore_abandon", { request: { renderer_session_id, binding, operation_id } });
 }
 
+function uploadedDiagram(request: Record<string, unknown>, name: string): boolean {
+  const uploaded = request.upload_id !== undefined && request.upload_id !== null;
+  if (uploaded && (request.kind !== "file" || !name.toLowerCase().endsWith(".drawio.png") || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(string(request.upload_id)))) throw new Error("잘못된 다이어그램 생성 상태입니다.");
+  return uploaded;
+}
+
 function createDisplay(value: unknown, binding: WorkspaceRegistration): CreateDisplay {
   const item = object(value), request = object(item.request);
   const operation_id = nodeId(item.operation_id), operation_seq = generation(item.operation_seq);
   const node_id = nodeId(item.node_id), parent_id = nodeId(request.parent_id), name = string(request.name);
   const status = string(item.status);
-  if (operation_seq === "0" || nodeId(request.node_id) !== node_id || parent_id === node_id || !name || new TextEncoder().encode(name).length > 255 || (request.kind !== "folder" && request.kind !== "file") || (request.upload_id !== undefined && request.upload_id !== null) || !["queued", "sent", "abandoning", "abandoned", "committed", "failed"].includes(status)) throw new Error("잘못된 생성 상태입니다.");
+  const uploaded = uploadedDiagram(request, name);
+  const unavailable = item.upload_unavailable === undefined ? false : item.upload_unavailable;
+  if (typeof unavailable !== "boolean" || (unavailable && !uploaded)) throw new Error("잘못된 업로드 상태입니다.");
+  if (operation_seq === "0" || nodeId(request.node_id) !== node_id || parent_id === node_id || !name || new TextEncoder().encode(name).length > 255 || (request.kind !== "folder" && request.kind !== "file") || !["queued", "sent", "abandoning", "abandoned", "committed", "failed"].includes(status)) throw new Error("잘못된 생성 상태입니다.");
   let reason: string | null = null;
   if (status === "queued" || status === "sent" || status === "abandoning") {
     if (item.receipt !== null) throw new Error("잘못된 생성 결과입니다.");
@@ -174,12 +182,17 @@ function createDisplay(value: unknown, binding: WorkspaceRegistration): CreateDi
     } else if (status === "committed") {
       if (receiptStatus !== "created") throw new Error("잘못된 생성 결과입니다.");
       const node = nodeState(receipt.node);
-      if (node.node_id !== node_id || node.parent_id !== parent_id || node.name !== name || node.kind !== request.kind || node.deleted || node.last_change_seq !== generation(receipt.commit_seq) || (node.kind === "folder" ? node.content_rev !== null || node.content_etag !== null || node.content_hash !== null || node.size !== null : node.content_rev === null || node.content_etag !== `"${node.content_rev}"` || node.content_hash !== "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" || (node.size === null || !/^0+$/.test(node.size)) || node.children_generation !== "0")) throw new Error("잘못된 생성 결과입니다.");
+      const emptyHash = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+      const validContent = uploaded
+        ? node.content_hash !== null && /^sha256:[0-9a-f]{64}$/.test(node.content_hash) && node.content_hash !== emptyHash && node.size !== null && /^[0-9]+$/.test(node.size) && Number(node.size) > 0 && Number(node.size) <= 25 * 1024 * 1024
+        : node.content_hash === emptyHash && node.size !== null && /^0+$/.test(node.size);
+      if (node.node_id !== node_id || node.parent_id !== parent_id || node.name !== name || node.kind !== request.kind || node.deleted || node.last_change_seq !== generation(receipt.commit_seq) || (node.kind === "folder" ? node.content_rev !== null || node.content_etag !== null || node.content_hash !== null || node.size !== null : node.content_rev === null || node.content_etag !== `"${node.content_rev}"` || !validContent || node.children_generation !== "0")) throw new Error("잘못된 생성 결과입니다.");
     } else {
       if (!["recovery_conflict", "node_deleted", "destination_exists", "node_id_conflict", "parent_not_folder", "not_found", "not_applied"].includes(receiptStatus)) throw new Error("잘못된 생성 오류입니다.");
       reason = receiptStatus;
     }
   }
+  if (unavailable && status !== "committed") reason = "upload_unavailable";
   return { operation_id, operation_seq, node_id, parent_id, name, kind: request.kind as "file" | "folder", status: status as CreateDisplay["status"], reason };
 }
 
@@ -188,8 +201,9 @@ export async function queueWorkspaceCreate(binding: WorkspaceRegistration, reque
   if (kind !== "file" && kind !== "folder") throw new Error("잘못된 생성 종류입니다.");
   if (!name || new TextEncoder().encode(name).length > 255) throw new Error("잘못된 폴더 이름입니다.");
   const renderer_session_id = await getRendererSession();
-  const item = createDisplay(await invoke("workspace_queue_create", { request: { renderer_session_id, binding, parent_id, name, kind } }), binding);
-  if (item.status !== "queued" || item.parent_id !== parent_id || item.name !== name || item.kind !== kind) throw new Error("다른 생성 요청의 응답입니다.");
+  const response = await invoke("workspace_queue_create", { request: { renderer_session_id, binding, parent_id, name, kind } });
+  const item = createDisplay(response, binding);
+  if (item.status !== "queued" || item.parent_id !== parent_id || item.name !== name || item.kind !== kind || object(object(response).request).upload_id != null) throw new Error("다른 생성 요청의 응답입니다.");
   return item;
 }
 
@@ -455,7 +469,8 @@ export async function workspaceFrozenCreates(binding: WorkspaceRegistration, aft
     const operation_id = nodeId(item.operation_id), operation_seq = generation(item.operation_seq);
     const node_id = nodeId(request.node_id), parent_id = nodeId(request.parent_id), name = string(request.name);
     const status = item.status;
-    if ((previous !== null && operation_id <= previous) || operation_seq === "0" || old_binding.workspace_id !== binding.workspace_id || sameRegistration(old_binding, binding) || node_id === parent_id || (request.kind !== "folder" && request.kind !== "file") || (request.upload_id !== undefined && request.upload_id !== null) || !name || new TextEncoder().encode(name).length > 255 || (status !== "queued" && status !== "sent" && status !== "abandoning" && status !== "failed") || !Array.isArray(item.current_same_name) || item.current_same_name.length > 100) throw new Error("잘못된 이전 생성 요청입니다.");
+    const uploaded_diagram = uploadedDiagram(request, name);
+    if ((previous !== null && operation_id <= previous) || operation_seq === "0" || old_binding.workspace_id !== binding.workspace_id || sameRegistration(old_binding, binding) || node_id === parent_id || (request.kind !== "folder" && request.kind !== "file") || !name || new TextEncoder().encode(name).length > 255 || (status !== "queued" && status !== "sent" && status !== "abandoning" && status !== "failed") || !Array.isArray(item.current_same_name) || item.current_same_name.length > 100) throw new Error("잘못된 이전 생성 요청입니다.");
     previous = operation_id;
     let reason: string | null = null;
     if (status === "failed") {
@@ -478,7 +493,7 @@ export async function workspaceFrozenCreates(binding: WorkspaceRegistration, aft
       if (nodeId(node.node_id) === node_id || node.parent_id !== parent_id || node.deleted) throw new Error("잘못된 현재 항목입니다.");
       return node;
     });
-    return { old_binding, operation_id, operation_seq, node_id, parent_id, name, kind: request.kind as "file" | "folder", status, reason, current_same_id, current_same_name };
+    return { old_binding, operation_id, operation_seq, node_id, parent_id, name, kind: request.kind as "file" | "folder", status, reason, current_same_id, current_same_name, uploaded_diagram };
   });
   const next_after_id = page.next_after_id === null ? null : nodeId(page.next_after_id);
   if (next_after_id !== null && (!entries.length || entries[entries.length - 1].operation_id !== next_after_id)) throw new Error("잘못된 이전 생성 페이지입니다.");
@@ -1317,21 +1332,15 @@ export async function sendNextWorkspaceOperation(): Promise<WorkspaceSendResult>
   return { binding: registration(value.binding), status, operation_id, document_id, generation: current_generation, content_block };
 }
 
-export type PreviewImageData = { bytes: Uint8Array; drawioStatus: DrawioPngStatus };
+export type PreviewImageData = { bytes: Uint8Array };
 
 export async function previewWorkspaceImage(document_id: string, edit_session_id: string, node: NodeState): Promise<PreviewImageData> {
   const renderer_session_id = await getRendererSession();
   const value = object(await invoke("workspace_preview_image", { request: { renderer_session_id, document_id, edit_session_id, node } }));
   if (typeof value.width !== "number" || typeof value.height !== "number" || !Number.isInteger(value.width) || !Number.isInteger(value.height) || value.width <= 0 || value.height <= 0 || value.width > 8192 || value.height > 8192 || value.width * value.height > 16_000_000) throw new Error("잘못된 이미지 응답입니다.");
-  const drawioStatus = value.drawio_status;
-  if (drawioStatus !== "none" && drawioStatus !== "embedded_xml" && drawioStatus !== "invalid_xml" && drawioStatus !== "unsupported_xml" && drawioStatus !== "limit_exceeded") throw new Error("잘못된 다이어그램 응답입니다.");
-  return { bytes: fromBase64(string(value.png_base64)), drawioStatus };
+  return { bytes: fromBase64(string(value.png_base64)) };
 }
 
-export async function openWorkspaceDiagram(document_id: string, edit_session_id: string, node: NodeState): Promise<void> {
-  const renderer_session_id = await getRendererSession();
-  await invoke("drawio_open", { request: { renderer_session_id, document_id, edit_session_id, node } });
-}
 
 export async function openWorkspaceExternal(document_id: string, edit_session_id: string, url: string): Promise<void> {
   const renderer_session_id = await getRendererSession();

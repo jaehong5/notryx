@@ -7,7 +7,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { EditorController, initialEditorState } from "./editor-controller";
-import { openDocument, saveDocument, closeDocument, pairWorkspace, workspaceInventory, workspaceCreateParents, workspaceFrozenCreates, resolveWorkspaceFrozenCreate, workspaceFrozenDeletes, resolveWorkspaceFrozenDelete, workspaceFrozenMoves, resolveWorkspaceFrozenMove, workspaceSyncState, openWorkspaceDocument, prepareWorkspaceRemoteRefresh, commitWorkspaceRemoteRefresh, inspectWorkspaceRemoteChange, saveWorkspaceDocument, closeWorkspaceDocument, localDrafts, openLocalDraft, adoptPendingPair, discardPendingPair, pendingPairStatus, queueWorkspaceDocument, sendNextWorkspaceOperation, previewWorkspaceImage, openWorkspaceDiagram, workspaceDocumentOutbox, openWorkspaceExternal, recoverWorkspaceSource, workspaceTrash, queueWorkspaceRestore, workspaceRestoreStatus, requestWorkspaceRestoreAbandon, queueWorkspaceCreate, workspaceCreateStatus, requestWorkspaceCreateAbandon, queueWorkspaceDelete, workspaceDeleteStatus, requestWorkspaceDeleteAbandon, queueWorkspaceMove, workspaceMoveStatus, requestWorkspaceMoveAbandon, workspaceSearch, cancelWorkspaceSearch } from "./ipc";
+import { openDocument, saveDocument, closeDocument, pairWorkspace, workspaceInventory, workspaceCreateParents, workspaceFrozenCreates, resolveWorkspaceFrozenCreate, workspaceFrozenDeletes, resolveWorkspaceFrozenDelete, workspaceFrozenMoves, resolveWorkspaceFrozenMove, workspaceSyncState, openWorkspaceDocument, prepareWorkspaceRemoteRefresh, commitWorkspaceRemoteRefresh, inspectWorkspaceRemoteChange, saveWorkspaceDocument, closeWorkspaceDocument, localDrafts, openLocalDraft, adoptPendingPair, discardPendingPair, pendingPairStatus, queueWorkspaceDocument, sendNextWorkspaceOperation, previewWorkspaceImage, workspaceDocumentOutbox, openWorkspaceExternal, recoverWorkspaceSource, workspaceTrash, queueWorkspaceRestore, workspaceRestoreStatus, requestWorkspaceRestoreAbandon, queueWorkspaceCreate, workspaceCreateStatus, requestWorkspaceCreateAbandon, queueWorkspaceDelete, workspaceDeleteStatus, requestWorkspaceDeleteAbandon, queueWorkspaceMove, workspaceMoveStatus, requestWorkspaceMoveAbandon, workspaceSearch, cancelWorkspaceSearch } from "./ipc";
 import { MarkdownPreview } from "./preview";
 import { ThemeControls, useTheme } from "./theme-controls";
 import { applyDocumentTheme, editorTheme } from "./theme";
@@ -52,7 +52,7 @@ const documents = [
 function connectionErrorMessage(cause: unknown): string {
   const error = String(cause);
   return error.includes("open_edit_sessions")
-    ? "열린 문서와 다이어그램 편집 창을 닫은 뒤 다시 연결해 주세요." : error;
+    ? "열린 문서를 닫은 뒤 다시 연결해 주세요." : error;
 }
 
 function App() {
@@ -995,7 +995,6 @@ function App() {
     const syncReady = listen("workspace-sync-status-changed", () => {
       if (modeRef.current === "workspace") void refreshWorkspaceSync().catch((cause) => setConnectionError(String(cause)));
     });
-    const diagramQueued = listen("drawio-save-queued", () => scheduler.kick());
     const credentialChanged = listen("workspace-credential-status-changed", () => { void refreshCredentialStatus(); }).catch(() => {
       if (credentialMounted.current) setCredentialMessage("인증정보 저장 상태 알림을 연결하지 못했습니다.");
       return () => {};
@@ -1050,7 +1049,7 @@ function App() {
       clearTimeout(previewTimer.current);
       void instance.dispose().then(() => scheduler.dispose()).catch(() => {});
       void stop.then((unlisten) => unlisten()).catch(() => {});
-      for (const listener of [syncReady, metadataChanged, credentialChanged, diagramQueued]) {
+      for (const listener of [syncReady, metadataChanged, credentialChanged]) {
         void listener.then((unlisten) => unlisten()).catch(() => {});
       }
     };
@@ -1066,21 +1065,6 @@ function App() {
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
   }, [mode, workspaceBinding]);
-
-  const openDiagram = useCallback((target: string): void => {
-    const found = [...sessionModes.current.entries()].find(([, session]) => session.uiId === state.selected && session.mode === "workspace");
-    const resolved = found && resolveWorkspaceReference(nodesRef.current, found[1].documentId, target);
-    if (!found || !resolved) { setConnectionError("다이어그램이 있는 문서를 다시 열어 주세요."); return; }
-    if (!window.confirm("다이어그램을 엽니다. 초안은 이 기기에 자동 저장하고, 서버 원본은 서버에 저장을 눌러 반영합니다.")) return;
-    void openWorkspaceDiagram(found[1].documentId, found[0], resolved.node).catch((error: unknown) => {
-      const reason = error instanceof Error ? error.message : String(error);
-      if (reason === "preview_busy") setConnectionError("이미지를 불러오는 중입니다. 잠시 후 다이어그램을 다시 열어 주세요.");
-      else if (reason === "drawio_busy") setConnectionError("이미 열린 다이어그램 편집 창을 닫고 다시 시도해 주세요.");
-      else if (["drawio_unsupported_format", "drawio_invalid_input", "invalid_preview_image"].includes(reason)) {
-        setConnectionError("지원하는 PNG 또는 draw.io XML인지 확인해 주세요.");
-      } else setConnectionError("다이어그램을 열지 못했습니다. 서버 연결을 확인하거나 문서를 다시 열어 주세요.");
-    });
-  }, [state.selected]);
 
   const loadPreviewImage = useCallback((target: string, signal: AbortSignal): Promise<PreviewImageData> => {
     if (mode !== "workspace") return Promise.reject(new Error("작업 공간에 연결되어 있지 않습니다."));
@@ -1274,7 +1258,7 @@ function App() {
           <div id="editor" ref={parent} />
           {preview && <section className="preview-pane" aria-label="Markdown 미리보기">{new TextEncoder().encode(previewSource).length > 1024 * 1024
             ? <p>큰 문서는 미리보기를 표시하지 않습니다.</p>
-            : <MarkdownPreview onOpenDiagram={mode === "workspace" && !/Android/iu.test(navigator.userAgent) ? openDiagram : undefined} source={previewSource} themeBase={themes.theme.base} fragment={previewAnchor?.documentId === state.selected ? previewAnchor : null} loadImage={mode === "workspace" ? loadPreviewImage : undefined} onOpenLink={mode === "workspace" ? (link) => {
+            : <MarkdownPreview source={previewSource} themeBase={themes.theme.base} fragment={previewAnchor?.documentId === state.selected ? previewAnchor : null} loadImage={mode === "workspace" ? loadPreviewImage : undefined} onOpenLink={mode === "workspace" ? (link) => {
               if (link.kind === "external") {
                 const found = [...sessionModes.current.entries()].find(([, session]) => session.uiId === state.selected && session.mode === "workspace");
                 if (!found) setConnectionError("문서를 다시 열어 주세요.");
@@ -1284,7 +1268,6 @@ function App() {
               if (link.kind !== "document") return;
               const resolved = resolveWorkspaceReference(nodesRef.current, state.selected, link.target);
               if (!resolved) setConnectionError("연결된 문서를 찾지 못했습니다. 목록을 새로고침하거나 다른 구간을 확인해 주세요.");
-              else if (resolved.node.name.toLowerCase().endsWith(".drawio") && !/Android/iu.test(navigator.userAgent)) openDiagram(link.target);
               else void controller.current?.open(resolved.node.node_id).then(() => {
                 if (resolved.fragment && selectedRef.current === resolved.node.node_id) {
                   setPreviewAnchor({ documentId: resolved.node.node_id, fragment: resolved.fragment });

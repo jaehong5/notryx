@@ -45,7 +45,7 @@ async fn v19_variants_upgrade_preserving_existing_copy_drafts_and_operations() {
             V16_SENT
         );
         store.close().await.unwrap();
-        assert_integrity(&path, 27).await;
+        assert_integrity(&path, 28).await;
         assert_eq!(snapshot(&path).await, before);
         assert_eq!(v16_intents(&path).await, intents);
         let mut db = connect(&path).await;
@@ -105,7 +105,7 @@ async fn v20_migration_rejects_malformed_attempts_and_rolls_back_all_changes() {
         .close()
         .await
         .unwrap();
-    assert_integrity(&path, 27).await;
+    assert_integrity(&path, 28).await;
     assert_eq!(snapshot(&path).await, before);
     assert_eq!(v16_intents(&path).await, intents);
 }
@@ -156,7 +156,7 @@ async fn v20_to_v21_preserves_drafts_operations_receipts_and_existing_copy() {
         V16_SENT
     );
     store.close().await.unwrap();
-    assert_integrity(&path, 27).await;
+    assert_integrity(&path, 28).await;
     assert_eq!(snapshot(&path).await, before);
     assert_eq!(v16_intents(&path).await, intents);
     assert_eq!(completed_markers(&path).await, markers);
@@ -257,7 +257,7 @@ async fn failed_v20_to_v21_rolls_back_and_keeps_recovery_data() {
         .close()
         .await
         .unwrap();
-    assert_integrity(&path, 27).await;
+    assert_integrity(&path, 28).await;
     assert_eq!(snapshot(&path).await, before);
     assert_eq!(v16_intents(&path).await, intents);
 }

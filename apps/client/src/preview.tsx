@@ -84,7 +84,6 @@ export type MarkdownPreviewProps = {
   source: string;
   themeBase?: "light" | "dark";
   onOpenLink?: (link: PreviewLink) => void;
-  onOpenDiagram?: (target: string) => void;
   loadImage?: (target: string, signal: AbortSignal) => Promise<PreviewImageData>;
   fragment?: { fragment: string } | null;
 };
@@ -93,45 +92,27 @@ const PreviewContext = createContext<{
   article: RefObject<HTMLElement | null>;
   themeBase: "light" | "dark";
   onOpenLink?: MarkdownPreviewProps["onOpenLink"];
-  onOpenDiagram?: MarkdownPreviewProps["onOpenDiagram"];
   loadImage?: MarkdownPreviewProps["loadImage"];
 } | null>(null);
 
-function diagramNotice(target: string, status: PreviewImageData["drawioStatus"]): string | null {
-  switch (status) {
-    case "embedded_xml": return "편집 데이터 포함. 현재 미리보기만 지원합니다.";
-    case "invalid_xml": return "편집 데이터가 손상되었습니다. 이미지만 표시합니다.";
-    case "unsupported_xml": return "지원하지 않는 편집 데이터입니다. 이미지만 표시합니다.";
-    case "limit_exceeded": return "편집 데이터가 검사 한도를 초과했습니다. 이미지만 표시합니다.";
-    case "none": return /\.drawio\.png$/iu.test(decodeURIComponent(target).split(/[?#]/u, 1)[0])
-      ? "편집 데이터가 없습니다. 일반 PNG로 표시합니다." : null;
-  }
-}
-
 function PreviewImage({ target, alt, load }: { target: string; alt: string; load: NonNullable<MarkdownPreviewProps["loadImage"]> }) {
-  const openDiagram = useContext(PreviewContext)?.onOpenDiagram;
-  const [image, setImage] = useState<{ url: string; notice: string | null; editable: boolean }>();
+  const [url, setUrl] = useState<string>();
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     let active = true;
     let created: string | undefined;
     const controller = new AbortController();
-    setImage(undefined);
+    setUrl(undefined);
     setFailed(false);
-    void load(target, controller.signal).then(({ bytes, drawioStatus }) => {
+    void load(target, controller.signal).then(({ bytes }) => {
       if (!active) return;
       created = URL.createObjectURL(new Blob([Uint8Array.from(bytes).buffer], { type: "image/png" }));
-      setImage({ url: created, notice: diagramNotice(target, drawioStatus), editable: drawioStatus === "embedded_xml" });
+      setUrl(created);
     }).catch(() => { if (active) setFailed(true); });
     return () => { active = false; controller.abort(); if (created) URL.revokeObjectURL(created); };
   }, [target, load]);
-  return image ? <span className="preview-image"><img src={image.url} alt={alt} />
-    {image.notice && <small className="diagram-notice">{image.editable && openDiagram ? "편집 데이터 포함" : image.notice}</small>}
-    {image.editable && openDiagram && <button type="button" className="diagram-trial" onClick={() => openDiagram(target)}>편집 (기기 초안)</button>}
-  </span> : <span>{alt || "이미지"}{failed ? " (이미지를 불러올 수 없습니다)" : ""}
-    {failed && openDiagram && /\.drawio\.png$/iu.test(decodeURIComponent(target).split(/[?#]/u, 1)[0])
-      && <button type="button" className="diagram-trial" onClick={() => openDiagram(target)}>기기 초안 열기</button>}
-  </span>;
+  return url ? <span className="preview-image"><img src={url} alt={alt} /></span>
+    : <span>{alt || "이미지"}{failed ? " (이미지를 불러올 수 없습니다)" : ""}</span>;
 }
 
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
@@ -162,11 +143,11 @@ function MarkdownCodeBlock({ node, children }: { node?: PreviewNode; children?: 
     : <pre>{children}</pre>;
 }
 
-export function MarkdownPreview({ source, themeBase = "light", onOpenLink, onOpenDiagram, loadImage, fragment }: MarkdownPreviewProps) {
+export function MarkdownPreview({ source, themeBase = "light", onOpenLink, loadImage, fragment }: MarkdownPreviewProps) {
   const article = useRef<HTMLElement>(null);
   useEffect(() => { if (fragment) scrollToHeading(article.current, fragment.fragment); }, [fragment]);
   return <article ref={article} className="markdown-preview">
-    <PreviewContext.Provider value={{ article, themeBase, onOpenLink, onOpenDiagram, loadImage }}>
+    <PreviewContext.Provider value={{ article, themeBase, onOpenLink, loadImage }}>
     <Markdown
       remarkPlugins={[remarkGfm]}
       rehypePlugins={[headingAnchors]}

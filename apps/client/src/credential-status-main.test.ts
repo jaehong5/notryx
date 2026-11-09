@@ -90,7 +90,7 @@ test("열린 편집 창 때문에 재등록이 거절되면 닫은 뒤 다시 �
     .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
   await vi.waitFor(() => expect(fakes.pair).toHaveBeenCalledOnce());
   await vi.waitFor(() => expect(document.body.textContent)
-    .toContain("열린 문서와 다이어그램 편집 창을 닫은 뒤 다시 연결해 주세요."));
+    .toContain("열린 문서를 닫은 뒤 다시 연결해 주세요."));
   expect(document.body.textContent).not.toContain("open_edit_sessions");
 });
 

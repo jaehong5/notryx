@@ -49,6 +49,19 @@ test("keeps source and explains rejected configuration", async () => {
   await act(async () => root.unmount());
 });
 
+test("shows escaped source when the native platform cannot render Mermaid", async () => {
+  vi.stubGlobal("IntersectionObserver", undefined);
+  vi.mocked(mermaidQueue.render).mockRejectedValue("mermaid_unavailable");
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const source = 'graph LR\nA["<img src=https://example.invalid/track onerror=alert(1)>"]-->B\n';
+  await act(async () => root.render(createElement(MarkdownPreview, { source: `\`\`\`mermaid\n${source}\`\`\`` })));
+  expect(container.textContent).toContain("이 환경에서는 다이어그램을 원문으로 표시합니다.");
+  expect(container.querySelector("code")?.textContent).toBe(source);
+  expect(container.querySelector("img, svg, iframe, script, a")).toBeNull();
+  await act(async () => root.unmount());
+});
+
 test("ignores a previous document's delayed diagram result", async () => {
   vi.stubGlobal("IntersectionObserver", undefined);
   let resolve!: (svg: string) => void;

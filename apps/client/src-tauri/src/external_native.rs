@@ -1,7 +1,7 @@
 use crate::{Runtime, RuntimeState, check_caller};
-use notryx_client_runtime::{
-    ExternalUrl, ExternalUrlError, open_external_url, validate_external_url,
-};
+use notryx_client_runtime::{ExternalUrl, validate_external_url};
+#[cfg(not(target_os = "android"))]
+use notryx_client_runtime::{ExternalUrlError, open_external_url};
 use notryx_protocol::WorkspaceExternalLinkRequest;
 use tauri::Webview;
 
@@ -23,6 +23,7 @@ fn validate_request(
     validate_external_url(&request.url).map_err(|_| "invalid_external_url".into())
 }
 
+#[cfg(not(target_os = "android"))]
 fn open_checked(
     state: &tokio::sync::Mutex<RuntimeState>,
     request: &WorkspaceExternalLinkRequest,
@@ -42,13 +43,86 @@ pub async fn workspace_open_external(
     request: WorkspaceExternalLinkRequest,
 ) -> Result<(), String> {
     check_caller(&webview)?;
-    let state = runtime.0.clone();
-    tokio::task::spawn_blocking(move || open_checked(&state, &request, open_external_url))
-        .await
-        .map_err(|_| "external_open_failed".to_owned())?
+    #[cfg(target_os = "android")]
+    {
+        let url = validate_request(&*runtime.0.lock().await, &request)?;
+        open_android(&webview, url).await
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let state = runtime.0.clone();
+        tokio::task::spawn_blocking(move || open_checked(&state, &request, open_external_url))
+            .await
+            .map_err(|_| "external_open_failed".to_owned())?
+    }
 }
 
-#[cfg(test)]
+#[cfg(target_os = "android")]
+async fn open_android(webview: &Webview, url: ExternalUrl) -> Result<(), String> {
+    let (complete, completed) = tokio::sync::oneshot::channel();
+    webview
+        .with_webview(move |native| {
+            native.jni_handle().exec(move |env, activity, _| {
+                if complete.is_closed() {
+                    return;
+                }
+                let result = env
+                    .with_local_frame(16, |env| start_android_intent(env, activity, &url))
+                    .map_err(|_| {
+                        // No installed handler is a recoverable error, not a pending JNI exception.
+                        let _ = env.exception_clear();
+                        "external_open_failed"
+                    });
+                let _ = complete.send(result);
+            });
+        })
+        .map_err(|_| "external_open_failed")?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), completed)
+        .await
+        .map_err(|_| "external_open_failed")?
+        .map_err(|_| "external_open_failed")?
+        .map_err(str::to_owned)
+}
+
+#[cfg(target_os = "android")]
+fn start_android_intent(
+    env: &mut jni::JNIEnv<'_>,
+    activity: &jni::objects::JObject<'_>,
+    url: &ExternalUrl,
+) -> jni::errors::Result<()> {
+    use jni::objects::JValue;
+    let target = env.new_string(url.as_str())?;
+    let uri = env
+        .call_static_method(
+            "android/net/Uri",
+            "parse",
+            "(Ljava/lang/String;)Landroid/net/Uri;",
+            &[JValue::Object(&target)],
+        )?
+        .l()?;
+    let action = env.new_string("android.intent.action.VIEW")?;
+    let intent = env.new_object(
+        "android/content/Intent",
+        "(Ljava/lang/String;Landroid/net/Uri;)V",
+        &[JValue::Object(&action), JValue::Object(&uri)],
+    )?;
+    let category = env.new_string("android.intent.category.BROWSABLE")?;
+    env.call_method(
+        &intent,
+        "addCategory",
+        "(Ljava/lang/String;)Landroid/content/Intent;",
+        &[JValue::Object(&category)],
+    )?;
+    env.call_method(
+        activity,
+        "startActivity",
+        "(Landroid/content/Intent;)V",
+        &[JValue::Object(&intent)],
+    )?;
+    Ok(())
+}
+
+#[cfg(all(test, not(target_os = "android")))]
 mod tests {
     use super::*;
     use crate::{ProductSession, ProductSessionKind, RuntimeState};
@@ -114,7 +188,24 @@ mod tests {
             open_checked(&state, &request, |_| {
                 assert!(check.try_lock().is_ok());
                 Ok(())
-            })
+            })?;
+            assert_eq!(
+                open_checked(&state, &request, |_| Err(ExternalUrlError::LaunchFailed)),
+                Err("external_open_failed".into())
+            );
+            assert!(validate_request(&state.blocking_lock(), &request).is_ok());
+            request.url = "intent://example.invalid/#Intent;scheme=https;end".into();
+            assert_eq!(
+                open_checked(&state, &request, |_| panic!("unsafe URL reached opener")),
+                Err("invalid_external_url".into())
+            );
+            request.url = "https://example.invalid/".into();
+            state.blocking_lock().product_sessions.clear();
+            assert_eq!(
+                open_checked(&state, &request, |_| panic!("closed editor reached opener")),
+                Err("stale_session".into())
+            );
+            Ok::<(), String>(())
         })
         .await
         .unwrap()

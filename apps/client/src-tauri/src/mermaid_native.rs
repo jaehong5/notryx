@@ -158,6 +158,8 @@ pub(crate) async fn mermaid_render(
     validate_input(&source, &theme)?;
     #[cfg(target_os = "android")]
     {
+        // Android IPC identifies the WebView, not the invoking frame. Keep untrusted
+        // Mermaid out of the main WebView until a separate renderer surface is supported.
         let _ = app;
         Err("mermaid_unavailable".into())
     }

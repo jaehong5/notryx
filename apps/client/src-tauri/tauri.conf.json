@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Notryx M0",
+  "productName": "Notryx",
   "version": "0.1.0",
   "identifier": "org.notryx.m0",
   "build": {
@@ -17,5 +17,5 @@
       "capabilities": ["main", "mermaid"]
     }
   },
-  "bundle": { "active": false, "licenseFile": "../../../LICENSE" }
+  "bundle": { "active": false, "licenseFile": "../../../LICENSE", "icon": ["icons/icon.png"] }
 }

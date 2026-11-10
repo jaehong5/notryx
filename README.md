@@ -14,7 +14,8 @@ Linux 서버는 기기 등록, 파일과 폴더 생성, 목록과 원문 조회,
 
 기본 사용에 Cloudflare 등 외부 업체의 계정이나 인증 서비스를 요구하지 않는다. Notryx 자체 기기 인증과 운영자가 선택한 HTTPS 접속 경로를 사용한다.
 
-- 설치와 클라이언트 실행: [개발 안내](docs/development.md)
+- Linux 설치 패키지와 업데이트: [Linux 클라이언트 안내](docs/linux-client.md)
+- 소스 빌드와 클라이언트 개발 실행: [개발 안내](docs/development.md)
 - 개발 서버 실행과 기기 등록: [서버 안내](docs/development.md#개발-서버-실행과-조회)
 - 서버 Docker 빌드와 격리 실행: [Docker 안내](docs/deployment.md)
 - 서버와 기기 자료 보존: [백업 준비와 복원 확인](docs/development.md#백업-보관과-기기-자료-준비)
@@ -52,7 +53,7 @@ npm run tauri -- build --debug --no-bundle
 npm run tauri -- android build --debug --target aarch64 --apk --ci
 ```
 
-Linux CI는 전체 검사와 실제 Tauri 앱의 두 클라이언트 사용 흐름을 실행한다. Docker CI는 서버 이미지 빌드와 격리 실행을 검사하며 이미지를 게시하거나 서버에 배포하지 않는다.
+Linux CI는 전체 검사와 실제 Tauri 앱의 두 클라이언트 사용 흐름을 실행한다. `.deb`의 실행 파일, 앱 메뉴, 고지도 검사하고 추출한 앱으로 문서 편집 및 복구를 시험한다. Docker CI는 서버 이미지 빌드와 격리 실행을 검사하며 이미지를 게시하거나 서버에 배포하지 않는다.
 
 남은 검증과 제한은 다음과 같다.
 

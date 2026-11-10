@@ -1,0 +1,23 @@
+{
+  "build": {
+    "beforeBundleCommand": "python3 ../../scripts/prepare-rust-notices.py"
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb"],
+    "category": "Productivity",
+    "shortDescription": "Self-hosted Markdown workspace",
+    "linux": {
+      "deb": {
+        "depends": ["libc6 (>= 2.39)", "ca-certificates", "xdg-utils"],
+        "section": "editors",
+        "files": {
+          "/usr/share/doc/notryx/copyright": "../../../LICENSE",
+          "/usr/share/doc/notryx/third-party-licenses.md": "../dist/third-party-licenses.md",
+          "/usr/share/doc/notryx/third-party-sources.md": "../dist/third-party-sources.md",
+          "/usr/share/doc/notryx/rust-notices.md": "../../../.artifacts/linux-package/rust-notices.md"
+        }
+      }
+    }
+  }
+}

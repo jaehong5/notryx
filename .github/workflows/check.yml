@@ -20,12 +20,17 @@ jobs:
       - run: sudo bash scripts/install-linux-deps.sh
       - run: npm ci
       - run: bash scripts/check.sh
-      - run: npm run tauri -- build --debug --no-bundle
+      - run: npm run tauri -- build --debug --bundles deb -- --locked
+      - name: Verify Linux package contents
+        shell: bash
+        run: |
+          python3 scripts/check-linux-deb.py target/debug/bundle/deb/*.deb
+          dpkg-deb -x target/debug/bundle/deb/*.deb .artifacts/linux-package/extracted
       - run: xvfb-run -a python3 scripts/m0-webdriver.py --output ci-artifacts/webdriver
       - run: xvfb-run -a python3 scripts/m4-mermaid-webdriver.py --output ci-artifacts/mermaid
       - run: xvfb-run -a python3 scripts/m4-theme-webdriver.py --output ci-artifacts/theme
       - run: cargo build --locked -p notryx-server
-      - run: xvfb-run -a python3 scripts/m2-workspace-webdriver.py
+      - run: xvfb-run -a python3 scripts/m2-workspace-webdriver.py --binary .artifacts/linux-package/extracted/usr/bin/notryx-client
       - run: xvfb-run -a python3 scripts/m2-migration-recovery-webdriver.py
       - name: Verify M3 two-client lifecycle
         timeout-minutes: 8

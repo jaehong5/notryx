@@ -54,6 +54,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--driver", default="WebKitWebDriver")
     parser.add_argument("--binary", default="target/debug/notryx-client")
+    parser.add_argument("--upgrade-binary", help="Run this package binary after closing the original app")
     parser.add_argument("--server", default="target/debug/notryx-server")
     args = parser.parse_args()
     require(os.environ.get("NOTRYX_TEST_SANDBOX") == "credential-integration", "sandbox marker missing")
@@ -70,11 +71,12 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="notryx-m3-credential-webdriver-") as temporary:
         root = Path(temporary)
-        notes, state, run, client_data, xdg_data, xdg_cache, xdg_config = (
-            root / name for name in ("notes", "state", "run", "client", "xdg-data", "xdg-cache", "xdg-config")
+        notes, state, run, xdg_data, xdg_cache, xdg_config = (
+            root / name for name in ("notes", "state", "run", "xdg-data", "xdg-cache", "xdg-config")
         )
-        for directory in (notes, state, run, client_data, xdg_data, xdg_cache, xdg_config):
+        for directory in (notes, state, run, xdg_data, xdg_cache, xdg_config):
             directory.mkdir(mode=0o700)
+        client_data = xdg_data / "org.notryx.m0"
         port = helpers.free_port()
         config = root / "server.toml"
         config.write_text(
@@ -104,7 +106,9 @@ def main():
                 connection.request(method, path, body, headers or {})
                 response = connection.getresponse()
                 data = response.read(1024 * 1024 + 1)
-                require(response.status == expected and len(data) <= 1024 * 1024, "unexpected synthetic server response")
+                require(response.status == expected,
+                        f"synthetic {method} {path} returned {response.status}, expected {expected}")
+                require(len(data) <= 1024 * 1024, "synthetic server response exceeded its limit")
                 return json.loads(data) if data else None
             except (OSError, http.client.HTTPException, ValueError):
                 raise TestFailure("synthetic server request failed") from None
@@ -191,8 +195,9 @@ def main():
             origin = f"http://127.0.0.1:{driver_port}"
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             environment = os.environ.copy()
+            environment.pop("NOTRYX_M0_DATA_DIR", None)
             environment.update(
-                TAURI_WEBVIEW_AUTOMATION="true", NOTRYX_M0_DATA_DIR=str(client_data),
+                TAURI_WEBVIEW_AUTOMATION="true",
                 XDG_DATA_HOME=str(xdg_data), XDG_CACHE_HOME=str(xdg_cache), XDG_CONFIG_HOME=str(xdg_config),
             )
             driver = subprocess.Popen(
@@ -232,6 +237,7 @@ def main():
                 return wd("POST", f"/session/{session_id}/execute/{mode}", {"script": script, "args": list(values)})
 
             mark_stage("pair")
+            wait(lambda: js("return !!document.querySelector('.cm-content[contenteditable=true]')"), "initial editor")
             wait(lambda: js("const button=document.querySelector('.workspace-connect button'); return !!button && !button.disabled"), "pairing form")
             js("""
                 const form=document.querySelector('.workspace-connect');
@@ -258,7 +264,21 @@ def main():
                       .then(value=>done(value.status==='secure')).catch(()=>done(false));
                 """, asynchronous=True)
 
-            wait(sync_ready, "initial synchronization")
+            try:
+                wait(sync_ready, "initial synchronization")
+            except TestFailure:
+                status = js("""
+                    const done=arguments[arguments.length-1];
+                    window.__TAURI_INTERNALS__.invoke('m0_renderer_session')
+                      .then(owner=>window.__TAURI_INTERNALS__.invoke('workspace_sync_status', {request:{renderer_session_id:owner}}))
+                      .then(value=>done(['connecting','ready','offline','auth_required','needs_review'].includes(value.status) ? value.status : 'unknown'))
+                      .catch(error=>{
+                        const codes=['stale_renderer_session','stale_registration','not_connected','pairing_in_progress'];
+                        done(codes.find(code=>String(error).includes(code)) ?? 'request_failed');
+                      });
+                """, asynchronous=True)
+                print(f"Initial sync status: {status}", flush=True)
+                raise
             wait(secure_status, "secure credential storage")
             for node_id, _, contents in fixtures[:2]:
                 wait(lambda: js("return !!document.querySelector('[data-document=\"'+arguments[0]+'\"]:not(:disabled)')", node_id), "synthetic document in workspace")
@@ -305,6 +325,9 @@ def main():
             require(closed_drafts == before_drafts, "closing changed the saved draft")
             require([(row[0], row[1], row[3]) for row in closed_outbox] == [(row[0], row[1], row[3]) for row in before_outbox], "closing changed pending operation identity or payload")
             require(closed_registration == before_registration, "closing changed registration")
+            if args.upgrade_binary:
+                client_binary = str(Path(args.upgrade_binary).resolve())
+                capabilities["capabilities"]["alwaysMatch"]["webkitgtk:browserOptions"]["binary"] = client_binary
             session_id = wd("POST", "/session", capabilities)["sessionId"]
             wd("POST", f"/session/{session_id}/timeouts", {"script": 30000})
             restarted_processes = wait(app_processes, "restarted application process")
@@ -355,7 +378,8 @@ def main():
                 helpers.stop(server)
 
     mark_stage("complete")
-    print("M3 credential restart WebView passed: secure restore and existing outbox delivery.", flush=True)
+    scenario = "package upgrade" if args.upgrade_binary else "restart"
+    print(f"M3 credential {scenario} WebView passed: default data path, secure restore and existing outbox delivery.", flush=True)
 
 
 if __name__ == "__main__":

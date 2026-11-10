@@ -28,3 +28,5 @@ python3 scripts/dependency-inventory.py > .artifacts/dependencies.json
 MIT, Apache-2.0, BSD, ISC, Unicode-3.0 등과 MPL-2.0 항목이 포함되어 있다. Metadata 조회는 배포 고지와 소스 제공 의무 검토를 대신하지 않는다. 시스템 WebKitGTK와 GTK, Android 템플릿 및 번들 자산도 공개 배포 시 별도로 확인한다. 추가 폰트나 외부 이미지는 내려받지 않았으며 데스크톱 아이콘 원본은 저장소의 SVG다.
 
 Notryx 자체 코드와 문서는 [MIT 라이선스](../LICENSE)를 적용한다. 외부 라이브러리, 폰트, 아이콘과 번들 자산은 각각의 원래 라이선스를 유지하며 MIT로 재라이선스하지 않는다. draw.io 편집기 번들은 현재 배포에서 제외하며, 장기 후속 선택 플러그인으로 도입할 때 라이선스와 자산별 조건을 다시 검토한다. 전체 배포물의 고지와 소스 제공 의무 검토는 아직 미완료다.
+
+Linux `.deb`는 `/usr/share/doc/notryx/`에 MIT 원문, Vite가 생성한 프런트엔드 고지 및 소스 안내, Rust 의존성 고지를 포함한다. `scripts/prepare-rust-notices.py`가 잠긴 Linux 클라이언트의 일반 및 빌드 의존성을 수집한다. crate에 빠진 원문만 [고정된 보충 파일](../third-party/rust/README.md)에서 읽고 버전, commit과 해시를 확인한다. 생성 결과는 빌드 도구도 포함하며 최종 배포 감사를 대신하지 않는다. [패키지 검사](linux-client.md#패키지-검증)는 설치된 고지와 생성 원문의 일치도 확인한다.

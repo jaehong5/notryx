@@ -1,0 +1,29 @@
+pkgname=notryx-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Self-hosted Markdown workspace'
+arch=('x86_64')
+url='https://github.com/jaehong5/notryx'
+license=('MIT')
+depends=(
+  'glibc>=2.39' 'libgcc' 'glib2' 'cairo' 'gdk-pixbuf2' 'dbus'
+  'gtk3' 'libsoup3' 'webkit2gtk-4.1' 'ca-certificates'
+  'xdg-utils' 'desktop-file-utils' 'hicolor-icon-theme'
+)
+provides=("notryx=$pkgver")
+conflicts=('notryx')
+# Keep the previously validated executable unchanged when repackaging it.
+options=('!strip' '!debug')
+_deb="Notryx_${pkgver}_amd64.deb"
+source=("$_deb")
+noextract=("$_deb")
+sha256sums=('392d15dfdcb807acaa3567c244d6a728636e1e56fa80623705830053e54a1c46')
+
+package() {
+  local _data_archive
+  _data_archive=$(bsdtar -tf "$srcdir/$_deb" | sed -n '/^data\.tar\./p')
+  [[ -n "$_data_archive" && "$_data_archive" != *$'\n'* ]] || return 1
+  bsdtar -xOf "$srcdir/$_deb" "$_data_archive" | bsdtar -xf - -C "$pkgdir" usr
+  install -Dm644 "$pkgdir/usr/share/doc/notryx/copyright" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

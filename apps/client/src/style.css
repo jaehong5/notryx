@@ -61,13 +61,29 @@ nav small { display: block; color: var(--text-secondary); line-height: 1.6; padd
 .theme-settings p { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .theme-settings [role="alert"] { padding: 8px; background: #ffffff; color: #892d24; border-color: #892d24; }
 iframe { height: 130px; border: 0; border-top: 1px solid var(--border-default); }
+.mobile-navigation { display: none; }
 @media (max-width: 650px) {
-  header { height: 52px; padding: 0 16px; }
-  .layout { display: flex; flex-direction: column; height: calc(100dvh - 52px); }
-  nav { display: flex; overflow-x: auto; gap: 6px; padding: 8px; flex-shrink: 0; border-right: 0; border-bottom: 1px solid var(--border-default); }
-  .workspace-connect { min-width: 210px; padding: 0; }
-  nav p, nav small { display: none; }
-  nav button { white-space: nowrap; width: auto; }
-  .document { flex: 1; }
+  main { height: 100dvh; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); display: flex; flex-direction: column; }
+  header { height: 52px; padding: 0 12px; flex-shrink: 0; }
+  header .caption, header .badge { display: none; }
+  .layout { display: flex; flex-direction: column; height: auto; flex: 1; min-height: 0; }
+  nav { display: block; padding: 12px; border-right: 0; }
+  .workspace-connect { min-width: 0; }
+  nav button { white-space: normal; overflow-wrap: anywhere; }
+  button { min-height: 44px; }
+  main[data-mobile-screen="list"] .document { display: none; }
+  main:not([data-mobile-screen="list"]) nav { display: none; }
+  main[data-mobile-screen="edit"] > header { display: none; }
+  .document { flex: 1; min-width: 0; }
+  .mobile-navigation { display: flex; align-items: center; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border-default); }
+  .mobile-navigation span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .toolbar { padding: 8px; flex-wrap: wrap; gap: 8px; }
+  .toolbar-actions { flex-wrap: wrap; }
+  #preview-toggle { display: none; }
+  .document-content { min-width: 0; }
+  main[data-mobile-screen="read"][data-mobile-preview="true"] #editor { display: none; }
+  main[data-mobile-screen="edit"] .preview-pane { display: none; }
+  .preview-pane { padding: 8px 12px; border-left: 0; }
+  main[data-mobile-screen="edit"] .toolbar { order: 2; border-top: 1px solid var(--border-default); border-bottom: 0; }
   .cm-line { padding: 0 12px; }
 }

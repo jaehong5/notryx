@@ -127,6 +127,8 @@ python3 scripts/m0-fsync.py
 npm run tauri -- android build --debug --target aarch64 --apk --ci
 ```
 
+Android의 현재 구현 범위, ARM64 APK 경로와 남은 실기기 검증은 [Android 개발 시험판](android-client.md)을 따른다. Linux 배포 파일의 SBOM 생성과 서명 검증 절차는 [배포 안내](releases.md)를 따른다.
+
 WebKitWebDriver를 별도 위치에 추출했다면 `--driver /path/to/WebKitWebDriver`를 추가한다. 마이그레이션 복구 시험은 격리된 Xvfb에서 GTK 파일 대화상자와 합성 SQLite를 사용한다. 일반 편집기의 복사 및 파일 내보내기 대화상자를 검사하려면 `dbus-run-session -- xvfb-run -a python3 scripts/m2-workspace-webdriver.py --recovery-dialogs`를 실행한다. 이 추가 시험에는 Python GI와 GTK3 typelib, libX11, libXtst가 필요하다. UI와 저장 성능 측정 중에는 다른 빌드를 실행하지 않는다. 현재 `.cargo/config.toml`은 작업 수를 2로 제한하며 Android도 Gradle worker 2개와 최대 JVM heap 2 GiB를 사용한다. Android Studio와 에뮬레이터는 사용하지 않는다.
 
 전체 검사는 TS build/lint/unit, Rust format/clippy/unit/integration, 생성 계약 drift, 순수 계층 의존성과 npm 보안 정보를 확인한다. 저장 시험은 독립 임시 DB를 만들고 실제 프로세스 강제 종료도 수행한다. TLS 시험은 OpenSSL CLI로 임시 자체 서명 인증서와 loopback 서버를 만든다. WebDriver 역시 임시 client store를 사용하며 결과와 화면을 `.artifacts/m0-webview`에 남긴다. 성능은 검사 프로세스 종료 코드와 구분해 측정 전에 정한 기준에 따라 판정한다.

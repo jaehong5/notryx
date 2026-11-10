@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { Compartment, EditorState } from "@codemirror/state";
+import { Compartment, EditorState, Prec } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, drawSelection } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
@@ -10,6 +10,7 @@ import { EditorController, initialEditorState } from "./editor-controller";
 import { openDocument, saveDocument, closeDocument, pairWorkspace, workspaceInventory, workspaceCreateParents, workspaceFrozenCreates, resolveWorkspaceFrozenCreate, workspaceFrozenDeletes, resolveWorkspaceFrozenDelete, workspaceFrozenMoves, resolveWorkspaceFrozenMove, workspaceSyncState, openWorkspaceDocument, prepareWorkspaceRemoteRefresh, commitWorkspaceRemoteRefresh, inspectWorkspaceRemoteChange, saveWorkspaceDocument, closeWorkspaceDocument, localDrafts, openLocalDraft, adoptPendingPair, discardPendingPair, pendingPairStatus, queueWorkspaceDocument, sendNextWorkspaceOperation, previewWorkspaceImage, workspaceDocumentOutbox, openWorkspaceExternal, recoverWorkspaceSource, workspaceTrash, queueWorkspaceRestore, workspaceRestoreStatus, requestWorkspaceRestoreAbandon, queueWorkspaceCreate, workspaceCreateStatus, requestWorkspaceCreateAbandon, queueWorkspaceDelete, workspaceDeleteStatus, requestWorkspaceDeleteAbandon, queueWorkspaceMove, workspaceMoveStatus, requestWorkspaceMoveAbandon, workspaceSearch, cancelWorkspaceSearch } from "./ipc";
 import { MarkdownPreview } from "./preview";
 import { ThemeControls, useTheme } from "./theme-controls";
+import { useCompactLayout, type MobileScreen } from "./compact-layout";
 import { applyDocumentTheme, editorTheme } from "./theme";
 import { PreviewImageQueue } from "./preview-image-queue";
 import type { PreviewImageData } from "./ipc";
@@ -56,10 +57,26 @@ function connectionErrorMessage(cause: unknown): string {
 }
 
 function App() {
+  const compact = useCompactLayout();
+  const [mobileScreen, setMobileScreen] = useState<MobileScreen>("list");
+  const [navigationError, setNavigationError] = useState("");
+  const [navigationBusy, setNavigationBusy] = useState(false);
+  const [documentReadonly, setDocumentReadonly] = useState(false);
+  const mobileLayout = useRef({ compact, screen: mobileScreen });
+  mobileLayout.current = { compact, screen: mobileScreen };
   const themes = useTheme();
   const currentTheme = useRef(themes.theme);
   currentTheme.current = themes.theme;
-  const themedEditor = useRef<{ view: EditorView; compartment: Compartment } | null>(null);
+  const themedEditor = useRef<{ view: EditorView; compartment: Compartment; reading: Compartment; isComposing(): boolean } | null>(null);
+  function compactEditorExtensions() {
+    if (!mobileLayout.current.compact) return [];
+    return [EditorView.lineWrapping, ...(mobileLayout.current.screen !== "edit"
+      ? [Prec.highest([EditorState.readOnly.of(true), EditorView.editable.of(false)])] : [])];
+  }
+  useLayoutEffect(() => {
+    const editor = themedEditor.current;
+    if (editor) editor.view.dispatch({ effects: editor.reading.reconfigure(compactEditorExtensions()) });
+  }, [compact, mobileScreen]);
   useLayoutEffect(() => {
     applyDocumentTheme(themes.theme);
     const editor = themedEditor.current;
@@ -519,6 +536,36 @@ function App() {
     setDrafts(result);
   }
 
+  function showMobileScreen(screen: MobileScreen) {
+    setMobileScreen(screen);
+    clearTimeout(previewTimer.current);
+    previewEnabled.current = screen === "read" && new TextEncoder().encode(source.current).length <= 1024 * 1024;
+    setPreview(previewEnabled.current);
+    if (previewEnabled.current) setPreviewSource(source.current);
+  }
+
+  async function navigateMobile(screen: MobileScreen): Promise<void> {
+    if (navigationBusy) return;
+    if (themedEditor.current?.isComposing()) {
+      setNavigationError("한글 조합을 마친 뒤 화면을 전환해 주세요.");
+      return;
+    }
+    setNavigationBusy(true);
+    setNavigationError("");
+    try {
+      if (mobileLayout.current.screen === "edit") await controller.current?.flush();
+      showMobileScreen(screen);
+    } catch {
+      setNavigationError("이 기기에 저장하지 못했습니다. 편집 화면에서 다시 저장해 주세요.");
+    } finally { setNavigationBusy(false); }
+  }
+
+  async function openListedDocument(id: string): Promise<void> {
+    setNavigationError("");
+    await controller.current?.open(id);
+    if (mobileLayout.current.compact && selectedRef.current === id) showMobileScreen("read");
+  }
+
   async function openSearchResult(result: SearchResult): Promise<void> {
     const active = workspaceBindingRef.current;
     if (!active || modeRef.current !== "workspace") throw new Error("작업 공간을 다시 확인해 주세요.");
@@ -530,13 +577,13 @@ function App() {
       if (!draft) throw new Error("초안이 변경됐습니다. 검색을 다시 시작하세요.");
       draftsRef.current = available;
       setDrafts(available);
-      await controller.current?.open(draftSelectionId(draft, "workspace"));
+      await openListedDocument(draftSelectionId(draft, "workspace"));
       return;
     }
     const node = (result as SearchResult & { node: NodeState | null }).node;
     if (!node || node.node_id !== result.node_id || node.deleted || node.kind !== "file") throw new Error("문서가 변경됐습니다. 검색을 다시 시작하세요.");
     searchNodesRef.current.set(node.node_id, node);
-    try { await controller.current?.open(node.node_id); }
+    try { await openListedDocument(node.node_id); }
     finally { if (searchNodesRef.current.get(node.node_id) === node) searchNodesRef.current.delete(node.node_id); }
   }
 
@@ -928,6 +975,8 @@ function App() {
       createEditor: ({ source, change, inputRejected, composition, save }) => {
         const editing = new Compartment();
         const appearance = new Compartment();
+        const reading = new Compartment();
+        setDocumentReadonly(source.readonly);
         let compositionTimer: ReturnType<typeof setTimeout> | undefined;
         let compositionPending = false;
         let replacing = false;
@@ -939,6 +988,7 @@ function App() {
               appearance.of(editorTheme(currentTheme.current)),
               keymap.of([{ key: "Mod-s", run: () => { save(); return true; } }, ...defaultKeymap, ...historyKeymap]),
               editing.of([EditorState.readOnly.of(current.readonly), EditorView.editable.of(!current.readonly)]),
+              reading.of(compactEditorExtensions()),
               ...(current.readonly ? [] : [documentSizeGuard(current.bom, inputRejected)]),
               EditorView.contentAttributes.of({ "aria-label": "Markdown 원문" }),
               EditorView.domEventHandlers({
@@ -955,7 +1005,7 @@ function App() {
         return {
           show: () => {
             if (!parent.current) throw new Error("편집기 화면이 닫혔습니다.");
-            themedEditor.current = { view, compartment: appearance };
+            themedEditor.current = { view, compartment: appearance, reading, isComposing: () => view.composing || compositionPending };
             view.dispatch({ effects: appearance.reconfigure(editorTheme(currentTheme.current)) });
             parent.current.replaceChildren(view.dom);
           },
@@ -963,6 +1013,7 @@ function App() {
           setEditable: (enabled) => view.dispatch({ effects: editing.reconfigure([EditorState.readOnly.of(!enabled), EditorView.editable.of(enabled)]) }),
           isComposing: () => view.composing || compositionPending,
           replaceSource: (current) => {
+            setDocumentReadonly(current.readonly);
             const selection = view.state.selection.main;
             const anchor = Math.min(selection.anchor, current.text.length);
             const head = Math.min(selection.head, current.text.length);
@@ -1098,15 +1149,16 @@ function App() {
   const nodeIndex = useMemo(() => new Map(nodes.map((node) => [node.node_id, node])), [nodes]);
   const workspaceButtons = useMemo(() => nodes.filter((node) => node.kind === "file" && !node.deleted).map((node) => {
     const path = workspacePath(node, nodeIndex);
-    return <div key={node.node_id} className="workspace-file-row"><button disabled={busy || workspaceConnecting} data-document={node.node_id} aria-current={state.selected === node.node_id ? "page" : undefined} onClick={() => void controller.current?.open(node.node_id)}>{path}</button><button disabled={busy || moveTarget !== null || moveRequestsOpen} data-move-node={node.node_id} aria-label={`${path} 이름 변경 또는 이동`} onClick={() => setMoveTarget({ node, path })}>이동</button><button disabled={busy || deleteTarget !== null || deleteRequestsOpen} data-delete-node={node.node_id} aria-label={`${path} 삭제`} onClick={() => setDeleteTarget({ node, path })}>삭제</button></div>;
+    return <div key={node.node_id} className="workspace-file-row"><button disabled={busy || workspaceConnecting} data-document={node.node_id} aria-current={state.selected === node.node_id ? "page" : undefined} onClick={() => void openListedDocument(node.node_id)}>{path}</button><button disabled={busy || moveTarget !== null || moveRequestsOpen} data-move-node={node.node_id} aria-label={`${path} 이름 변경 또는 이동`} onClick={() => setMoveTarget({ node, path })}>이동</button><button disabled={busy || deleteTarget !== null || deleteRequestsOpen} data-delete-node={node.node_id} aria-label={`${path} 삭제`} onClick={() => setDeleteTarget({ node, path })}>삭제</button></div>;
   }), [nodes, nodeIndex, busy, workspaceConnecting, state.selected, deleteTarget, deleteRequestsOpen, moveTarget, moveRequestsOpen]);
   const hasWorkspaceDocument = [...sessionModes.current.values()].some((session) => session.mode === "workspace" && session.uiId === state.selected);
   const visibleSyncStatus = state.remoteDeleted && (syncStatus === "서버 반영됨" || syncStatus === "서버 저장됨, 영수증 확인 중") ? "" : syncStatus;
 
-  return <main>
+  return <main data-mobile-screen={state.selected ? mobileScreen : "list"} data-mobile-preview={preview}>
     <header><strong>Notryx</strong><span className="badge">{mode === "fixture" ? "M0" : "M2"}</span><span className="caption">{mode === "fixture" ? "로컬 편집 시험" : "작업 공간"}</span><ThemeControls controller={themes} /></header>
     <div className="layout">
       <nav aria-label="문서 탐색">
+        {compact && (navigationError || state.error || connectionError || inventoryError) && <p role="alert">{navigationError || state.error || connectionError || inventoryError}</p>}
         <form className="workspace-connect" onSubmit={(event) => void connect(event)}>
           <label>서버 주소<input name="origin" type="url" placeholder="https://example.org" required /></label>
           <label>작업 공간 ID<input name="workspace_id" required /></label>
@@ -1116,7 +1168,7 @@ function App() {
         {credentialMessage && <p role="status" data-testid="credential-status">{credentialMessage}</p>}
         {pendingPair && <div><button disabled={busy} onClick={() => void resumePair(false)}>대기 중인 등록 이어가기</button><button disabled={busy} onClick={() => void resumePair(true)}>대기 중인 등록 버리기</button></div>}
         <p>{mode === "fixture" ? "합성 문서" : "작업 공간 문서"}</p>
-        {mode === "fixture" ? documents.map(([id, label]) => <button key={id} disabled={busy} data-document={id} aria-current={state.selected === id ? "page" : undefined} onClick={() => void controller.current?.open(id)}>{label}</button>)
+        {mode === "fixture" ? documents.map(([id, label]) => <button key={id} disabled={busy} data-document={id} aria-current={state.selected === id ? "page" : undefined} onClick={() => void openListedDocument(id)}>{label}</button>)
           : workspaceButtons}
         {mode === "workspace" && workspaceBinding && <button data-testid="move-requests-toggle" disabled={busy} aria-expanded={moveRequestsOpen} onClick={() => { setMoveTarget(null); setMoveRequestsOpen((current) => !current); }}>이동 요청</button>}
         {mode === "workspace" && workspaceBinding && moveTarget && <MovePanel key={`${moveTarget.node.node_id}:${moveTarget.node.meta_etag}`} binding={workspaceBinding} node={moveTarget.node} displayName={moveTarget.path} ports={movePorts} revision={restoreRevision} treeRevision={searchRevision} permissionDeniedOperationId={restorePermission?.binding === JSON.stringify(workspaceBinding) ? restorePermission.operationId : null} onClose={() => setMoveTarget(null)} onWorkReady={() => {}} onRecheck={(operationId) => {
@@ -1181,12 +1233,18 @@ function App() {
           }
         }} />}
         <p>기기에 보존된 초안</p>
-        {drafts.map((draft) => <button key={draftKey(draft)} disabled={busy} data-draft-document={draft.document_id} aria-current={state.selected === draftSelectionId(draft, mode) ? "page" : undefined} onClick={() => void controller.current?.open(draftSelectionId(draft, mode))}>{draft.binding.workspace_id.slice(0, 8)} / {draft.document_id}</button>)}
+        {drafts.map((draft) => <button key={draftKey(draft)} disabled={busy} data-draft-document={draft.document_id} aria-current={state.selected === draftSelectionId(draft, mode) ? "page" : undefined} onClick={() => void openListedDocument(draftSelectionId(draft, mode))}>{draft.binding.workspace_id.slice(0, 8)} / {draft.document_id}</button>)}
         <button disabled={busy} onClick={() => void refreshDrafts().catch((cause) => setConnectionError(String(cause)))}>초안 목록 새로고침</button>
         <small>{mode === "fixture" ? "연결 전에는 시험 문서가 표시됩니다." : "초안은 먼저 이 기기에 저장됩니다."}</small>
         <button id="isolation-open" onClick={() => { setIsolation(true); void invoke("m0_open_isolation").catch((cause) => setProbeError(String(cause))); }}>격리 시험 열기</button>
       </nav>
       <section className="document">
+        <div className="mobile-navigation">
+          <button data-testid="mobile-back" disabled={navigationBusy} onClick={() => void navigateMobile(mobileScreen === "edit" ? "read" : "list")}>{mobileScreen === "edit" ? "읽기로" : "문서 목록"}</button>
+          <span>{mode === "fixture" ? documents.find(([id]) => id === state.selected)?.[1] : nodes.find((node) => node.node_id === state.selected)?.name ?? "기기 초안"}</span>
+          {mobileScreen !== "edit" && <button data-testid="mobile-edit" disabled={!state.selected || documentReadonly || navigationBusy} onClick={() => void navigateMobile("edit")}>편집</button>}
+        </div>
+        {navigationError && <p role="alert">{navigationError}</p>}
         <div className="toolbar"><span><span id="save-status" role="status">{state.status}</span>{visibleSyncStatus && <span id="sync-status">, {visibleSyncStatus}</span>}{workspaceSyncMessage && <span id="workspace-sync-status" role="status">, {workspaceSyncMessage}</span>}</span><div className="toolbar-actions"><button id="preview-toggle" aria-pressed={preview} onClick={() => {
           clearTimeout(previewTimer.current);
           previewEnabled.current = !previewEnabled.current;
@@ -1268,7 +1326,7 @@ function App() {
               if (link.kind !== "document") return;
               const resolved = resolveWorkspaceReference(nodesRef.current, state.selected, link.target);
               if (!resolved) setConnectionError("연결된 문서를 찾지 못했습니다. 목록을 새로고침하거나 다른 구간을 확인해 주세요.");
-              else void controller.current?.open(resolved.node.node_id).then(() => {
+              else void openListedDocument(resolved.node.node_id).then(() => {
                 if (resolved.fragment && selectedRef.current === resolved.node.node_id) {
                   setPreviewAnchor({ documentId: resolved.node.node_id, fragment: resolved.fragment });
                 }

@@ -7,7 +7,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { EditorController, initialEditorState } from "./editor-controller";
-import { openDocument, saveDocument, closeDocument, pairWorkspace, workspaceInventory, workspaceCreateParents, workspaceFrozenCreates, resolveWorkspaceFrozenCreate, workspaceFrozenDeletes, resolveWorkspaceFrozenDelete, workspaceFrozenMoves, resolveWorkspaceFrozenMove, workspaceSyncState, openWorkspaceDocument, prepareWorkspaceRemoteRefresh, commitWorkspaceRemoteRefresh, inspectWorkspaceRemoteChange, saveWorkspaceDocument, closeWorkspaceDocument, localDrafts, openLocalDraft, adoptPendingPair, discardPendingPair, pendingPairStatus, queueWorkspaceDocument, sendNextWorkspaceOperation, previewWorkspaceImage, workspaceDocumentOutbox, openWorkspaceExternal, recoverWorkspaceSource, workspaceTrash, queueWorkspaceRestore, workspaceRestoreStatus, requestWorkspaceRestoreAbandon, queueWorkspaceCreate, workspaceCreateStatus, requestWorkspaceCreateAbandon, queueWorkspaceDelete, workspaceDeleteStatus, requestWorkspaceDeleteAbandon, queueWorkspaceMove, workspaceMoveStatus, requestWorkspaceMoveAbandon, workspaceSearch, cancelWorkspaceSearch } from "./ipc";
+import { backgroundApp, openDocument, saveDocument, closeDocument, pairWorkspace, workspaceInventory, workspaceCreateParents, workspaceFrozenCreates, resolveWorkspaceFrozenCreate, workspaceFrozenDeletes, resolveWorkspaceFrozenDelete, workspaceFrozenMoves, resolveWorkspaceFrozenMove, workspaceSyncState, openWorkspaceDocument, prepareWorkspaceRemoteRefresh, commitWorkspaceRemoteRefresh, inspectWorkspaceRemoteChange, saveWorkspaceDocument, closeWorkspaceDocument, localDrafts, openLocalDraft, adoptPendingPair, discardPendingPair, pendingPairStatus, queueWorkspaceDocument, sendNextWorkspaceOperation, previewWorkspaceImage, workspaceDocumentOutbox, openWorkspaceExternal, recoverWorkspaceSource, workspaceTrash, queueWorkspaceRestore, workspaceRestoreStatus, requestWorkspaceRestoreAbandon, queueWorkspaceCreate, workspaceCreateStatus, requestWorkspaceCreateAbandon, queueWorkspaceDelete, workspaceDeleteStatus, requestWorkspaceDeleteAbandon, queueWorkspaceMove, workspaceMoveStatus, requestWorkspaceMoveAbandon, workspaceSearch, cancelWorkspaceSearch } from "./ipc";
 import { MarkdownPreview } from "./preview";
 import { ThemeControls, useTheme } from "./theme-controls";
 import { useCompactLayout, type MobileScreen } from "./compact-layout";
@@ -23,6 +23,7 @@ import { AutoTransmit, QueueStorageError, type TransmitScope } from "./auto-tran
 import { clearQueueError, putQueueError, QueueAlerts, type QueueError } from "./queue-errors";
 import { receiptWaitResult, staleTransmissionResult } from "./send-result";
 import { documentSizeGuard } from "./document-size-guard";
+import { markdownEdit, type MarkdownAction } from "./markdown-edit";
 import { StartupGate } from "./migration-recovery";
 import { workspaceOpenError } from "./workspace-open-error";
 import { credentialStateMessage, workspaceCredentialStatus } from "./credential-status";
@@ -44,6 +45,8 @@ import { useContentConflict } from "./use-content-conflict";
 import type { NodeState, WorkspaceDraft, WorkspaceRegistration } from "../../../packages/protocol-types";
 import "./style.css";
 
+const markdownActions = [["heading", "제목"], ["list", "목록"], ["code", "코드"], ["link", "링크"]] as const;
+
 const documents = [
   ["welcome", "시작하기"], ["unicode", "한글과 원문 보존"], ["100k", "100 KiB 문서"],
   ["100k-b", "100 KiB 문서 B"], ["5m", "5 MiB 문서"], ["5m-b", "5 MiB 문서 B"],
@@ -61,7 +64,10 @@ function App() {
   const [mobileScreen, setMobileScreen] = useState<MobileScreen>("list");
   const [navigationError, setNavigationError] = useState("");
   const [navigationBusy, setNavigationBusy] = useState(false);
+  const navigationPending = useRef(false);
+  const backRequested = useRef<() => Promise<void>>(async () => {});
   const [documentReadonly, setDocumentReadonly] = useState(false);
+  const [toolbarEditable, setToolbarEditable] = useState(false);
   const mobileLayout = useRef({ compact, screen: mobileScreen });
   mobileLayout.current = { compact, screen: mobileScreen };
   const themes = useTheme();
@@ -537,6 +543,7 @@ function App() {
   }
 
   function showMobileScreen(screen: MobileScreen) {
+    mobileLayout.current.screen = screen;
     setMobileScreen(screen);
     clearTimeout(previewTimer.current);
     previewEnabled.current = screen === "read" && new TextEncoder().encode(source.current).length <= 1024 * 1024;
@@ -544,20 +551,49 @@ function App() {
     if (previewEnabled.current) setPreviewSource(source.current);
   }
 
-  async function navigateMobile(screen: MobileScreen): Promise<void> {
-    if (navigationBusy) return;
+  async function navigateMobile(screen: MobileScreen | "background"): Promise<void> {
+    if (navigationPending.current || busy) return;
     if (themedEditor.current?.isComposing()) {
       setNavigationError("한글 조합을 마친 뒤 화면을 전환해 주세요.");
       return;
     }
+    navigationPending.current = true;
     setNavigationBusy(true);
     setNavigationError("");
+    let saved = false;
     try {
-      if (mobileLayout.current.screen === "edit") await controller.current?.flush();
-      showMobileScreen(screen);
+      if (screen === "background" || mobileLayout.current.screen === "edit") await controller.current?.flush();
+      if (themedEditor.current?.isComposing()) {
+        setNavigationError("한글 조합을 마친 뒤 화면을 전환해 주세요.");
+        return;
+      }
+      saved = true;
+      if (screen === "background") await backgroundApp();
+      else showMobileScreen(screen);
     } catch {
-      setNavigationError("이 기기에 저장하지 못했습니다. 편집 화면에서 다시 저장해 주세요.");
-    } finally { setNavigationBusy(false); }
+      setNavigationError(saved ? "앱을 백그라운드로 전환하지 못했습니다. 다시 시도해 주세요."
+        : "이 기기에 저장하지 못했습니다. 편집 화면에서 다시 저장해 주세요.");
+    } finally { navigationPending.current = false; setNavigationBusy(false); }
+  }
+
+  backRequested.current = () => {
+    const layout = mobileLayout.current;
+    return navigateMobile(!layout.compact || layout.screen === "list" ? "background"
+      : layout.screen === "edit" ? "read" : "list");
+  };
+
+  function insertMarkdown(action: MarkdownAction) {
+    const editor = themedEditor.current;
+    if (!editor || busy || navigationPending.current || !toolbarEditable) return;
+    if (editor.isComposing()) {
+      setNavigationError("한글 조합을 마친 뒤 편집 도구를 사용해 주세요.");
+      return;
+    }
+    const edit = markdownEdit(editor.view.state, action);
+    if (!edit || !editor.view.state.facet(EditorView.editable)) return;
+    setNavigationError("");
+    editor.view.dispatch(edit);
+    editor.view.focus();
   }
 
   async function openListedDocument(id: string): Promise<void> {
@@ -977,6 +1013,7 @@ function App() {
         const appearance = new Compartment();
         const reading = new Compartment();
         setDocumentReadonly(source.readonly);
+        setToolbarEditable(!source.readonly);
         let compositionTimer: ReturnType<typeof setTimeout> | undefined;
         let compositionPending = false;
         let replacing = false;
@@ -1010,7 +1047,10 @@ function App() {
             parent.current.replaceChildren(view.dom);
           },
           destroy: () => { clearTimeout(compositionTimer); if (themedEditor.current?.view === view) themedEditor.current = null; view.destroy(); },
-          setEditable: (enabled) => view.dispatch({ effects: editing.reconfigure([EditorState.readOnly.of(!enabled), EditorView.editable.of(enabled)]) }),
+          setEditable: (enabled) => {
+            setToolbarEditable(enabled);
+            view.dispatch({ effects: editing.reconfigure([EditorState.readOnly.of(!enabled), EditorView.editable.of(enabled)]) });
+          },
           isComposing: () => view.composing || compositionPending,
           replaceSource: (current) => {
             setDocumentReadonly(current.readonly);
@@ -1043,6 +1083,32 @@ function App() {
     }
     credentialMounted.current = true;
     const stop = listen("close-requested", () => { void instance.close(); });
+    const onBack = (event: Event) => {
+      event.preventDefault();
+      if (!disposed) void backRequested.current();
+    };
+    window.addEventListener("android-back-requested", onBack);
+    let lifecycleRevision = 0;
+    const foregroundChanged = listen<boolean>("app-foreground-changed", ({ payload: active }) => {
+      const revision = ++lifecycleRevision;
+      if (disposed) return;
+      // Lifecycle callbacks are best effort; the regular checkpoint timer remains necessary.
+      void (async () => {
+        try { await instance.checkpointForLifecycle(); } catch { /* The controller keeps the save error visible. */ }
+        if (disposed || lifecycleRevision !== revision || !active) return;
+        scheduler.kick();
+        requestRemoteRefresh();
+        requestRemoteInspection();
+        void refreshCredentialStatus();
+        if (modeRef.current === "workspace") {
+          void refreshWorkspaceSync().catch((cause) => setConnectionError(String(cause)));
+          void refreshWorkspace(workspacePageStartRef.current);
+        }
+      })();
+    }).catch(() => {
+      if (!disposed) setConnectionError("앱 복귀 알림을 연결하지 못했습니다.");
+      return () => {};
+    });
     const syncReady = listen("workspace-sync-status-changed", () => {
       if (modeRef.current === "workspace") void refreshWorkspaceSync().catch((cause) => setConnectionError(String(cause)));
     });
@@ -1093,6 +1159,7 @@ function App() {
       disposed = true;
       credentialMounted.current = false;
       window.clearInterval(credentialTimer);
+      window.removeEventListener("android-back-requested", onBack);
       credentialRevision.current++;
       workspace.current.invalidate();
       controller.current = null;
@@ -1100,7 +1167,7 @@ function App() {
       clearTimeout(previewTimer.current);
       void instance.dispose().then(() => scheduler.dispose()).catch(() => {});
       void stop.then((unlisten) => unlisten()).catch(() => {});
-      for (const listener of [syncReady, metadataChanged, credentialChanged]) {
+      for (const listener of [syncReady, metadataChanged, credentialChanged, foregroundChanged]) {
         void listener.then((unlisten) => unlisten()).catch(() => {});
       }
     };
@@ -1245,7 +1312,12 @@ function App() {
           {mobileScreen !== "edit" && <button data-testid="mobile-edit" disabled={!state.selected || documentReadonly || navigationBusy} onClick={() => void navigateMobile("edit")}>편집</button>}
         </div>
         {navigationError && <p role="alert">{navigationError}</p>}
-        <div className="toolbar"><span><span id="save-status" role="status">{state.status}</span>{visibleSyncStatus && <span id="sync-status">, {visibleSyncStatus}</span>}{workspaceSyncMessage && <span id="workspace-sync-status" role="status">, {workspaceSyncMessage}</span>}</span><div className="toolbar-actions"><button id="preview-toggle" aria-pressed={preview} onClick={() => {
+        <div className="toolbar"><span><span id="save-status" role="status">{state.status}</span>{visibleSyncStatus && <span id="sync-status">, {visibleSyncStatus}</span>}{workspaceSyncMessage && <span id="workspace-sync-status" role="status">, {workspaceSyncMessage}</span>}</span><div className="toolbar-actions">{compact && mobileScreen === "edit" && markdownActions.map(([action, label]) => <button
+          key={action} type="button" data-testid={`markdown-${action}`}
+          aria-label={action === "code" ? "코드 블록 삽입" : `${label} 삽입`}
+          disabled={!toolbarEditable || documentReadonly || navigationBusy || busy}
+          onPointerDown={(event) => event.preventDefault()}
+          onClick={() => insertMarkdown(action)}>{label}</button>)}<button id="preview-toggle" aria-pressed={preview} onClick={() => {
           clearTimeout(previewTimer.current);
           previewEnabled.current = !previewEnabled.current;
           setPreview(previewEnabled.current);

@@ -16,6 +16,11 @@ import type { WorkspaceFrozenContentInspection } from "../../../packages/protoco
 import type { WorkspaceContentConflictMergeFollowup, WorkspaceContentConflictMergeFollowupApprovalRequest, WorkspaceContentConflictMergeFollowupStatusResponse, WorkspaceContentConflictMergeStatusRequest, WorkspaceContentConflictMergeStatusResponse } from "../../../packages/protocol-types";
 import type { WorkspaceConflictResolutionResponse, WorkspaceContentConflictChooseRemoteRequest, WorkspaceContentConflictChooseRemoteResponse, WorkspaceContentConflictCopyProgressResponse, WorkspaceContentConflictCopyResponse, WorkspaceContentConflictCopyStatusResponse, WorkspaceContentConflictProgressResponse, WorkspaceContentConflictReopenResponse, WorkspaceDeletedDraftCopyConfirmResult, WorkspaceDeletedDraftCopyFollowupAbandonRequest, WorkspaceDeletedDraftCopyFollowupAbandonResult, WorkspaceDeletedDraftCopyProgressResult, WorkspaceDeletedDraftCopyReconfirmRequest, WorkspaceDeletedDraftCopyReopenResponse, WorkspaceDeletedDraftCopySnapshot, WorkspaceDeletedDraftCopyStatus } from "../../../packages/protocol-types";
 
+export async function backgroundApp(): Promise<void> {
+  const renderer_session_id = await getRendererSession();
+  await invoke("mobile_background", { request: { renderer_session_id } });
+}
+
 type SearchPageWithNodes = SearchPage & { results: (SearchResult & { node: NodeState | null })[] };
 
 function searchRequestId(value: string): string {

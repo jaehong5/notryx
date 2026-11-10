@@ -108,7 +108,7 @@ def main():
                     edited = original + addition
                     browser.js("""
                         mobileTestView.dispatch({changes:{from:mobileTestView.state.doc.length,insert:arguments[0]}});
-                        document.querySelector('[data-testid="mobile-back"]').click();
+                        window.dispatchEvent(new Event('android-back-requested', {cancelable:true}));
                     """, addition)
                     screen(browser, "read", preview=True)
                     saved = checkpoint(directory, "welcome")
@@ -133,8 +133,76 @@ def main():
                     screen(browser, "list")
                     evidence["viewports"].append({"width": width, "height": 780,
                         "list_read_edit": True, "single_pane": True, "horizontal_overflow": False,
-                        "editor_identity_and_undo": True, "sqlite_checkpoint_before_read": True})
+                        "editor_identity_and_undo": True, "sqlite_checkpoint_before_read": True,
+                        "system_back_event_before_read": True})
                     print(f"Compact {width}x780 passed: list/read/edit, one pane, undo and SQLite checkpoint.", flush=True)
+
+                resize(browser, 320, 360)
+                click(browser, '[data-document="welcome"]')
+                screen(browser, "read", preview=True)
+                click(browser, '[data-testid="mobile-edit"]')
+                screen(browser, "edit")
+                geometry = browser.js("""
+                    const toolbar = document.querySelector('.toolbar').getBoundingClientRect();
+                    const editor = document.querySelector('#editor').getBoundingClientRect();
+                    const buttons = ['heading','list','code','link'].map(action => {
+                        const r = document.querySelector(`[data-testid="markdown-${action}"]`).getBoundingClientRect();
+                        return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,height:r.height};
+                    });
+                    return {toolbarBottom:toolbar.bottom,editorHeight:editor.height,buttons};
+                """)
+                assert geometry["toolbarBottom"] <= 361 and geometry["editorHeight"] >= 80, geometry
+                assert all(item["height"] >= 44 and item["left"] >= 0 and item["right"] <= 321
+                           and item["bottom"] <= 361 for item in geometry["buttons"]), geometry
+                foreground_window_focus = True
+                for action, insertion in (("heading", "## "), ("list", "- "),
+                                          ("code", "```\n코드\n```"), ("link", "[텍스트](https://)")):
+                    browser.js("mobileTestView.dispatch({selection:{anchor:mobileTestView.state.doc.length}});mobileTestView.focus()")
+                    before_focus = browser.js("return {editor:mobileTestView.hasFocus,document:document.hasFocus(),active:document.activeElement===mobileTestView.contentDOM}")
+                    selector = f'[data-testid="markdown-{action}"]'
+                    element = browser.request("POST", f"/session/{browser.session}/element", {"using": "css selector", "value": selector})
+                    element_id = element["element-6066-11e4-a52e-4f735466cecf"]
+                    browser.request("POST", f"/session/{browser.session}/element/{element_id}/click", {})
+                    expected = original + insertion
+                    assert browser.js("return mobileTestView.state.doc.toString()") == expected, action
+                    after_focus = browser.js("return {editor:mobileTestView.hasFocus,document:document.hasFocus(),active:document.activeElement===mobileTestView.contentDOM,tag:document.activeElement?.tagName}")
+                    # Xvfb may lack a foreground window; DOM focus must still remain on the editor.
+                    assert before_focus["active"] and after_focus["active"], {"action": action, "before": before_focus, "after": after_focus}
+                    if after_focus["document"]:
+                        assert after_focus["editor"], after_focus
+                    foreground_window_focus = foreground_window_focus and after_focus["document"]
+                    click(browser, "#save")
+                    browser.wait(lambda: (saved := checkpoint(directory, "welcome")) and saved[1] == expected.encode())
+                    browser.js("mobileTestView.contentDOM.dispatchEvent(new KeyboardEvent('keydown',{key:'z',code:'KeyZ',ctrlKey:true,bubbles:true,cancelable:true}))")
+                    assert browser.js("return mobileTestView.state.doc.toString()") == original, action
+                    click(browser, "#save")
+                    browser.wait(lambda: checkpoint(directory, "welcome")[1] == original.encode())
+                screenshot(browser, output / "320-short-editor-tools.png")
+                evidence["editing_tools"] = {"actions": ["heading", "list", "code", "link"],
+                    "sqlite_checkpoint": True, "undo": True, "dom_focus": True,
+                    "foreground_window_focus": foreground_window_focus,
+                    "viewport": {"width": 320, "height": 360}, "geometry": geometry,
+                    "physical_keyboard_resize": "not tested"}
+                print("Editing tools passed: four native clicks, DOM focus, undo, SQLite and 320x360 layout.", flush=True)
+                click(browser, '[data-testid="mobile-back"]')
+                screen(browser, "read", preview=True)
+                click(browser, '[data-testid="mobile-back"]')
+                screen(browser, "list")
+                resize(browser, 320, 780)
+
+                stale = browser.native("mobile_background", {"request": {"renderer_session_id": "stale-mobile-probe"}})
+                assert not stale["ok"] and "stale_renderer_session" in stale["error"], stale
+                initial = browser.request("GET", f"/session/{browser.session}/window")
+                click(browser, "#isolation-open")
+                handles = browser.wait(lambda: (items if len(items := browser.request("GET", f"/session/{browser.session}/window/handles")) == 2 else None))
+                isolated = next(handle for handle in handles if handle != initial)
+                browser.request("POST", f"/session/{browser.session}/window", {"handle": isolated})
+                browser.wait(lambda: browser.js("return !!window.__TAURI_INTERNALS__"))
+                denied = browser.native("mobile_background", {"request": {"renderer_session_id": "isolated-mobile-probe"}})
+                assert not denied["ok"] and "not allowed" in denied["error"], denied
+                browser.request("POST", f"/session/{browser.session}/window", {"handle": initial})
+                evidence["background_command_boundary"] = {"stale_owner_rejected": True, "isolated_webview_denied": True}
+                print("Background command boundary passed: stale owner and isolated WebView rejected.", flush=True)
 
                 saved_welcome = checkpoint(directory, "welcome")
                 click(browser, '[data-document="5m"]')

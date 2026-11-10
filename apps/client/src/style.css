@@ -78,12 +78,13 @@ iframe { height: 130px; border: 0; border-top: 1px solid var(--border-default); 
   .mobile-navigation { display: flex; align-items: center; gap: 8px; padding: 8px; border-bottom: 1px solid var(--border-default); }
   .mobile-navigation span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .toolbar { padding: 8px; flex-wrap: wrap; gap: 8px; }
-  .toolbar-actions { flex-wrap: wrap; }
+  .toolbar-actions { flex-wrap: nowrap; overflow-x: auto; width: 100%; }
+  .toolbar-actions button { flex: none; }
   #preview-toggle { display: none; }
   .document-content { min-width: 0; }
   main[data-mobile-screen="read"][data-mobile-preview="true"] #editor { display: none; }
   main[data-mobile-screen="edit"] .preview-pane { display: none; }
   .preview-pane { padding: 8px 12px; border-left: 0; }
-  main[data-mobile-screen="edit"] .toolbar { order: 2; border-top: 1px solid var(--border-default); border-bottom: 0; }
+  main[data-mobile-screen="edit"] .toolbar { flex-shrink: 0; order: 2; border-top: 1px solid var(--border-default); border-bottom: 0; }
   .cm-line { padding: 0 12px; }
 }

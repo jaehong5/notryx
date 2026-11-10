@@ -244,6 +244,10 @@ test.each(["unknown commit", "view failure"])("%s never re-enables the old text"
   expect(ports.openDocument).toHaveBeenCalledTimes(1);
   await controller.save();
   expect(ports.saveDocument).not.toHaveBeenCalled();
+  await controller.checkpointForLifecycle();
+  await controller.flush();
+  expect(states.at(-1)?.error).toContain("다시 열어");
+  expect(views[0].editable).toBe(false);
   await controller.dispose();
 });
 

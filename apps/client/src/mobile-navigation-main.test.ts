@@ -7,6 +7,7 @@ import type { NodeState } from "../../../packages/protocol-types";
 const fakes = vi.hoisted(() => ({
   root: undefined as { unmount(): void } | undefined,
   open: vi.fn(), save: vi.fn(), close: vi.fn(), workspace: false, openWorkspace: vi.fn(),
+  background: vi.fn(), prepareRefresh: vi.fn(), compact: true, events: new Map<string, (event: { payload: boolean }) => void>(),
 }));
 
 vi.mock("react-dom/client", async (original) => {
@@ -15,7 +16,10 @@ vi.mock("react-dom/client", async (original) => {
     const root = actual.createRoot(...args); fakes.root = root; return root;
   } };
 });
-vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: async (name: string, handler: (event: { payload: boolean }) => void) => {
+  fakes.events.set(name, handler);
+  return () => { fakes.events.delete(name); };
+} }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: async () => ({ selection: "light", custom: null, safe_mode: false, warning: null }) }));
 vi.mock("./migration-recovery", () => ({ StartupGate: ({ ready }: { ready: () => unknown }) => ready() }));
 vi.mock("./credential-status", async (original) => ({
@@ -25,13 +29,14 @@ vi.mock("./credential-status", async (original) => ({
 vi.mock("./ipc", async (original) => ({
   ...await original<typeof import("./ipc")>(),
   localDrafts: async () => [], pendingPairStatus: async () => "none",
+  backgroundApp: fakes.background,
   workspaceSyncState: async () => {
     if (!fakes.workspace) throw new Error("not_connected");
     return { binding, status: "ready" };
   },
   workspaceInventory: async () => ({ nodes: [rootNode, smallNode, largeNode], next_after_id: null }),
   openWorkspaceDocument: fakes.openWorkspace, closeWorkspaceDocument: fakes.close,
-  prepareWorkspaceRemoteRefresh: async () => null, inspectWorkspaceRemoteChange: async () => "same",
+  prepareWorkspaceRemoteRefresh: fakes.prepareRefresh, inspectWorkspaceRemoteChange: async () => "same",
   workspaceDocumentOutbox: async () => ({ binding, has_conflict: false, has_failure: false, latest: null, confirmed_through: "0", first_content_conflict: null }),
   sendNextWorkspaceOperation: async () => ({ status: "idle", binding }),
   openDocument: fakes.open, saveDocument: fakes.save, closeDocument: fakes.close,
@@ -48,8 +53,9 @@ const rangeBounds = Object.getOwnPropertyDescriptor(Range.prototype, "getBoundin
 beforeEach(() => {
   vi.resetModules();
   fakes.workspace = false; fakes.openWorkspace.mockReset();
+  fakes.compact = true; fakes.prepareRefresh.mockReset().mockResolvedValue(null); fakes.events.clear(); fakes.background.mockReset().mockResolvedValue(undefined);
   vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
-    matches: query === "(max-width: 650px)", media: query, onchange: null,
+    matches: fakes.compact && query === "(max-width: 650px)", media: query, onchange: null,
     addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn(),
   })));
   Object.defineProperty(Range.prototype, "getClientRects", { configurable: true, value: () => [] });
@@ -183,4 +189,184 @@ test("모바일 미리보기 내부 링크로 큰 읽기 전용 문서를 열면
   expect(document.querySelector(".preview-pane")).toBeNull();
   expect(editor().contentDOM.getAttribute("contenteditable")).toBe("false");
   expect(button("mobile-edit").disabled).toBe(true);
+});
+
+function systemBack(): void {
+  const event = new Event("android-back-requested", { cancelable: true });
+  window.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(true);
+}
+
+test("Android 뒤로 가기는 저장을 기다려 읽기와 목록으로 이동하고 목록에서 앱을 배경으로 보낸다", async () => {
+  await startApp();
+  const view = await readDocument();
+  button("mobile-edit").click();
+  await vi.waitFor(() => expect(screen()).toBe("edit"));
+  view.dispatch({ changes: { from: view.state.doc.length, insert: "Back checkpoint\n" } });
+  let finishSave!: (value: { edit_session_id: string; generation: string }) => void;
+  fakes.save.mockImplementationOnce(() => new Promise((resolve) => { finishSave = resolve; }));
+  systemBack(); systemBack();
+  await vi.waitFor(() => expect(fakes.save).toHaveBeenCalledOnce());
+  expect(screen()).toBe("edit");
+  expect(fakes.background).not.toHaveBeenCalled();
+  const request = fakes.save.mock.calls[0][0];
+  finishSave({ edit_session_id: request.edit_session_id, generation: request.generation });
+  await vi.waitFor(() => expect(screen()).toBe("read"));
+  systemBack();
+  await vi.waitFor(() => expect(screen()).toBe("list"));
+  systemBack();
+  await vi.waitFor(() => expect(fakes.background).toHaveBeenCalledOnce());
+  expect(editor()).toBe(view);
+  expect(view.state.doc.toString()).toBe(originalText + "Back checkpoint\n");
+});
+
+test("Android 뒤로 가기는 저장 실패와 조합 중에 편집 화면과 입력을 보존한다", async () => {
+  await startApp();
+  const view = await readDocument();
+  button("mobile-edit").click();
+  await vi.waitFor(() => expect(screen()).toBe("edit"));
+  view.dispatch({ changes: { from: view.state.doc.length, insert: "Unsaved back\n" } });
+  fakes.save.mockRejectedValue(new Error("synthetic_back_save_failure"));
+  systemBack();
+  await vi.waitFor(() => expect(document.body.textContent).toContain("이 기기에 저장하지 못했습니다"));
+  expect(screen()).toBe("edit");
+  fakes.save.mockClear();
+  view.contentDOM.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+  systemBack();
+  await vi.waitFor(() => expect(document.body.textContent).toContain("한글 조합을 마친 뒤"));
+  expect(fakes.save).not.toHaveBeenCalled();
+  expect(fakes.background).not.toHaveBeenCalled();
+  expect(view.state.doc.toString()).toBe(originalText + "Unsaved back\n");
+});
+
+test("넓은 Android 화면도 뒤로 가기 전에 저장하고 앱 이동 실패 시 편집을 유지한다", async () => {
+  fakes.compact = false;
+  await startApp();
+  const view = editor();
+  view.dispatch({ changes: { from: view.state.doc.length, insert: "Wide checkpoint\n" } });
+  fakes.background.mockRejectedValueOnce(new Error("background_failed"));
+  systemBack();
+  await vi.waitFor(() => expect(fakes.background).toHaveBeenCalledOnce());
+  expect(fakes.save).toHaveBeenCalledOnce();
+  expect(fakes.save.mock.invocationCallOrder[0]).toBeLessThan(fakes.background.mock.invocationCallOrder[0]);
+  expect(editor()).toBe(view);
+  expect(view.contentDOM.getAttribute("contenteditable")).toBe("true");
+  await vi.waitFor(() => expect(document.body.textContent).toContain("앱을 백그라운드로 전환하지 못했습니다"));
+  expect(undo(view)).toBe(true);
+  expect(view.state.doc.toString()).toBe(originalText);
+});
+
+test("앱 background 전환은 즉시 기기 저장하고 복귀는 같은 편집기와 undo를 유지한다", async () => {
+  await startApp();
+  const view = await readDocument();
+  button("mobile-edit").click();
+  await vi.waitFor(() => expect(screen()).toBe("edit"));
+  fakes.open.mockClear(); fakes.close.mockClear();
+  view.dispatch({ changes: { from: view.state.doc.length, insert: "Background checkpoint\n" } });
+  expect(fakes.events.has("app-foreground-changed")).toBe(true);
+  fakes.events.get("app-foreground-changed")!({ payload: false });
+  await vi.waitFor(() => expect(fakes.save).toHaveBeenCalledOnce(), { timeout: 500 });
+  expect(atob(fakes.save.mock.calls[0][0].bytes_base64)).toBe(originalText + "Background checkpoint\n");
+  fakes.events.get("app-foreground-changed")!({ payload: true });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(editor()).toBe(view);
+  expect(screen()).toBe("edit");
+  expect(fakes.open).not.toHaveBeenCalled(); expect(fakes.close).not.toHaveBeenCalled();
+  expect(undo(view)).toBe(true);
+  expect(view.state.doc.toString()).toBe(originalText);
+});
+
+test("앱 복귀는 실패한 background 저장을 다시 시도하고 저장 오류 중에도 입력을 보존한다", async () => {
+  await startApp();
+  const view = await readDocument();
+  button("mobile-edit").click();
+  await vi.waitFor(() => expect(screen()).toBe("edit"));
+  view.dispatch({ changes: { from: view.state.doc.length, insert: "Retry checkpoint\n" } });
+  fakes.save.mockRejectedValueOnce(new Error("synthetic_background_failure"));
+  expect(fakes.events.has("app-foreground-changed")).toBe(true);
+  fakes.events.get("app-foreground-changed")!({ payload: false });
+  await vi.waitFor(() => expect(document.body.textContent).toContain("synthetic_background_failure"));
+  expect(view.state.doc.toString()).toBe(originalText + "Retry checkpoint\n");
+  fakes.events.get("app-foreground-changed")!({ payload: true });
+  await vi.waitFor(() => expect(fakes.save).toHaveBeenCalledTimes(2));
+  expect(atob(fakes.save.mock.calls[1][0].bytes_base64)).toBe(originalText + "Retry checkpoint\n");
+  expect(editor()).toBe(view);
+});
+
+test.each([true, false])("저장 대기 중 새 조합을 시작하면 Android 화면 이탈을 보류한다 (compact=%s)", async (compact) => {
+  fakes.compact = compact;
+  await startApp();
+  const view = compact ? await readDocument() : editor();
+  if (compact) {
+    button("mobile-edit").click();
+    await vi.waitFor(() => expect(screen()).toBe("edit"));
+  }
+  view.dispatch({ changes: { from: view.state.doc.length, insert: "Pending save\n" } });
+  let finishSave!: (value: { edit_session_id: string; generation: string }) => void;
+  fakes.save.mockImplementationOnce(() => new Promise((resolve) => { finishSave = resolve; }));
+  systemBack();
+  await vi.waitFor(() => expect(fakes.save).toHaveBeenCalledOnce());
+  view.contentDOM.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+  const request = fakes.save.mock.calls[0][0];
+  finishSave({ edit_session_id: request.edit_session_id, generation: request.generation });
+  await vi.waitFor(() => expect(document.body.textContent).toContain("한글 조합을 마친 뒤"));
+  if (compact) expect(screen()).toBe("edit");
+  expect(view.contentDOM.getAttribute("contenteditable")).toBe("true");
+  expect(fakes.background).not.toHaveBeenCalled();
+});
+
+test("앱 복귀는 기기 저장을 마친 뒤 열린 문서의 최신 본문을 확인한다", async () => {
+  fakes.workspace = true;
+  fakes.openWorkspace.mockImplementation(async (node: NodeState) => ({
+    binding, document_id: node.node_id, edit_session_id: `session-${node.node_id}`, generation: "0",
+    bytes_base64: btoa(originalText), readonly: false, local_draft: false, has_session: true,
+    cache_warning: null, open_notice: null,
+  }));
+  document.body.innerHTML = '<div id="root"></div>';
+  await import("./main");
+  await vi.waitFor(() => expect(document.querySelector<HTMLButtonElement>(`[data-document="${smallNode.node_id}"]`)?.disabled).toBe(false));
+  document.querySelector<HTMLButtonElement>(`[data-document="${smallNode.node_id}"]`)!.click();
+  await vi.waitFor(() => expect(screen()).toBe("read"));
+  const view = editor();
+  fakes.prepareRefresh.mockClear();
+  fakes.events.get("app-foreground-changed")!({ payload: true });
+  await vi.waitFor(() => expect(fakes.prepareRefresh).toHaveBeenCalled(), { timeout: 500 });
+  expect(editor()).toBe(view);
+  expect(fakes.save).not.toHaveBeenCalled();
+});
+
+test("편집 보조 도구는 편집 화면에서만 표시하고 선택과 포커스 및 저장 경로를 유지한다", async () => {
+  await startApp();
+  const view = await readDocument();
+  expect(document.querySelector('[data-testid="markdown-heading"]')).toBeNull();
+  button("mobile-edit").click();
+  await vi.waitFor(() => expect(screen()).toBe("edit"));
+  const from = originalText.indexOf("Original");
+  view.dispatch({ selection: { anchor: from, head: from + 8 } });
+  view.focus();
+  const pointer = new MouseEvent("pointerdown", { bubbles: true, cancelable: true });
+  button("markdown-link").dispatchEvent(pointer);
+  expect(pointer.defaultPrevented).toBe(true);
+  button("markdown-link").click();
+  expect(view.state.doc.toString()).toBe(originalText.replace("Original", "[Original](https://)"));
+  expect(view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to)).toBe("https://");
+  expect(view.hasFocus).toBe(true);
+  document.querySelector<HTMLButtonElement>("#save")!.click();
+  await vi.waitFor(() => expect(fakes.save).toHaveBeenCalled());
+  expect(atob(fakes.save.mock.calls[0][0].bytes_base64)).toBe(view.state.doc.toString());
+  expect(editor()).toBe(view);
+  expect(undo(view)).toBe(true);
+  expect(view.state.doc.toString()).toBe(originalText);
+});
+
+test("조합 중 보조 도구는 원문과 조합을 유지하며 삽입하지 않는다", async () => {
+  await startApp();
+  const view = await readDocument();
+  button("mobile-edit").click();
+  await vi.waitFor(() => expect(screen()).toBe("edit"));
+  view.contentDOM.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+  button("markdown-heading").click();
+  await vi.waitFor(() => expect(document.body.textContent).toContain("한글 조합을 마친 뒤 편집 도구"));
+  expect(view.state.doc.toString()).toBe(originalText);
+  expect(fakes.save).not.toHaveBeenCalled();
 });

@@ -1343,6 +1343,58 @@ fn m0_exit(webview: Webview, app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn mobile_background(
+    webview: Webview,
+    runtime: tauri::State<'_, Runtime>,
+    request: WorkspaceLocalRequest,
+) -> Result<(), String> {
+    check_caller(&webview)?;
+    runtime
+        .0
+        .lock()
+        .await
+        .gate
+        .snapshot(&request.renderer_session_id)
+        .map_err(str::to_owned)?;
+    #[cfg(target_os = "android")]
+    {
+        let (complete, completed) = tokio::sync::oneshot::channel();
+        webview
+            .with_webview(move |native| {
+                native.jni_handle().exec(move |env, activity, _| {
+                    if complete.is_closed() {
+                        return;
+                    }
+                    let moved = env
+                        .call_method(
+                            activity,
+                            "moveTaskToBack",
+                            "(Z)Z",
+                            &[jni::objects::JValue::Bool(1)],
+                        )
+                        .and_then(|result| result.z());
+                    let result = match moved {
+                        Ok(true) => Ok(()),
+                        _ => {
+                            let _ = env.exception_clear();
+                            Err("background_failed")
+                        }
+                    };
+                    let _ = complete.send(result);
+                });
+            })
+            .map_err(|_| "background_failed")?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), completed)
+            .await
+            .map_err(|_| "background_failed")?
+            .map_err(|_| "background_failed")?
+            .map_err(str::to_owned)
+    }
+    #[cfg(not(target_os = "android"))]
+    Err("unsupported_platform".into())
+}
+
+#[tauri::command]
 fn m0_open_isolation(
     webview: Webview,
     app: tauri::AppHandle,
@@ -1447,6 +1499,21 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
+            #[cfg(target_os = "android")]
+            if window.label() == "main" {
+                let active = match event {
+                    tauri::WindowEvent::Suspended => Some(false),
+                    tauri::WindowEvent::Resumed => Some(true),
+                    _ => None,
+                };
+                if let Some(active) = active {
+                    if let Some(foreground) = window.try_state::<ForegroundHandle>() {
+                        foreground.0.set(active);
+                    }
+                    let _ = window.emit("app-foreground-changed", active);
+                }
+            }
+            #[cfg(not(target_os = "android"))]
             if window.label() == "main"
                 && let tauri::WindowEvent::Focused(active) = event
                 && let Some(foreground) = window.try_state::<ForegroundHandle>()
@@ -1467,6 +1534,7 @@ pub fn run() {
             m0_save,
             m0_close,
             m0_exit,
+            mobile_background,
             m0_open_isolation,
             mermaid_native::mermaid_render,
             mermaid_native::mermaid_complete,

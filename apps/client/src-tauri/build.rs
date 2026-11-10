@@ -6,6 +6,7 @@ fn main() {
             "m0_save",
             "m0_close",
             "m0_exit",
+            "mobile_background",
             "m0_open_isolation",
             "mermaid_render",
             "mermaid_complete",

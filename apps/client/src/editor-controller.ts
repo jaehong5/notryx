@@ -516,10 +516,17 @@ export class EditorController {
     }
   }
 
+  async checkpointForLifecycle(): Promise<void> {
+    const document = this.current;
+    // A lifecycle notification must not clear a recovery error or compete with a held session.
+    if (!document?.draft.dirty || document.remoteBlocked || this.busy) return;
+    await this.flush();
+  }
+
   async flush(): Promise<void> {
     this.clearTimer();
     const document = this.current;
-    if (this.disposed || !document) return;
+    if (this.disposed || !document || (document.remoteBlocked && !document.draft.dirty)) return;
     if (document.draft.dirty) this.publish({ status: "이 기기에 저장 중" });
     try {
       await document.draft.flush();

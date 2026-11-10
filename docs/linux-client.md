@@ -16,11 +16,11 @@ sha256sum target/release/bundle/deb/Notryx_0.1.0_amd64.deb
 
 결과는 `target/release/bundle/deb/Notryx_0.1.0_amd64.deb`다. 빌드에는 Rust와 Node.js가 필요하지만 설치한 앱 실행에는 필요하지 않다. 패키지는 시스템의 GTK 3와 WebKitGTK 4.1을 사용하며 APT가 필요한 실행 의존성과 HTTPS용 CA 인증서를 설치한다. 빌드 기준에 맞춰 glibc 2.39 이상을 요구한다. 오래된 Linux에서 실행할 수 있다고 가정하지 않는다. [Tauri의 Linux 빌드 기준](https://v2.tauri.app/distribute/debian/#limitations)을 참고한다.
 
-체크섬은 파일 동일성 확인용이며 발행자 인증을 대신하지 않는다. 서명 및 변조 거절 검증과 공개 릴리스 게시 절차는 후속 작업이다.
+체크섬은 파일 동일성 확인용이며 발행자 인증을 대신하지 않는다. [배포 파일 준비와 검증](releases.md)은 detached signature와 신뢰할 외부 공개키를 사용하는 수동 배포 절차를 설명한다. 현재 공식 릴리스 키와 공개 릴리스는 없으며 검증 시험에는 합성 임시키를 사용한다.
 
 ## 설치와 실행
 
-앱을 실행할 Linux PC에서 직접 빌드한 패키지를 설치한다.
+앱을 실행할 Linux PC에서 직접 빌드한 패키지를 설치한다. 다른 사람이 배포한 파일은 [서명 검증 후 설치](releases.md#검증-후-설치) 절차를 먼저 따른다.
 
 ```bash
 sudo apt install ./target/release/bundle/deb/Notryx_0.1.0_amd64.deb
@@ -85,4 +85,4 @@ bash scripts/test-linux-deb-install.sh target/release/bundle/deb/Notryx_0.1.0_am
 
 `/usr/share/doc/notryx/`에 Notryx MIT 원문, 프런트엔드 의존성 고지와 소스 안내, Rust 의존성 고지를 설치한다. Rust 고지는 잠긴 Linux 클라이언트의 일반 및 빌드 의존성에서 생성한다. crate에 빠진 원문은 버전, upstream commit과 원문 해시를 고정한 파일로 보충하며 누락이나 불일치가 있으면 패키지 생성을 중단한다. 빌드 도구도 포함하므로 목록 전체가 실행 파일에 링크된 것은 아니다.
 
-공개 배포의 최종 라이선스 감사, 릴리스 서명, 실제 사용자 키링과 현재 버전의 물리 한글 입력 검증은 남아 있다. 기존 편집기 성능 및 검색 진행 표시의 미통과 기록도 유지한다. 설치 패키지 준비를 전체 릴리스 게이트 통과로 해석하지 않는다.
+공개 배포의 최종 라이선스 감사, 운영용 서명키 관리와 공식 릴리스, 실제 사용자 키링과 현재 버전의 물리 한글 입력 검증은 남아 있다. 배포 검증 도구와 합성 키 시험은 운영키 검증이나 공개 배포의 완료를 뜻하지 않는다. 기존 편집기 성능 및 검색 진행 표시의 미통과 기록도 유지한다. 설치 패키지 준비를 전체 릴리스 게이트 통과로 해석하지 않는다.

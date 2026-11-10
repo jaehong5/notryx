@@ -17,6 +17,9 @@ apt-get install --no-install-recommends --no-remove -y \
     libxdo-dev \
     libssl-dev \
     openssl \
+    gnupg \
+    gpgv \
+    zstd \
     libayatana-appindicator3-dev \
     librsvg2-dev \
     sqlite3 \

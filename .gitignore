@@ -20,6 +20,7 @@ dist/
 **/local.properties
 apps/client/src-tauri/gen/schemas/
 /test-results/
+/ci-artifacts/
 /.artifacts/
 __pycache__/
 AGENTS.md

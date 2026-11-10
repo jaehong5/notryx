@@ -39,6 +39,19 @@ jobs:
           mkdir -p ci-artifacts
           scripts/m3-secret-no-service.sh xvfb-run -a python3 scripts/m2-workspace-webdriver.py \
             --remote-change reopen --two-client-lifecycle 2>&1 | tee ci-artifacts/m3-lifecycle.log
+      - name: Prepare unsigned Linux build metadata
+        shell: bash
+        run: |
+          python3 scripts/prepare-release.py \
+            --artifact target/debug/bundle/deb/Notryx_0.1.0_amd64.deb \
+            --output ci-artifacts/linux-build --profile linux-debug-ci
+      - name: Upload unsigned Linux build
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: linux-debug-unsigned
+          path: ci-artifacts/linux-build/
+          if-no-files-found: error
+          retention-days: 7
       - name: Upload WebDriver failure diagnostics
         if: failure()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

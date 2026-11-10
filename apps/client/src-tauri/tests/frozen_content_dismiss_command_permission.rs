@@ -19,7 +19,7 @@ fn frozen_content_dismiss_is_registered_for_local_main_only() {
     assert!(capability.get("remote").is_none());
     assert_eq!(
         config["app"]["security"]["capabilities"],
-        json!(["main", "mermaid", "drawio"])
+        json!(["main", "mermaid"])
     );
     assert!(
         capability["permissions"]

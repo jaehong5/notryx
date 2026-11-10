@@ -5,6 +5,10 @@ use notryx_client_store::{CredentialPending, RegistrationBinding};
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[cfg(any(target_os = "android", test))]
+#[path = "credential_android.rs"]
+mod android;
+
 #[derive(Clone)]
 struct StoredCredential {
     binding: RegistrationBinding,
@@ -446,7 +450,11 @@ impl CredentialVault for PlatformVault {
                 Err(_) => Err(CredentialError::Unavailable),
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "android")]
+        {
+            android::put(id, credential).await
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
             let _ = (id, credential);
             Err(CredentialError::Unavailable)
@@ -485,7 +493,11 @@ impl CredentialVault for PlatformVault {
             .await
             .map_err(|_| CredentialError::Unavailable)?;
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "android")]
+        {
+            android::get(id).await
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
             let _ = id;
             Err(CredentialError::Unavailable)
@@ -550,7 +562,11 @@ impl CredentialVault for PlatformVault {
                 Err(_) => Err(CredentialError::Unavailable),
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "android")]
+        {
+            android::delete(id, binding).await
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
             let _ = (id, binding);
             Err(CredentialError::Unavailable)

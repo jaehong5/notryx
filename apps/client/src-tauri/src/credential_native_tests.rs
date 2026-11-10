@@ -5,6 +5,44 @@ use std::collections::HashMap;
 const TEST_TOKEN: &[u8] = b"synthetic-secret-service-token-4bcaebd2";
 
 #[tokio::test]
+async fn android_failed_write_reply_preserves_pending_registration_and_drafts() {
+    struct ReplyVault(Vec<u8>);
+    impl CredentialVault for ReplyVault {
+        async fn put(
+            &mut self,
+            _id: Uuid,
+            _credential: &StoredCredential,
+        ) -> Result<(), CredentialError> {
+            android::decode_reply(android::Operation::Put, self.0.clone()).map(|_| ())
+        }
+        async fn get(&mut self, _id: Uuid) -> Result<Vec<StoredCredential>, CredentialError> {
+            Err(CredentialError::Storage)
+        }
+    }
+    for reply in [vec![3], vec![4], vec![5], vec![]] {
+        let (directory, mut store, old, next) = fixture().await;
+        assert!(
+            stage_pair(&mut store, &mut ReplyVault(reply), &next)
+                .await
+                .is_err()
+        );
+        store.close().await.unwrap();
+        let mut store = ClientStore::open(directory.path().join("client.sqlite"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.current_registration().await.unwrap(),
+            Some(old.clone())
+        );
+        assert_eq!(
+            store.pending_credential().await.unwrap().unwrap().binding,
+            next.binding
+        );
+        assert_old_preserved(&mut store, &old, false).await;
+    }
+}
+
+#[tokio::test]
 async fn expired_restore_reports_registration_required_without_losing_the_draft() {
     let (directory, server, runtime, session, document) =
         crate::sync_bootstrap::tests::setup().await;

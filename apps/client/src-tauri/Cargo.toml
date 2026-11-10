@@ -30,6 +30,10 @@ gtk = "=0.18.2"
 tempfile = "=3.27.0"
 secret-service = { version = "=5.2.0", default-features = false, features = ["rt-tokio-crypto-rust"] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "=0.21.1"
+ndk-context = "=0.1.1"
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 

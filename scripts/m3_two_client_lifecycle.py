@@ -91,8 +91,27 @@ def verify_lifecycle(helpers, clients, notes, state, root_id, folder_id,
 
     def perform(index, action):
         before = {r[0] for r in operations(index)}
-        action()
-        operation = wait(lambda: new_operation(index, before), "new durable operation")
+        try:
+            action()
+            operation = wait(lambda: new_operation(index, before), "new durable operation")
+        except helpers.TestFailure:
+            diagnostic = clients[index][0]("""const panel=document.querySelector('.move-panel');
+                const message=panel?.querySelector('[role=status]')?.textContent;
+                const known=[
+                    '작업 공간의 동기화된 경로가 변경됐습니다. 목적지를 다시 확인하세요.',
+                    '목적지 경로가 변경됐거나 확인할 수 없습니다. 새 경로를 다시 확인하세요.',
+                    '열린 문서가 변경됐습니다. 링크를 다시 검사해 주세요.',
+                    '목적지 경로를 확인할 수 없습니다. 폴더 목록을 다시 확인하세요.',
+                    '이 문서의 전송 대기 작업을 확인해 주세요.',
+                    '이전 등록의 보존 자료를 확인해 주세요.',
+                    '문서 상태 또는 목적지가 변경됐습니다. 목록을 갱신한 뒤 다시 확인하세요.',
+                    '이동 요청을 저장하지 못했습니다. 등록 상태를 확인하세요.',
+                    '이동 요청 결과를 확인할 수 없습니다. 저장된 요청 상태를 확인해 주세요.'
+                ];
+                return {move_panel:!!panel, message:known.includes(message)?message:null,
+                    confirm_present:!!panel?.querySelector('[data-testid=move-confirm]')};""")
+            print(f'M3 lifecycle operation diagnostic: client={index} {json.dumps(diagnostic)}', flush=True)
+            raise
         return wait(lambda: confirmed(index, operation[0]), "server receipt and confirmed ACK")
 
     def node(index, node_id):
@@ -229,11 +248,44 @@ def verify_lifecycle(helpers, clients, notes, state, root_id, folder_id,
         close_document(index)
     focus(0)
     click(0, f'[data-move-node="{node_id}"]')
-    wait(lambda: clients[0][0]("""return !!document.querySelector('[data-testid=move-parent] option[value="'+arguments[0]+'"]')""", folder_id), "move destination")
-    field(0, '[data-testid=move-parent]', folder_id)
-    field(0, '[data-testid=move-name]', 'Moved.md')
-    click(0, '[data-testid=move-prepare]')
-    perform(0, lambda: click(0, '[data-testid=move-confirm]'))
+
+    def move_review_state(submit=False):
+        return clients[0][0]("""const panel=document.querySelector('.move-panel');
+            const message=panel?.querySelector('[role=status]')?.textContent;
+            const confirm=panel?.querySelector('[data-testid=move-confirm]');
+            const parent=panel?.querySelector('[data-testid=move-parent]');
+            const invalidated=[
+                '작업 공간의 동기화된 경로가 변경됐습니다. 목적지를 다시 확인하세요.',
+                '목적지 경로가 변경됐거나 확인할 수 없습니다. 새 경로를 다시 확인하세요.'
+            ];
+            if(!confirm && parent?.value==='' && panel?.querySelector('[data-testid=move-prepare]') && invalidated.includes(message))
+                return 'recheck';
+            if(arguments[0] && confirm && !confirm.disabled) {confirm.click();return 'submitted';}
+            return null;""", submit)
+
+    def move_with_reconfirmation():
+        before = {r[0] for r in operations(0)}
+        for attempt in range(3):
+            wait(lambda: clients[0][0]("""return !!document.querySelector('[data-testid=move-parent] option[value="'+arguments[0]+'"]')""", folder_id), "move destination")
+            field(0, '[data-testid=move-parent]', folder_id)
+            field(0, '[data-testid=move-name]', 'Moved.md')
+            click(0, '[data-testid=move-prepare]')
+            if attempt == 0:
+                # A real watcher update must invalidate the review without queuing a move.
+                wait(lambda: clients[0][0]("return !!document.querySelector('[data-testid=move-confirm]')"), "initial move review")
+                (notes / 'Lifecycle refresh.md').write_bytes(b'# Synthetic metadata refresh\n')
+                wait(lambda: move_review_state() == 'recheck', "move review invalidated by metadata")
+                require(new_operation(0, before) is None, "invalidated move review created an operation")
+            outcome = wait(lambda: move_review_state(submit=True), "move confirmation or explicit recheck")
+            if outcome == 'submitted':
+                outcome = wait(lambda: new_operation(0, before) or move_review_state(), "move operation or explicit recheck")
+                if outcome != 'recheck':
+                    return
+            require(new_operation(0, before) is None, "move was queued before rechecking its destination")
+            print('M3 lifecycle: metadata invalidated move review; rechecking the same destination.', flush=True)
+        raise helpers.TestFailure("lifecycle: move review kept changing after three attempts")
+
+    perform(0, move_with_reconfirmation)
     converge(node_id, 'Moved.md', folder_id)
     require(not (notes / 'Lifecycle.md').exists() and (notes / 'Test Folder' / 'Moved.md').read_bytes() == returned.encode(), "move changed source bytes")
 

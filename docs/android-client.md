@@ -14,6 +14,76 @@ CARGO_BUILD_JOBS=1 npm run tauri -- android build --debug --target aarch64 --apk
 
 결과는 `apps/client/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`다. 파일 이름에 `universal`이 있지만 위 명령은 ARM64만 빌드한다. 개발용 debug 서명을 사용하며 공개 배포용 서명을 대신하지 않는다. 앱 식별자는 기존 데이터 경로와의 호환성을 위해 `org.notryx.m0`를 유지한다.
 
+빌드한 APK는 다음 명령으로 검사한다.
+
+```bash
+python3 scripts/test-android-apk.py
+python3 scripts/check-android-apk.py \
+  apps/client/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk \
+  --build-type debug --output .artifacts/android-debug-check.json
+```
+
+검사는 앱 ID, 버전 이름, 표시 이름과 시작 Activity, SDK 범위, backup 비활성화, debug와 평문 통신 설정, ARM64 라이브러리, 16 KiB 정렬과 JNI 인증정보 클래스의 포함 여부를 확인한다. debug APK는 서명 유효성도 확인한다. 결과 JSON에 파일 크기와 SHA-256을 남긴다. 설치나 실제 JNI 호출을 검사하지는 않는다.
+
+검사 결과의 `--output`에는 입력 APK와 다른 파일을 지정한다. 같은 경로, 심볼릭 링크 또는 하드 링크로 입력 APK를 가리키면 검사 전에 거절한다.
+
+## CI와 release 빌드
+
+`check` workflow의 `android` 작업은 ARM64 debug APK 빌드, 암호문 파일의 JVM 시험과 APK 검사를 수행한다. 개발용 APK와 검사 JSON을 `android-arm64-debug-development` artifact로 7일간 보관한다. 실행마다 개발용 서명 키가 달라질 수 있으므로 이 파일을 기존 앱의 업데이트용 배포물로 취급하지 않는다. CI는 APK를 GitHub Release나 앱 스토어에 게시하지 않는다.
+
+release 빌드는 debug와 구분해서 검사한다.
+
+```bash
+source scripts/dev-env.sh
+CARGO_BUILD_JOBS=1 npm run tauri -- android build --target aarch64 --apk --ci
+python3 scripts/check-android-apk.py \
+  apps/client/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk \
+  --build-type release --allow-unsigned --output .artifacts/android-release-check.json
+```
+
+기본 release 빌드에는 배포용 서명이 없다. 위 명령의 결과는 설치 배포용 APK가 아닌 빌드 검증 자료다. `--allow-unsigned`는 서명을 검사하지 않는 개발용 옵션이다. 이 옵션이나 예상 서명자 지문을 지정하지 않으면 release 검사는 실패한다.
+
+## 배포용 APK 서명과 검증
+
+서명은 위 release 빌드가 끝난 뒤 별도 명령으로 수행한다. Tauri와 Gradle에 비밀번호를 전달하지 않는다. Android SDK의 [apksigner](https://developer.android.com/tools/apksigner)를 사용하며, 기존 빌드에서 정렬한 APK를 서명 전에 검사하고 서명 후에도 다시 검사한다.
+
+고정 배포 키와 암호는 저장소 밖에서 관리하고 별도로 백업한다. 아래 경로와 alias는 준비한 키에 맞게 바꾼다. 신뢰한 키의 인증서 SHA-256 지문은 `keytool -list -v -keystore /path/to/notryx-release.jks -alias notryx-release`로 확인할 수 있다. 내려받은 APK에서 읽은 지문을 곧바로 신뢰값으로 사용하지 않는다.
+
+```bash
+source scripts/dev-env.sh
+python3 scripts/sign-android-apk.py \
+  apps/client/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk \
+  --keystore /path/to/notryx-release.jks --alias notryx-release \
+  --expected-signer-sha256 '<trusted-certificate-sha256>' \
+  --output .artifacts/releases/Notryx_0.1.0_arm64.apk
+```
+
+키 저장소 암호와 키 암호는 터미널에서 숨김 입력한다. 자동 실행에서는 비밀 관리 기능이 `NOTRYX_ANDROID_STORE_PASSWORD`와 `NOTRYX_ANDROID_KEY_PASSWORD`를 제공해야 한다. 암호 값 자체를 명령행, 소스, GitHub 공개 변수나 로그에 넣지 않는다. 스크립트는 암호를 자식 프로세스의 환경에서 제거하고 apksigner의 표준 입력으로만 전달한다. 이번 CI에는 배포 키나 배포 서명 작업을 추가하지 않았다.
+
+서명 도구는 입력 APK와 기존 출력 파일을 덮어쓰지 않는다. 임시 파일에 서명하고 APK 검사, 유효한 v2 서명, 단일 서명자 및 지정한 인증서 SHA-256 일치를 확인한 뒤 새 출력 파일을 만든다. 실패하면 검증하지 못한 APK를 출력 경로에 남기지 않는다. 여러 서명자나 키 회전은 현재 서명 경로에서 지원하지 않는다.
+
+오류에는 실패한 단계를 표시한다. `Input APK inspection`은 입력 release APK를 검사 명령으로 확인하고, `APK signing`은 keystore, alias와 암호를 점검한다. `Signed APK verification`은 예상 서명자 지문과 서명 후 패키지 검증을 확인한다. 원시 도구 출력과 암호는 오류 안내에 포함하지 않는다.
+
+배포 파일을 받은 쪽에서도 별도로 신뢰한 지문으로 검사한다.
+
+```bash
+python3 scripts/check-android-apk.py /path/to/Notryx_0.1.0_arm64.apk \
+  --build-type release --expected-signer-sha256 '<trusted-certificate-sha256>' \
+  --output .artifacts/android-signed-check.json
+```
+
+성공 결과의 `expected_signer_verified`는 호출자가 제공한 지문과 일치한다는 뜻이다. APK 자체가 공식 발행자를 증명하는 신뢰 기준을 제공하지 않는다. 검증 후 설치하는 절차이며, 사용자가 검사 도구를 건너뛰고 직접 설치하는 동작을 이 스크립트가 차단하지는 않는다.
+
+서명 검증의 자동 시험은 실제 미서명 release APK와 임시 시험 키를 사용한다. 시험 키와 서명 APK는 종료 시 삭제한다.
+
+```bash
+python3 scripts/test-android-signing.py \
+  --apk apps/client/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk \
+  --output .artifacts/android-signing-test.json
+```
+
+정상 서명, unsigned, 다른 서명자, 서명 뒤 변조, 암호 오류와 입력 및 기존 출력 보존을 검사한다. 현재 공식 배포 키는 준비하지 않았으며, 동일 키 업데이트 시 Android의 설치 동작과 기존 자료 보존은 실기기 미검증이다. 이 자동 시험을 AT-47의 전체 통과로 표시하지 않는다.
+
 ## 현재 화면 범위
 
 폭 650 CSS px 이하에서는 문서 목록, 읽기, 편집을 각각 한 화면에 표시한다. 문서를 선택하면 읽기로 시작하고 편집 버튼으로 원문을 연다. 1 MiB를 넘는 문서는 Markdown 미리보기 대신 읽기 전용 원문 화면을 사용한다. 기존 편집 가능 크기와 원문 보존 규칙은 그대로 적용한다.

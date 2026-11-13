@@ -57,6 +57,7 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    sourceSets.getByName("main").assets.srcDir("../../../../dist-android-mermaid")
 }
 
 kotlin {

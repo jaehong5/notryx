@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "build": "tsc --noEmit && vite build",
+    "build:mermaid-android": "vite build --config vite.mermaid-android.config.ts",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
   },

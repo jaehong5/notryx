@@ -113,11 +113,12 @@ jobs:
       - run: python3 scripts/test-android-apk.py
       - name: Build ARM64 development APK
         run: npm run tauri -- android build --debug --target aarch64 --apk --ci
-      - name: Test encrypted credential files
+      - name: Test Android credential files and renderer policy
         run: >-
           apps/client/src-tauri/gen/android/gradlew
           -p apps/client/src-tauri/gen/android :app:testArm64DebugUnitTest
           --tests org.notryx.m0.CredentialFilesTest
+          --tests org.notryx.m0.MermaidRendererPolicyTest
           --max-workers=1 --no-daemon --console=plain
       - name: Inspect development APK
         run: >-

@@ -2,6 +2,10 @@ use std::{collections::HashMap, sync::Mutex};
 use tauri::{Manager, Webview};
 use tokio::sync::oneshot;
 
+#[cfg(any(target_os = "android", test))]
+#[path = "mermaid_android.rs"]
+mod android;
+
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
 const MAX_SVG_BYTES: usize = 2 * 1024 * 1024;
 const MAX_RENDERS: usize = 2;
@@ -91,6 +95,10 @@ impl Drop for RenderLease {
 }
 
 pub(crate) fn cancel_all(app: &tauri::AppHandle) {
+    #[cfg(target_os = "android")]
+    if let Some(webview) = app.get_webview_window("main") {
+        android::cancel_all(webview.as_ref());
+    }
     if let Some(jobs) = app.try_state::<RenderJobs>()
         && let Ok(mut jobs) = jobs.0.lock()
     {
@@ -158,10 +166,8 @@ pub(crate) async fn mermaid_render(
     validate_input(&source, &theme)?;
     #[cfg(target_os = "android")]
     {
-        // Android IPC identifies the WebView, not the invoking frame. Keep untrusted
-        // Mermaid out of the main WebView until a separate renderer surface is supported.
         let _ = app;
-        Err("mermaid_unavailable".into())
+        android::render(webview, source, theme).await
     }
     #[cfg(not(target_os = "android"))]
     {

@@ -114,7 +114,17 @@ Linux WebView의 320×360 화면에서 버튼과 저장 상태가 보이고 편�
 
 기본 Markdown 미리보기는 raw HTML을 실행하지 않고 외부 이미지를 자동으로 요청하지 않는다. 문서 안의 로컬 이미지 참조만 등록된 서버에서 가져온다. Rust가 응답의 revision, digest, 크기를 확인하고 PNG, JPEG, WebP를 디코딩한 뒤 PNG로 변환해 표시한다. SVG와 애니메이션은 표시하지 않으며 첨부 원본은 변경하지 않는다.
 
-Android의 Mermaid 블록은 현재 원문과 안내를 표시한다. main WebView에 Mermaid 실행 코드나 비신뢰 HTML iframe을 추가하지 않는다. 현재 Android IPC는 호출 프레임을 별도로 구별하지 않으므로 격리된 렌더링 환경의 실기기 검증 전까지 이 제한을 유지한다.
+Android의 Mermaid 블록은 기본적으로 원문과 안내를 표시한다. 개발 APK에는 시험용 렌더링 경로를 추가했다. Tauri와 별개의 Android WebView에서 전용 번들을 실행하며 JavaScript에서 호출할 native bridge는 제공하지 않는다. native가 결과를 읽고 기존 SVG 검사와 수동 이미지 표시 경로로 전달한다. main WebView에 Mermaid 실행 코드나 비신뢰 HTML iframe을 추가하지 않는다.
+
+시험용 WebView는 고정 번들 외 요청, 파일 및 content 접근, navigation과 새 창을 차단하도록 구성했다. 입력 64 KiB, 결과 SVG 2 MiB, 동시 2개와 15초 수명 제한을 적용한다. timeout과 WebView 폐기는 별도 프로세스나 CPU 강제 종료 보장이 아니다. 실제 Android의 렌더링과 격리를 검증하지 않았으므로 일반 debug 실행과 release에서는 활성화하지 않는다.
+
+기기 시험 시 기기 저장을 마친 합성 시험 데이터에서만 다음 명령을 사용한다. `-S`는 실행 중인 시험 앱을 종료한 뒤 다시 연다. debug APK에만 적용되며 release는 flag를 무시한다.
+
+```bash
+adb shell am start -S -n org.notryx.m0/.MainActivity --ez notryxMermaidPreview true
+```
+
+기본 원문 표시로 돌아가려면 같은 명령의 마지막 값을 `false`로 바꾼다. 시험에서는 정상 그래프와 오류 원문 표시뿐 아니라 native bridge 부재, 외부 요청과 파일 및 APK asset 접근 차단, iframe과 새 창 차단, 취소와 앱 복귀를 확인해야 한다. 자동 정책 검사와 APK 빌드는 이 실기기 검증을 대신하지 않는다.
 
 외부 링크는 사용자가 누를 때 Rust에서 현재 renderer, 편집 세션과 `http/https` URL을 검사한 뒤 Android의 `ACTION_VIEW`와 `BROWSABLE`로 외부 처리 앱을 연다. 앱 내부 WebView로 이동하거나 임의 intent 및 파일 경로를 실행하지 않는다. 처리 앱이 없거나 실행에 실패하면 오류를 표시하고 편집 세션을 유지한다. 앱 목록 조회 권한이나 별도 플러그인은 추가하지 않는다. [Android 외부 URL 실행 안내](https://developer.android.com/training/package-visibility/use-cases#open-urls)
 

@@ -6,6 +6,7 @@ import android.webkit.WebView
 import android.widget.FrameLayout
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
+import androidx.annotation.Keep
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -13,6 +14,33 @@ import androidx.core.view.WindowInsetsControllerCompat
 
 class MainActivity : TauriActivity() {
   private var mainWebView: WebView? = null
+  private var mermaidRenderer: MermaidRenderer? = null
+
+  @Keep
+  fun startMermaidRender(id: String, request: String): String {
+    if (!MermaidRenderPolicy.previewEnabled(BuildConfig.DEBUG, intent.getBooleanExtra("notryxMermaidPreview", false))) {
+      return "mermaid_unavailable"
+    }
+    val renderer = mermaidRenderer ?: MermaidRenderer(this).also { mermaidRenderer = it }
+    return renderer.start(id, request)
+  }
+
+  @Keep
+  fun pollMermaidRender(id: String): String = mermaidRenderer?.poll(id)
+    ?: """{"svg":null,"error":"mermaid_render_failed"}"""
+
+  @Keep
+  fun cancelMermaidRender(id: String) { mermaidRenderer?.cancel(id) }
+
+  @Keep
+  fun cancelAllMermaidRenders() { mermaidRenderer?.cancelAll() }
+
+  override fun onDestroy() {
+    cancelAllMermaidRenders()
+    mermaidRenderer = null
+    mainWebView = null
+    super.onDestroy()
+  }
 
   override fun setContentView(view: View?) {
     if (view !is WebView) {

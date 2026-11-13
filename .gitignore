@@ -1,6 +1,7 @@
 node_modules/
 target/
 dist/
+/apps/client/dist-android-mermaid/
 .env
 .env.*
 !.env.example

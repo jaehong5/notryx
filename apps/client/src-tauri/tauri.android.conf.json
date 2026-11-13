@@ -1,0 +1,6 @@
+{
+  "build": {
+    "beforeBuildCommand": "npm run build && npm run build:mermaid-android",
+    "beforeDevCommand": "npm run build:mermaid-android && npm run dev"
+  }
+}

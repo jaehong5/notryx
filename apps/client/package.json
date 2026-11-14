@@ -8,7 +8,7 @@
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "build": "tsc --noEmit && vite build",
     "build:mermaid-android": "vite build --config vite.mermaid-android.config.ts",
-    "prepare:android": "cargo fetch --locked --target aarch64-linux-android && npm run build && npm run build:mermaid-android && python3 ../../scripts/prepare-rust-notices.py --target aarch64-linux-android --output dist-android-mermaid/rust-notices.md",
+    "prepare:android": "cargo fetch --locked && npm run build && npm run build:mermaid-android && python3 ../../scripts/prepare-rust-notices.py --target aarch64-linux-android --output dist-android-mermaid/rust-notices.md",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
   },

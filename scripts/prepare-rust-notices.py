@@ -121,7 +121,7 @@ def main():
     else:
         result = subprocess.run(
             ["cargo", "metadata", "--locked", "--offline", "--filter-platform", args.target,
-             "--format-version", "1"], cwd=ROOT, check=True, capture_output=True, text=True,
+             "--format-version", "1"], cwd=ROOT, check=True, stdout=subprocess.PIPE, text=True,
         )
         metadata = json.loads(result.stdout)
     contents = render(metadata, args.target)

@@ -3,6 +3,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -89,6 +90,25 @@ class RustNoticesTest(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(output.exists())
+
+    def test_cli_reports_cargo_metadata_failure_and_preserves_output(self):
+        bin_path = self.directory / "bin"
+        bin_path.mkdir()
+        cargo = bin_path / "cargo"
+        diagnostic = "error: synthetic metadata cache miss"
+        cargo.write_text(f"#!/bin/sh\nprintf '%s\\n' '{diagnostic}' >&2\nexit 101\n", encoding="utf-8")
+        cargo.chmod(0o755)
+        output = self.directory / "existing-notices.md"
+        original = b"Existing notices must survive failed metadata collection.\n"
+        output.write_bytes(original)
+        environment = {**os.environ, "PATH": str(bin_path) + os.pathsep + os.environ["PATH"]}
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--target", "aarch64-linux-android", "--output", str(output)],
+            env=environment, capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(diagnostic, result.stderr)
+        self.assertEqual(output.read_bytes(), original)
 
 
 if __name__ == "__main__":

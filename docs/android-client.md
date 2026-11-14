@@ -43,7 +43,7 @@ python3 scripts/check-android-apk.py \
 
 기본 release 빌드에는 배포용 서명이 없다. 위 명령의 결과는 설치 배포용 APK가 아닌 빌드 검증 자료다. `--allow-unsigned`는 서명을 검사하지 않는 개발용 옵션이다. 이 옵션이나 예상 서명자 지문을 지정하지 않으면 release 검사는 실패한다.
 
-Android 빌드와 개발 실행의 준비 단계에서 잠긴 Cargo 의존성을 먼저 가져온 뒤 `prepare-rust-notices.py --target aarch64-linux-android`를 실행한다. 고지 수집 자체는 오프라인 metadata를 사용한다. crate에 원문이 없는 항목은 버전, upstream commit과 해시를 고정한 [보충 고지](../third-party/rust/README.md)를 사용한다. Rust 일반 및 빌드 의존성을 수집하므로 실제 링크된 코드만의 목록은 아니다. Gradle 의존성이 제공하는 `META-INF` 고지도 유지한다. 고지 포함 검사는 전체 라이선스 적합성 판정을 대신하지 않는다.
+Android 빌드와 개발 실행은 클라이언트의 `prepare:android` 스크립트를 공통 준비 단계로 사용한다. 잠긴 Cargo 의존성을 먼저 가져오고 기본 프런트엔드와 Mermaid 번들을 빌드한 뒤 `prepare-rust-notices.py --target aarch64-linux-android --output dist-android-mermaid/rust-notices.md`를 실행한다. 고지 수집 자체는 오프라인 metadata를 사용한다. crate에 원문이 없는 항목은 버전, upstream commit과 해시를 고정한 [보충 고지](../third-party/rust/README.md)를 사용한다. Rust 일반 및 빌드 의존성을 수집하므로 실제 링크된 코드만의 목록은 아니다. Gradle 의존성이 제공하는 `META-INF` 고지도 유지한다. 고지 포함 검사는 전체 라이선스 적합성 판정을 대신하지 않는다.
 
 ## 배포용 APK 서명과 검증
 

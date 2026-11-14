@@ -109,8 +109,13 @@ def main():
     parser.add_argument("--metadata", type=Path,
                         help="Use already filtered Cargo metadata instead of invoking Cargo")
     parser.add_argument("--output", type=Path,
-                        default=ROOT / ".artifacts/linux-package/rust-notices.md")
+                        help="Override the target-specific notice output path")
     args = parser.parse_args()
+    default_output = {
+        TARGET: ".artifacts/linux-package/rust-notices.md",
+        "aarch64-linux-android": ".artifacts/android-package/rust-notices.md",
+    }[args.target]
+    output = args.output if args.output is not None else ROOT / default_output
     if args.metadata:
         metadata = json.loads(args.metadata.read_text(encoding="utf-8"))
     else:
@@ -120,8 +125,8 @@ def main():
         )
         metadata = json.loads(result.stdout)
     contents = render(metadata, args.target)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(contents, encoding="utf-8")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(contents, encoding="utf-8")
     print(f"Rust notices prepared for {len(dependency_packages(metadata))} dependency packages.")
 
 

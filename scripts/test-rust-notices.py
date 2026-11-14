@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).with_name("prepare-rust-notices.py")
@@ -61,6 +62,24 @@ class RustNoticesTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("# Notryx Android 클라이언트", output.read_text(encoding="utf-8"))
         self.assertIn("Copyright © 2026 Synthetic Authors", output.read_text(encoding="utf-8"))
+
+    def test_cli_default_outputs_keep_linux_and_android_notices_separate(self):
+        metadata_path = self.directory / "metadata.json"
+        metadata_path.write_text(json.dumps(self.metadata), encoding="utf-8")
+        arguments = [str(SCRIPT), "--metadata", str(metadata_path)]
+        with patch.object(notices, "ROOT", self.directory):
+            with patch.object(sys, "argv", arguments):
+                notices.main()
+            linux_output = self.directory / ".artifacts/linux-package/rust-notices.md"
+            linux_contents = linux_output.read_bytes()
+            self.assertIn(b"# Notryx Linux", linux_contents)
+
+            with patch.object(sys, "argv", arguments + ["--target", "aarch64-linux-android"]):
+                notices.main()
+            self.assertEqual(linux_output.read_bytes(), linux_contents,
+                             "Android generation must preserve Linux notices")
+            android_output = self.directory / ".artifacts/android-package/rust-notices.md"
+            self.assertIn("# Notryx Android", android_output.read_text(encoding="utf-8"))
 
     def test_cli_rejects_unsupported_target_before_writing(self):
         output = self.directory / "unsupported.md"

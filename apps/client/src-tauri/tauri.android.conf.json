@@ -1,6 +1,6 @@
 {
   "build": {
-    "beforeBuildCommand": "npm run build && npm run build:mermaid-android",
-    "beforeDevCommand": "npm run build:mermaid-android && npm run dev"
+    "beforeBuildCommand": "cargo fetch --locked --target aarch64-linux-android && npm run build && npm run build:mermaid-android && python3 ../../scripts/prepare-rust-notices.py --target aarch64-linux-android --output dist-android-mermaid/rust-notices.md",
+    "beforeDevCommand": "cargo fetch --locked --target aarch64-linux-android && npm run build && npm run build:mermaid-android && python3 ../../scripts/prepare-rust-notices.py --target aarch64-linux-android --output dist-android-mermaid/rust-notices.md && npm run dev"
   }
 }

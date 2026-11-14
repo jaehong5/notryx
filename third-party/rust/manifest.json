@@ -73,5 +73,110 @@
         "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
       }
     ]
+  },
+  "jni@0.22.4": {
+    "commit": "5ae9458a4ec44c5318f37ddc7569c1d4ae8a69e7",
+    "files": [
+      {
+        "path": "jni/LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/jni-rs/jni-rs/5ae9458a4ec44c5318f37ddc7569c1d4ae8a69e7/LICENSE-MIT",
+        "sha256": "fea1d5bf3dd71605ce5d7d2ff695c1837e914c77195e523a86b5391716477960"
+      },
+      {
+        "path": "jni/LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/jni-rs/jni-rs/5ae9458a4ec44c5318f37ddc7569c1d4ae8a69e7/LICENSE-APACHE",
+        "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+      }
+    ]
+  },
+  "jni-macros@0.22.4": {
+    "commit": "33045a124105c939d1e2cbdcb5a39e5d868ffa03",
+    "files": [
+      {
+        "path": "jni-macros/LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/jni-rs/jni-rs/33045a124105c939d1e2cbdcb5a39e5d868ffa03/LICENSE-MIT",
+        "sha256": "fea1d5bf3dd71605ce5d7d2ff695c1837e914c77195e523a86b5391716477960"
+      },
+      {
+        "path": "jni-macros/LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/jni-rs/jni-rs/33045a124105c939d1e2cbdcb5a39e5d868ffa03/LICENSE-APACHE",
+        "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+      }
+    ]
+  },
+  "jni-sys-macros@0.4.1": {
+    "commit": "64d77b7a5f119d7b55b4e2c169a4668067ff59e6",
+    "files": [
+      {
+        "path": "jni-sys/LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/jni-rs/jni-sys/64d77b7a5f119d7b55b4e2c169a4668067ff59e6/LICENSE-MIT",
+        "sha256": "1d85bd754b04ceec93e98e890edd1fa3c6a22e81bcb32135806beeccefa51cd1"
+      },
+      {
+        "path": "jni-sys/LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/jni-rs/jni-sys/64d77b7a5f119d7b55b4e2c169a4668067ff59e6/LICENSE-APACHE",
+        "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+      }
+    ]
+  },
+  "ndk@0.9.0": {
+    "commit": "49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25",
+    "files": [
+      {
+        "path": "ndk/LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/rust-mobile/ndk/49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25/LICENSE-MIT",
+        "sha256": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1"
+      },
+      {
+        "path": "ndk/LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/rust-mobile/ndk/49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25/LICENSE-APACHE",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      }
+    ]
+  },
+  "ndk-context@0.1.1": {
+    "commit": "10f2ba388fca20f7349996ebae26ccda7a6fda5c",
+    "files": [
+      {
+        "path": "ndk-context/LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/rust-windowing/android-ndk-rs/10f2ba388fca20f7349996ebae26ccda7a6fda5c/LICENSE-MIT",
+        "sha256": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1"
+      },
+      {
+        "path": "ndk-context/LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/rust-windowing/android-ndk-rs/10f2ba388fca20f7349996ebae26ccda7a6fda5c/LICENSE-APACHE",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      }
+    ]
+  },
+  "ndk-sys@0.6.0+11769913": {
+    "commit": "49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25",
+    "files": [
+      {
+        "path": "ndk/LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/rust-mobile/ndk/49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25/LICENSE-MIT",
+        "sha256": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1"
+      },
+      {
+        "path": "ndk/LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/rust-mobile/ndk/49bbbba16c58ff63cb8a0ad0eca5a9fb7ecaec25/LICENSE-APACHE",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      }
+    ]
+  },
+  "rustls-platform-verifier-android@0.2.0": {
+    "commit": "252e25161a91af476cbea620e29d277592d27ec7",
+    "files": [
+      {
+        "path": "rustls-platform-verifier/LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/rustls/rustls-platform-verifier/252e25161a91af476cbea620e29d277592d27ec7/LICENSE-MIT",
+        "sha256": "1c7cf76689c837a68ed8d704994e52a0f2940c087958f860d17f3186afbdcc0c"
+      },
+      {
+        "path": "rustls-platform-verifier/LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/rustls/rustls-platform-verifier/252e25161a91af476cbea620e29d277592d27ec7/LICENSE-APACHE",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      }
+    ]
   }
 }

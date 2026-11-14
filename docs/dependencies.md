@@ -32,3 +32,5 @@ Notryx 자체 코드와 문서는 [MIT 라이선스](../LICENSE)를 적용한다
 Linux `.deb`는 `/usr/share/doc/notryx/`에 MIT 원문, Vite가 생성한 프런트엔드 고지 및 소스 안내, Rust 의존성 고지를 포함한다. `scripts/prepare-rust-notices.py`가 잠긴 Linux 클라이언트의 일반 및 빌드 의존성을 수집한다. crate에 빠진 원문만 [고정된 보충 파일](../third-party/rust/README.md)에서 읽고 버전, commit과 해시를 확인한다. 생성 결과는 빌드 도구도 포함하며 최종 배포 감사를 대신하지 않는다. [패키지 검사](linux-client.md#패키지-검증)는 설치된 고지와 생성 원문의 일치도 확인한다.
 
 배포 준비 시에는 [Linux 배포 SBOM 안내](releases.md#배포-파일-준비)에 따라 `sbom.cdx.json`을 생성한다. 위 개발 의존성 전체 목록과 달리 Linux 클라이언트의 Rust 일반 및 빌드 의존성과 프런트엔드 번들 고지의 구성요소를 수집한다. 운영체제 라이브러리, 서버 이미지, Android와 프런트엔드 빌드 도구는 제외하며, 입력 패키지의 빌드 출처나 전체 라이선스 적합성을 증명하지 않는다.
+
+Android APK는 `assets/`에 Notryx MIT 원문, 기본 프런트엔드 및 Mermaid 번들의 고지, 소스 안내와 Android Rust 고지를 포함한다. Rust 수집기는 `--target aarch64-linux-android`로 대상을 선택한다. 2026-11-14 검토에서 Linux 419개와 Android 344개의 Rust 일반 및 빌드 의존성 고지를 생성했고, Linux의 기존 결과와 원문이 같음을 확인했다. Android 전용 crate 7개의 누락 원문도 고정된 upstream commit으로 보충했다. 이 수집 결과를 Android 전체 SBOM이나 최종 법적 적합성 판정으로 표시하지 않는다.

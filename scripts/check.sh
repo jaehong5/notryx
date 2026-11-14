@@ -10,5 +10,6 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo run --locked -p notryx-protocol --bin generate-contracts -- --check
 python3 scripts/check-boundaries.py
+python3 scripts/test-rust-notices.py
 python3 scripts/test-release-verification.py
 npm audit --audit-level=high

@@ -23,7 +23,7 @@ python3 scripts/check-android-apk.py \
   --build-type debug --output .artifacts/android-debug-check.json
 ```
 
-검사는 앱 ID, 버전 이름, 표시 이름과 시작 Activity, SDK 범위, backup 비활성화, debug와 평문 통신 설정, ARM64 라이브러리, 16 KiB 정렬과 JNI 인증정보 클래스의 포함 여부를 확인한다. debug APK는 서명 유효성도 확인한다. 결과 JSON에 파일 크기와 SHA-256을 남긴다. 설치나 실제 JNI 호출을 검사하지는 않는다.
+검사는 앱 ID, 버전 이름, 표시 이름과 시작 Activity, SDK 범위, backup 비활성화, debug와 평문 통신 설정, ARM64 라이브러리, 16 KiB 정렬과 JNI 인증정보 클래스의 포함 여부를 확인한다. APK의 `assets/`에는 Notryx MIT 원문, 프런트엔드와 Mermaid 번들의 고지 및 소스 안내, Android 대상 Rust 고지를 포함하며, 검사에서 누락되거나 빈 파일을 거절한다. debug APK는 서명 유효성도 확인한다. 결과 JSON에 파일 크기와 SHA-256을 남긴다. 설치나 실제 JNI 호출을 검사하지는 않는다.
 
 검사 결과의 `--output`에는 입력 APK와 다른 파일을 지정한다. 같은 경로, 심볼릭 링크 또는 하드 링크로 입력 APK를 가리키면 검사 전에 거절한다.
 
@@ -42,6 +42,8 @@ python3 scripts/check-android-apk.py \
 ```
 
 기본 release 빌드에는 배포용 서명이 없다. 위 명령의 결과는 설치 배포용 APK가 아닌 빌드 검증 자료다. `--allow-unsigned`는 서명을 검사하지 않는 개발용 옵션이다. 이 옵션이나 예상 서명자 지문을 지정하지 않으면 release 검사는 실패한다.
+
+Android 빌드와 개발 실행의 준비 단계에서 잠긴 Cargo 의존성을 먼저 가져온 뒤 `prepare-rust-notices.py --target aarch64-linux-android`를 실행한다. 고지 수집 자체는 오프라인 metadata를 사용한다. crate에 원문이 없는 항목은 버전, upstream commit과 해시를 고정한 [보충 고지](../third-party/rust/README.md)를 사용한다. Rust 일반 및 빌드 의존성을 수집하므로 실제 링크된 코드만의 목록은 아니다. Gradle 의존성이 제공하는 `META-INF` 고지도 유지한다. 고지 포함 검사는 전체 라이선스 적합성 판정을 대신하지 않는다.
 
 ## 배포용 APK 서명과 검증
 

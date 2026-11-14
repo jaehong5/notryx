@@ -74,6 +74,14 @@ def normalize_fingerprint(value):
     return normalized
 
 
+def inspect_notices(archive):
+    for name in ("LICENSE", "frontend-licenses.md", "third-party-licenses.md",
+                 "third-party-sources.md", "rust-notices.md"):
+        path = "assets/" + name
+        require(path in archive.namelist(), f"APK notice is missing: {name}")
+        require(bool(archive.read(path).strip()), f"APK notice is empty: {name}")
+
+
 def inspect_signature(output, expected_signer):
     expected = normalize_fingerprint(expected_signer)
     require(re.search(r"^Verified using v2 scheme \(APK Signature Scheme v2\): true$", output, re.M),
@@ -115,6 +123,7 @@ def main():
                                 run("aapt2", "dump", "xmltree", apk, "--file", "AndroidManifest.xml"),
                                 config, args.build_type)
     with zipfile.ZipFile(apk) as archive:
+        inspect_notices(archive)
         libraries = [name for name in archive.namelist() if name.startswith("lib/") and name.endswith(".so")]
         require("lib/arm64-v8a/libnotryx_client.so" in libraries, "Client native library is missing")
         require(all(name.startswith("lib/arm64-v8a/") for name in libraries), "APK includes an unexpected ABI")
@@ -136,6 +145,7 @@ def main():
     result = {**metadata, "build_type": args.build_type, "apk": apk.name,
               "bytes": apk.stat().st_size, "sha256": digest, "abi": "arm64-v8a",
               "alignment_16k": True, "credential_class_present": True,
+              "bundled_notices_present": True,
               "signature_check": "expected-signer-verified" if signer else (
                   "debug-verified" if args.build_type == "debug" else "not-checked"),
               "expected_signer_verified": signer is not None, "signer_sha256": signer,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect locked Linux client dependency notices for the Debian package."""
+"""Collect locked client dependency notices for Linux or Android packaging."""
 
 import argparse
 import hashlib
@@ -12,6 +12,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 TARGET = "x86_64-unknown-linux-gnu"
+TARGET_LABELS = {TARGET: "Linux", "aarch64-linux-android": "Android"}
 FALLBACK = ROOT / "third-party/rust"
 NOTICE_NAME = re.compile(r"^(licen[sc]e|copying|copyright|notice)(?:$|[._-])", re.I)
 
@@ -68,12 +69,12 @@ def package_notices(package, fallbacks):
     return notices
 
 
-def render(metadata):
+def render(metadata, target=TARGET):
     fallbacks = json.loads((FALLBACK / "manifest.json").read_text(encoding="utf-8"))
     packages = dependency_packages(metadata)
     lines = [
-        "# Notryx Linux 클라이언트 Rust 의존성 고지", "",
-        f"대상: `{TARGET}`. 잠긴 Cargo metadata에서 `notryx-client`의 일반 및 빌드 의존성을 수집했다.",
+        f"# Notryx {TARGET_LABELS[target]} 클라이언트 Rust 의존성 고지", "",
+        f"대상: `{target}`. 잠긴 Cargo metadata에서 `notryx-client`의 일반 및 빌드 의존성을 수집했다.",
         "개발 전용 의존성은 제외한다. 빌드 도구도 포함하므로 아래 목록이 실행 파일에 링크된 구성요소 목록과 같지는 않다.",
         "이 문서는 고지 수집 결과이며 공개 배포의 최종 라이선스 감사를 대신하지 않는다.",
         "의존성 소스는 수정하지 않았다. 각 항목의 버전 고정 소스 링크에서 원문을 받을 수 있다.",
@@ -103,6 +104,8 @@ def render(metadata):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", choices=TARGET_LABELS, default=TARGET,
+                        help="Target platform for dependency selection and notice heading")
     parser.add_argument("--metadata", type=Path,
                         help="Use already filtered Cargo metadata instead of invoking Cargo")
     parser.add_argument("--output", type=Path,
@@ -112,11 +115,11 @@ def main():
         metadata = json.loads(args.metadata.read_text(encoding="utf-8"))
     else:
         result = subprocess.run(
-            ["cargo", "metadata", "--locked", "--offline", "--filter-platform", TARGET,
+            ["cargo", "metadata", "--locked", "--offline", "--filter-platform", args.target,
              "--format-version", "1"], cwd=ROOT, check=True, capture_output=True, text=True,
         )
         metadata = json.loads(result.stdout)
-    contents = render(metadata)
+    contents = render(metadata, args.target)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(contents, encoding="utf-8")
     print(f"Rust notices prepared for {len(dependency_packages(metadata))} dependency packages.")

@@ -17,6 +17,7 @@ dist/
 *.pfx
 .DS_Store
 **/.gradle/
+**/.kotlin/
 **/build/
 **/local.properties
 apps/client/src-tauri/gen/schemas/

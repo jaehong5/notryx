@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 
 spec = importlib.util.spec_from_file_location("android_apk", Path(__file__).with_name("check-android-apk.py"))
 apk = importlib.util.module_from_spec(spec)
@@ -46,6 +47,27 @@ def elf(alignment=16384, machine=183):
 
 
 class ApkInspectionTest(unittest.TestCase):
+    def test_apk_requires_nonempty_notices_for_each_bundled_component_group(self):
+        names = ("LICENSE", "frontend-licenses.md", "third-party-licenses.md",
+                 "third-party-sources.md", "rust-notices.md")
+        for missing in names:
+            for empty in (False, True):
+                with self.subTest(missing=missing, empty=empty):
+                    content = io.BytesIO()
+                    with zipfile.ZipFile(content, "w") as archive:
+                        for name in names:
+                            if name != missing or empty:
+                                archive.writestr("assets/" + name, "" if name == missing else "Original notice")
+                    with zipfile.ZipFile(content) as archive:
+                        with self.assertRaisesRegex(ValueError, "notice"):
+                            apk.inspect_notices(archive)
+        content = io.BytesIO()
+        with zipfile.ZipFile(content, "w") as archive:
+            for name in names:
+                archive.writestr("assets/" + name, "Original notice")
+        with zipfile.ZipFile(content) as archive:
+            apk.inspect_notices(archive)
+
     def test_report_rejects_input_path_and_file_aliases_before_sdk_access(self):
         with tempfile.TemporaryDirectory(prefix="notryx-apk-output-test-") as directory:
             directory = Path(directory)
